@@ -3,3 +3,14 @@
 .env.local
 .idea/
 .vscode/
+
+# Node.js / pnpm
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
