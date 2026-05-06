@@ -1,7 +1,3 @@
-# 言語ごとのセットアップ・コマンド (例: actions/setup-node, actions/setup-python 等) は
-# プロジェクト立ち上げ時にこのファイルへ追記してください。
-# 現状はスケルトンとして、いずれのジョブも常に成功するようになっています。
-
 name: CI
 
 on:
@@ -13,26 +9,49 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
       - name: Run format check
-        run: echo "TODO: format をプロジェクトに合わせて実装してください" && exit 0
+        run: pnpm format:check
 
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
       - name: Run lint
-        run: echo "TODO: lint をプロジェクトに合わせて実装してください" && exit 0
+        run: pnpm lint
 
   unit-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
       - name: Run unit tests
-        run: echo "TODO: unit-test をプロジェクトに合わせて実装してください" && exit 0
+        run: pnpm test
 
   e2e-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Run e2e tests
-        run: echo "TODO: e2e-test をプロジェクトに合わせて実装してください" && exit 0
+        run: |
+          echo "TODO: e2e-test をプロジェクトに合わせて実装してください"
+          exit 0
