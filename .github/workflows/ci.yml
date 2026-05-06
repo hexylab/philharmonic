@@ -1,0 +1,38 @@
+# 言語ごとのセットアップ・コマンド (例: actions/setup-node, actions/setup-python 等) は
+# プロジェクト立ち上げ時にこのファイルへ追記してください。
+# 現状はスケルトンとして、いずれのジョブも常に成功するようになっています。
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run format check
+        run: echo "TODO: format をプロジェクトに合わせて実装してください" && exit 0
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run lint
+        run: echo "TODO: lint をプロジェクトに合わせて実装してください" && exit 0
+
+  unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run unit tests
+        run: echo "TODO: unit-test をプロジェクトに合わせて実装してください" && exit 0
+
+  e2e-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run e2e tests
+        run: echo "TODO: e2e-test をプロジェクトに合わせて実装してください" && exit 0
