@@ -66,8 +66,8 @@ Philharmonic は、GitHub Projects v2 のアイテムを起点に Claude Code (h
   - SDK と CLI は機能が近しいが、CLI の方が公式な配布チャネルで一本化されており、運用上扱いやすい
 - 主要な起動オプション:
   - `claude -p "<prompt>"` で non-interactive 実行
-  - `--output-format stream-json` で各 turn の発言・tool use・最終応答・コストを行区切り JSON として捕捉する
-  - `--cwd <worktree>` で worktree ごとに分離した実行
+  - `--output-format stream-json` で各 turn の発言・tool use・最終応答・コストを行区切り JSON として捕捉する。`--verbose` の同時指定が必須
+  - 作業対象ディレクトリは subprocess の `cwd` オプションで渡し、worktree ごとに分離した実行を実現する (Claude Code CLI に `--cwd` フラグは存在しないため。詳細は [docs/specs/claude-runner.md](../specs/claude-runner.md) を参照)
   - `--session-id` / `--resume` でセッションの再開を行う (将来のリトライ機能に必要)
   - `--mcp-config` で MCP サーバを注入可能にする
 

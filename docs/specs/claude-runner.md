@@ -156,7 +156,7 @@ claude -p <prompt> --output-format stream-json --verbose --permission-mode accep
 ```
 
 - `--output-format stream-json` は **`--verbose` とセットで指定する必要がある** (Claude Code 2.1.x で確認: `--output-format=stream-json requires --verbose`)
-- `--cwd` フラグは Claude Code CLI に **存在しない**。workspace path は subprocess の `cwd` オプションで渡す。`docs/adr/0001-initial-architecture.md` および `docs/specs/orchestration-mvp.md` の擬似コードに登場する `--cwd <worktree>` は本 spec で否定する (擬似コードの修正は別 Issue で行う)
+- `--cwd` フラグは Claude Code CLI に **存在しない**。workspace path は subprocess の `cwd` オプションで渡す (ADR-0001 / orchestration-mvp.md も同方針に揃えて記述済み)
 - `--dangerously-skip-permissions` は **絶対に渡さない** (Issue #6 Constraint)
 
 ## ライフサイクル
