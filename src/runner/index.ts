@@ -1,0 +1,25 @@
+export {
+  ClaudeNotInstalledError,
+  ClaudeRunnerSpawnError,
+  InvalidRunOptionsError,
+  InvalidSessionIdError,
+} from './errors.js';
+export { SENSITIVE_ENV_KEYS, SENSITIVE_ENV_PREFIXES, buildRunnerEnv } from './env.js';
+export {
+  StreamEventParser,
+  type AssistantEvent,
+  type ParseErrorEvent,
+  type ResultEvent,
+  type StreamEvent,
+  type SystemEvent,
+  type UnknownEvent,
+  type UserEvent,
+} from './stream.js';
+export { defaultSpawn, type SpawnFn, type SpawnedProcess } from './spawn.js';
+export {
+  runClaude,
+  type PermissionMode,
+  type RunClaudeOptions,
+  type RunResult,
+  type RunStatus,
+} from './runner.js';
