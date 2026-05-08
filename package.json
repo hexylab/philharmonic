@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@octokit/graphql": "^9.0.3",
+    "@octokit/rest": "^22.0.1",
     "commander": "^12.1.0",
     "js-yaml": "^4.1.0",
     "zod": "^4.4.3"
