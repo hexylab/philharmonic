@@ -1,0 +1,133 @@
+{
+  "repositoryOwner": {
+    "__typename": "User",
+    "projectV2": {
+      "id": "PVT_kwHOA_example",
+      "title": "Philharmonic Roadmap",
+      "items": {
+        "nodes": [
+          {
+            "id": "PVTI_lADOA_issue_todo",
+            "content": {
+              "__typename": "Issue",
+              "number": 4,
+              "title": "GitHub Projects v2 client の調査用 spike を実装する",
+              "url": "https://github.com/hexylab/philharmonic/issues/4",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "hexylab/philharmonic"
+              }
+            },
+            "fieldValues": {
+              "nodes": [
+                {
+                  "__typename": "ProjectV2ItemFieldTextValue"
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "name": "Todo",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "name": "Status"
+                  }
+                },
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "name": "P1",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "name": "Priority"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "id": "PVTI_lADOA_issue_in_progress",
+            "content": {
+              "__typename": "Issue",
+              "number": 5,
+              "title": "Headless Claude Code runner を実装する",
+              "url": "https://github.com/hexylab/philharmonic/issues/5",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "hexylab/philharmonic"
+              }
+            },
+            "fieldValues": {
+              "nodes": [
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "name": "In Progress",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "name": "Status"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "id": "PVTI_lADOA_issue_no_status",
+            "content": {
+              "__typename": "Issue",
+              "number": 6,
+              "title": "Status field が未設定の Issue",
+              "url": "https://github.com/hexylab/philharmonic/issues/6",
+              "state": "OPEN",
+              "repository": {
+                "nameWithOwner": "hexylab/philharmonic"
+              }
+            },
+            "fieldValues": {
+              "nodes": []
+            }
+          },
+          {
+            "id": "PVTI_lADOA_draft",
+            "content": {
+              "__typename": "DraftIssue"
+            },
+            "fieldValues": {
+              "nodes": [
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "name": "Todo",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "name": "Status"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "id": "PVTI_lADOA_pull_request",
+            "content": {
+              "__typename": "PullRequest"
+            },
+            "fieldValues": {
+              "nodes": [
+                {
+                  "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                  "name": "In Review",
+                  "field": {
+                    "__typename": "ProjectV2SingleSelectField",
+                    "name": "Status"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "id": "PVTI_lADOA_orphan",
+            "content": null,
+            "fieldValues": {
+              "nodes": []
+            }
+          }
+        ]
+      }
+    }
+  }
+}

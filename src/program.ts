@@ -1,5 +1,7 @@
 import { Command } from 'commander';
 
+import { createProjectsCommand } from './cli/projects.js';
+
 const PROGRAM_NAME = 'philharmonic';
 const PROGRAM_DESCRIPTION =
   'Coding-agent orchestrator built around GitHub Projects v2 and Claude Code (headless mode).';
@@ -12,6 +14,8 @@ export function createProgram(): Command {
     .name(PROGRAM_NAME)
     .description(PROGRAM_DESCRIPTION)
     .version(PROGRAM_VERSION, '-v, --version', 'バージョンを表示する');
+
+  program.addCommand(createProjectsCommand());
 
   return program;
 }
