@@ -14,3 +14,6 @@ coverage/
 *.log
 npm-debug.log*
 pnpm-debug.log*
+
+# Philharmonic 実行時生成物 (worktree, run ログ)
+.philharmonic/
