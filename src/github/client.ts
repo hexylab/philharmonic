@@ -6,12 +6,17 @@ import { UPDATE_PROJECT_V2_ITEM_STATUS_MUTATION } from './query.js';
 
 export type IssueState = 'open' | 'closed';
 
+export type IssueLabel = { name: string };
+export type IssueAssignee = { login: string };
+
 export type Issue = {
   number: number;
   title: string;
   body: string | null;
   state: IssueState;
   htmlUrl: string;
+  labels: IssueLabel[];
+  assignees: IssueAssignee[];
 };
 
 export type IssueComment = {
@@ -68,6 +73,8 @@ export type RestClient = {
         body: string | null | undefined;
         state: string;
         html_url: string;
+        labels?: ReadonlyArray<string | { name?: string | null | undefined }> | null | undefined;
+        assignees?: ReadonlyArray<{ login?: string | null | undefined }> | null | undefined;
       };
     }>;
     createComment(params: {
@@ -140,6 +147,8 @@ export function createGitHubClient(options: CreateGitHubClientOptions): GitHubCl
         body: data.body ?? null,
         state: data.state === 'closed' ? 'closed' : 'open',
         htmlUrl: data.html_url,
+        labels: normalizeLabels(data.labels),
+        assignees: normalizeAssignees(data.assignees),
       };
     },
 
@@ -313,4 +322,32 @@ function pickGraphqlReason(error: unknown): string | null {
     if (first !== undefined && typeof first.message === 'string') return first.message;
   }
   return null;
+}
+
+function normalizeLabels(
+  labels: ReadonlyArray<string | { name?: string | null | undefined }> | null | undefined,
+): IssueLabel[] {
+  if (labels === null || labels === undefined) return [];
+  const out: IssueLabel[] = [];
+  for (const label of labels) {
+    if (typeof label === 'string') {
+      if (label.length > 0) out.push({ name: label });
+      continue;
+    }
+    const name = label.name;
+    if (typeof name === 'string' && name.length > 0) out.push({ name });
+  }
+  return out;
+}
+
+function normalizeAssignees(
+  assignees: ReadonlyArray<{ login?: string | null | undefined }> | null | undefined,
+): IssueAssignee[] {
+  if (assignees === null || assignees === undefined) return [];
+  const out: IssueAssignee[] = [];
+  for (const a of assignees) {
+    const login = a.login;
+    if (typeof login === 'string' && login.length > 0) out.push({ login });
+  }
+  return out;
 }

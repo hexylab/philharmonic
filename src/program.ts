@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 
 import { createProjectsCommand } from './cli/projects.js';
+import { createRunCommand } from './cli/run.js';
 
 const PROGRAM_NAME = 'philharmonic';
 const PROGRAM_DESCRIPTION =
@@ -16,6 +17,7 @@ export function createProgram(): Command {
     .version(PROGRAM_VERSION, '-v, --version', 'バージョンを表示する');
 
   program.addCommand(createProjectsCommand());
+  program.addCommand(createRunCommand());
 
   return program;
 }
