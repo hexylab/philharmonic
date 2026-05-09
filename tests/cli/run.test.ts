@@ -23,6 +23,7 @@ function fakeConfig(overrides: Partial<Config> = {}): Config {
     projectNumber: 1,
     baseBranch: 'main',
     statusField: 'Status',
+    workflowFile: 'WORKFLOW.md',
     agentUserLogin: null,
     permissionMode: 'auto',
     timeoutMs: 1_800_000,
@@ -37,6 +38,12 @@ function fakeConfig(overrides: Partial<Config> = {}): Config {
     ...overrides,
   };
 }
+
+const fakeWorkflowSource = {
+  render: vi.fn(async () => 'mocked-prompt'),
+  close: vi.fn(async () => {}),
+};
+const fakeCreateWorkflowSource = vi.fn(async () => fakeWorkflowSource);
 
 const fakeGitHub: GitHubClient = {
   getIssue: vi.fn(),
@@ -110,6 +117,7 @@ describe('philharmonic run CLI コマンド', () => {
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
       createWorkspaceManager: () => fakeWorkspace,
+      createWorkflowSource: fakeCreateWorkflowSource,
       runOnce: runOnceMock,
     });
     expect(streams.stdout.write).toHaveBeenCalledWith(expect.stringContaining('no candidate'));
@@ -134,6 +142,7 @@ describe('philharmonic run CLI コマンド', () => {
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
       createWorkspaceManager: () => fakeWorkspace,
+      createWorkflowSource: fakeCreateWorkflowSource,
       runOnce: runOnceMock,
     });
     const written = streams.stdout.write.mock.calls.map((c) => c[0] as string).join('');
@@ -161,6 +170,7 @@ describe('philharmonic run CLI コマンド', () => {
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
       createWorkspaceManager: () => fakeWorkspace,
+      createWorkflowSource: fakeCreateWorkflowSource,
       runOnce: runOnceMock,
     });
     const written = streams.stderr.write.mock.calls.map((c) => c[0] as string).join('');
@@ -179,6 +189,7 @@ describe('philharmonic run CLI コマンド', () => {
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
       createWorkspaceManager: () => fakeWorkspace,
+      createWorkflowSource: fakeCreateWorkflowSource,
       runOnce: runOnceMock,
     });
     expect(runOnceMock).toHaveBeenCalledTimes(1);
@@ -201,6 +212,7 @@ describe('philharmonic run CLI コマンド', () => {
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
       createWorkspaceManager: () => fakeWorkspace,
+      createWorkflowSource: fakeCreateWorkflowSource,
       runOnce: runOnceMock,
     });
     expect(streams.stderr.write).toHaveBeenCalledWith(expect.stringContaining('In Progress'));

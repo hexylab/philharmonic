@@ -63,6 +63,11 @@ export type RetryScheduler = {
   }): Promise<RetryDecision>;
   recordSuccess(issueNumber: number): Promise<void>;
   pickReady(now: Date): Promise<RetryReadyEntry[]>;
+  /**
+   * 指定 Issue の過去 Failed 試行回数を返す (state にエントリが無ければ 0)。
+   * テンプレート変数 `attempt` の解決 (#27) に利用する。
+   */
+  getAttempts(issueNumber: number): Promise<number>;
 };
 
 export type CreateRetrySchedulerOptions = {
@@ -154,6 +159,10 @@ export function createRetryScheduler(options: CreateRetrySchedulerOptions): Retr
         }
       }
       return ready;
+    },
+    async getAttempts(issueNumber) {
+      const state = await storage.load();
+      return state.issues[String(issueNumber)]?.attempts ?? 0;
     },
   };
 }

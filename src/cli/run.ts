@@ -6,6 +6,7 @@ import {
   ConfigFileNotFoundError,
   ConfigParseError,
   ConfigValidationError,
+  DEFAULT_WORKFLOW_FILE,
   loadConfig,
   type Config,
 } from '../config/index.js';
@@ -18,6 +19,11 @@ import {
 import { createLogger, type Logger } from '../logger/index.js';
 import { BootstrapError, runOnce, type RunOnceResult } from '../orchestrator/index.js';
 import { createProjectsClient, type ProjectsClient } from '../projects/index.js';
+import {
+  createWorkflowSource,
+  type CreateWorkflowSourceOptions,
+  type WorkflowSource,
+} from '../workflow/index.js';
 import { createWorkspaceManager, type WorkspaceManager } from '../workspace/index.js';
 
 export type RunCommandDeps = {
@@ -27,6 +33,7 @@ export type RunCommandDeps = {
   createGitHubClient?: (token: string) => GitHubClient;
   createProjectsClient?: (token: string) => ProjectsClient;
   createWorkspaceManager?: (input: { repoRoot: string; workspaceRoot: string }) => WorkspaceManager;
+  createWorkflowSource?: (options: CreateWorkflowSourceOptions) => Promise<WorkflowSource>;
   runOnce?: typeof runOnce;
   stdout?: NodeJS.WritableStream;
   stderr?: NodeJS.WritableStream;
@@ -41,6 +48,7 @@ const DEFAULT_DEPS: Required<RunCommandDeps> = {
   createGitHubClient: (token) => createGitHubClient({ token }),
   createProjectsClient: (token) => createProjectsClient({ token }),
   createWorkspaceManager: (input) => createWorkspaceManager(input),
+  createWorkflowSource: (options) => createWorkflowSource(options),
   runOnce,
   stdout: process.stdout,
   stderr: process.stderr,
@@ -115,6 +123,21 @@ async function runRunCommand(
     destination: deps.stderr,
   });
 
+  // WORKFLOW.md は repoRoot 直下に解決する。`philharmonic run` は単発実行のため watch=false。
+  let workflowSource: WorkflowSource;
+  try {
+    workflowSource = await deps.createWorkflowSource({
+      workflowPath: path.resolve(repoRoot, config.workflowFile),
+      fallbackOnMissing: isDefaultWorkflowFile(config.workflowFile),
+      watch: false,
+      logger,
+    });
+  } catch (error) {
+    deps.stderr.write(`${describeError(error)}\n`);
+    deps.exit(1);
+    return;
+  }
+
   let result: RunOnceResult;
   try {
     result = await deps.runOnce({
@@ -123,11 +146,13 @@ async function runRunCommand(
       githubClient,
       projectsClient,
       workspaceManager,
+      workflowSource,
       runnerLogsRoot,
       dispatchStatuses: config.dispatchStatuses,
       logger,
     });
   } catch (error) {
+    await workflowSource.close();
     if (error instanceof BootstrapError) {
       deps.stderr.write(`${error.message}\n`);
       deps.exit(1);
@@ -137,6 +162,7 @@ async function runRunCommand(
     deps.exit(1);
     return;
   }
+  await workflowSource.close();
 
   switch (result.kind) {
     case 'no_candidate':
@@ -159,4 +185,8 @@ async function runRunCommand(
 function describeError(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+function isDefaultWorkflowFile(value: string): boolean {
+  return value === DEFAULT_WORKFLOW_FILE;
 }

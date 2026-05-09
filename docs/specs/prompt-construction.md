@@ -4,11 +4,15 @@
 
 GitHub Issue 本文の `## Goal` / `## Constraints` / `## Acceptance Criteria` セクションを抽出し、Orchestrator が追加する制約と Runner 向け Definition of Done チェックリストを末尾に連結して、Claude Code Runner に渡す prompt 文字列を 1 つ生成する **pure 関数モジュール** の仕様。orchestration-mvp.md「5. Prompt Construction」「Claude Code Runner Prompt Construction」セクションを補完する。
 
+`WORKFLOW.md` (上位レイヤ) と本モジュール (下位レイヤ) の関係は [workflow.md](./workflow.md) を参照。`WORKFLOW.md` が存在しない場合のフォールバック実装が本モジュールであり、テンプレート不在時の prompt 構造は本仕様に従う。
+
 ## 関連 Issue
 
 - #17 — Issue body から prompt を組み立てる Prompt Construction を実装する
-- 設計前提: [ADR-0001 初期アーキテクチャ](../adr/0001-initial-architecture.md)
+- #27 — WORKFLOW.md (Liquid テンプレート) を上位レイヤに導入する (本モジュールはフォールバック)
+- 設計前提: [ADR-0001 初期アーキテクチャ](../adr/0001-initial-architecture.md), [ADR-0003 prompt templating](../adr/0003-prompt-templating.md)
 - 上位フロー: [orchestration-mvp.md](./orchestration-mvp.md) の「5. Prompt Construction」「Claude Code Runner Prompt Construction」
+- 上位レイヤ: [workflow.md](./workflow.md)
 - Runner 仕様: [claude-runner.md](./claude-runner.md) (生成された prompt の受け手)
 
 ## 用語と登場アクター

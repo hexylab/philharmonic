@@ -211,6 +211,30 @@ describe('createRetryScheduler', () => {
     const after = await storage.load();
     expect(after).toEqual(before);
   });
+
+  it('getAttempts は state にエントリが無いとき 0 を返す (#27)', async () => {
+    const storage = makeMemoryStorage();
+    const scheduler = createRetryScheduler({ storage, maxAttempts: 3, maxBackoffMs: 600_000 });
+    expect(await scheduler.getAttempts(42)).toBe(0);
+  });
+
+  it('getAttempts は recordFailure の累積回数を返す (#27)', async () => {
+    const storage = makeMemoryStorage();
+    const scheduler = createRetryScheduler({ storage, maxAttempts: 3, maxBackoffMs: 600_000 });
+    await scheduler.recordFailure({ issueNumber: 7, reason: 'runner_error', now: NOW });
+    expect(await scheduler.getAttempts(7)).toBe(1);
+    await scheduler.recordFailure({ issueNumber: 7, reason: 'runner_error', now: NOW });
+    expect(await scheduler.getAttempts(7)).toBe(2);
+  });
+
+  it('getAttempts は recordSuccess 後に 0 に戻る (#27)', async () => {
+    const storage = makeMemoryStorage();
+    const scheduler = createRetryScheduler({ storage, maxAttempts: 3, maxBackoffMs: 600_000 });
+    await scheduler.recordFailure({ issueNumber: 7, reason: 'runner_error', now: NOW });
+    expect(await scheduler.getAttempts(7)).toBe(1);
+    await scheduler.recordSuccess(7);
+    expect(await scheduler.getAttempts(7)).toBe(0);
+  });
 });
 
 describe('createFileRetryStorage', () => {

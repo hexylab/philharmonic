@@ -5,11 +5,17 @@ import type { GitHubClient } from '../github/index.js';
 import type { Logger } from '../logger/index.js';
 import type { Candidate, ProjectsClient } from '../projects/index.js';
 import type { runClaude } from '../runner/index.js';
+import type { WorkflowSource } from '../workflow/index.js';
 import type { GitRunner, WorkspaceManager } from '../workspace/index.js';
 
 import { BootstrapError } from './errors.js';
 import { parseRepositoryNameWithOwner } from './repository.js';
-import { dispatchSelected, type RunOnceClock, type RunOnceResult } from './run.js';
+import {
+  dispatchSelected,
+  type ResolveAttempt,
+  type RunOnceClock,
+  type RunOnceResult,
+} from './run.js';
 import { isAcceptableIssue } from './select.js';
 import { buildIssueSlug } from './slug.js';
 import { resolveStatusOptions } from './status.js';
@@ -22,9 +28,11 @@ export type RecoveryDeps = {
   githubClient: GitHubClient;
   projectsClient: ProjectsClient;
   workspaceManager: WorkspaceManager;
+  workflowSource: WorkflowSource;
   runnerLogsRoot: string;
   signal: AbortSignal;
   remote?: string;
+  resolveAttempt?: ResolveAttempt;
   runClaude?: typeof runClaude;
   gitRunner?: GitRunner;
   logger: Logger;
@@ -230,8 +238,10 @@ export async function recoverInProgress(deps: RecoveryDeps): Promise<RecoverySum
         statusOptions,
         githubClient: deps.githubClient,
         workspaceManager: deps.workspaceManager,
+        workflowSource: deps.workflowSource,
         runnerLogsRoot: deps.runnerLogsRoot,
         remote: deps.remote,
+        resolveAttempt: deps.resolveAttempt,
         runClaude: deps.runClaude,
         gitRunner: deps.gitRunner,
         baseLogger: logger,

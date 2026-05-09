@@ -19,6 +19,7 @@ export {
   runOnce,
   type ConcurrentDispatchOutcome,
   type DispatchSelectedDeps,
+  type ResolveAttempt,
   type RunConcurrentDeps,
   type RunOnceClock,
   type RunOnceDeps,
