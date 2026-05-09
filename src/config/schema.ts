@@ -24,6 +24,8 @@ export const LOW_POLLING_INTERVAL_WARN_THRESHOLD_MS = 5_000;
 export const DEFAULT_RETRY_MAX_ATTEMPTS = 3;
 export const DEFAULT_RETRY_MAX_BACKOFF_MS = 10 * 60 * 1_000;
 export const DEFAULT_AGENT_MAX_CONCURRENT_AGENTS = 1;
+export const DEFAULT_AGENT_MAX_TURNS = 1;
+export const DEFAULT_AGENT_STALL_TIMEOUT_MS = 5 * 60 * 1_000;
 
 const pollingSchema = z
   .object({
@@ -65,10 +67,22 @@ const agentSchema = z
       .int('agent.max_concurrent_agents は整数で指定してください')
       .positive('agent.max_concurrent_agents は 1 以上で指定してください')
       .default(DEFAULT_AGENT_MAX_CONCURRENT_AGENTS),
+    max_turns: z
+      .number({ message: 'agent.max_turns は 1 以上の整数で指定してください' })
+      .int('agent.max_turns は整数で指定してください')
+      .positive('agent.max_turns は 1 以上で指定してください')
+      .default(DEFAULT_AGENT_MAX_TURNS),
+    stall_timeout_ms: z
+      .number({ message: 'agent.stall_timeout_ms は 0 以上の整数で指定してください' })
+      .int('agent.stall_timeout_ms は整数で指定してください')
+      .nonnegative('agent.stall_timeout_ms は 0 以上で指定してください')
+      .default(DEFAULT_AGENT_STALL_TIMEOUT_MS),
   })
   .strict()
   .default({
     max_concurrent_agents: DEFAULT_AGENT_MAX_CONCURRENT_AGENTS,
+    max_turns: DEFAULT_AGENT_MAX_TURNS,
+    stall_timeout_ms: DEFAULT_AGENT_STALL_TIMEOUT_MS,
   });
 
 const rawConfigSchema = z
@@ -122,6 +136,8 @@ export const configSchema = rawConfigSchema.transform((raw) => ({
   },
   agent: {
     maxConcurrentAgents: raw.agent.max_concurrent_agents,
+    maxTurns: raw.agent.max_turns,
+    stallTimeoutMs: raw.agent.stall_timeout_ms,
   },
 }));
 

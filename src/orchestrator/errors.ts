@@ -2,6 +2,7 @@ export type FailureReason =
   | 'workspace_provisioning'
   | 'runner_error'
   | 'timeout'
+  | 'stalled'
   | 'no_changes'
   | 'push'
   | 'pr_create';

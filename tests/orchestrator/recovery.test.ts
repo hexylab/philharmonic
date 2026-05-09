@@ -77,7 +77,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     logLevel: 'info',
     polling: { intervalMs: 30_000 },
     retry: { maxAttempts: 3, maxBackoffMs: 600_000 },
-    agent: { maxConcurrentAgents: 1 },
+    agent: { maxConcurrentAgents: 1, maxTurns: 1, stallTimeoutMs: 300_000 },
     ...overrides,
   };
 }

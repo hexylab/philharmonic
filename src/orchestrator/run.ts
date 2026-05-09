@@ -412,6 +412,8 @@ export async function dispatchSelected(
       permissionMode: deps.config.permissionMode,
       timeoutMs: deps.config.timeoutMs,
       killGracePeriodMs: deps.config.killGracePeriodMs,
+      maxTurns: deps.config.agent.maxTurns,
+      stallTimeoutMs: deps.config.agent.stallTimeoutMs,
       logDir: runLog.dir,
       logger,
     });
@@ -422,6 +424,9 @@ export async function dispatchSelected(
   // 7. Result Triage
   if (run.status === 'timeout') {
     return await markFailed(failureContext, 'timeout', null, run);
+  }
+  if (run.status === 'stalled') {
+    return await markFailed(failureContext, 'stalled', null, run);
   }
   if (run.status === 'failed') {
     return await markFailed(failureContext, 'runner_error', null, run);
