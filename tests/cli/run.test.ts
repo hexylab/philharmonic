@@ -17,7 +17,7 @@ function createStreams(): Streams {
   return { stdout: { write: vi.fn() }, stderr: { write: vi.fn() } };
 }
 
-function fakeConfig(): Config {
+function fakeConfig(overrides: Partial<Config> = {}): Config {
   return {
     owner: 'hexylab',
     projectNumber: 1,
@@ -28,6 +28,8 @@ function fakeConfig(): Config {
     timeoutMs: 1_800_000,
     killGracePeriodMs: 5_000,
     workspaceRoot: '.philharmonic/worktrees',
+    dispatchStatuses: ['Todo'],
+    ...overrides,
   };
 }
 
@@ -160,6 +162,23 @@ describe('philharmonic run CLI コマンド', () => {
     expect(written).toContain('failed');
     expect(written).toContain('reason=runner_error');
     expect(exit).toHaveBeenCalledWith(1);
+  });
+
+  it('config.dispatchStatuses を runOnce にそのまま引き渡す (#38)', async () => {
+    const streams = createStreams();
+    const runOnceMock = vi.fn(async (): Promise<RunOnceResult> => ({ kind: 'no_candidate' }));
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      getToken: () => 'tok',
+      loadConfig: async () => fakeConfig({ dispatchStatuses: ['Ready for Agent', 'Todo'] }),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      runOnce: runOnceMock,
+    });
+    expect(runOnceMock).toHaveBeenCalledTimes(1);
+    const arg = runOnceMock.mock.calls[0]?.[0] as { dispatchStatuses?: readonly string[] };
+    expect(arg.dispatchStatuses).toEqual(['Ready for Agent', 'Todo']);
   });
 
   it('BootstrapError が throw されたら stderr に出して exit 1', async () => {

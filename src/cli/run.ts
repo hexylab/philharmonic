@@ -127,6 +127,7 @@ async function runRunCommand(
       projectsClient,
       workspaceManager,
       runnerLogsRoot,
+      dispatchStatuses: config.dispatchStatuses,
       logger,
     });
   } catch (error) {

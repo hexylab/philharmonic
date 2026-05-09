@@ -77,7 +77,8 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
   const logger = deps.logger ?? noopLogger;
   const clock = deps.clock ?? (() => new Date());
   const remote = deps.remote ?? DEFAULT_REMOTE;
-  const dispatchStatuses = deps.dispatchStatuses ?? DEFAULT_DISPATCH_STATUSES;
+  const dispatchStatuses =
+    deps.dispatchStatuses ?? deps.config.dispatchStatuses ?? DEFAULT_DISPATCH_STATUSES;
   const gitRunner = deps.gitRunner ?? defaultGitRunner;
   const runner = deps.runClaude ?? runClaude;
   const idGen = deps.generateRunId ?? generateRunId;

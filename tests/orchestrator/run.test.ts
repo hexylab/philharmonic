@@ -101,6 +101,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     timeoutMs: 30 * 60 * 1000,
     killGracePeriodMs: 5_000,
     workspaceRoot: '.philharmonic/worktrees',
+    dispatchStatuses: ['Todo'],
     ...overrides,
   };
 }
@@ -362,6 +363,93 @@ describe('runOnce', () => {
     expect(result.reason).toBe('push');
     expect(github.createPullRequest).not.toHaveBeenCalled();
     expect(github.commentIssue).toHaveBeenCalledTimes(1);
+  });
+
+  it('dispatchStatuses を渡すと Todo 以外の Status (Ready for Agent) を dispatch できる (#38)', async () => {
+    const candidate: Candidate = {
+      ...SAMPLE_CANDIDATE,
+      itemId: 'PVTI_b',
+      status: 'Ready for Agent',
+    };
+    const projects = makeProjectsMock([candidate]);
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+
+    const result = (await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      dispatchStatuses: ['Ready for Agent'],
+      runClaude: runClaudeMock,
+      gitRunner: makeGitRunner(),
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+    })) as Extract<RunOnceResult, { kind: 'success' }>;
+
+    expect(result.kind).toBe('success');
+    expect(result.issueNumber).toBe(candidate.issueNumber);
+    expect(github.createPullRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('deps.dispatchStatuses 未指定時は config.dispatchStatuses をフォールバックに使う (#38)', async () => {
+    const candidate: Candidate = {
+      ...SAMPLE_CANDIDATE,
+      itemId: 'PVTI_cfg',
+      status: 'Ready for Agent',
+    };
+    const projects = makeProjectsMock([candidate]);
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+
+    const result = (await runOnce({
+      config: makeConfig({ dispatchStatuses: ['Ready for Agent'] }),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      runClaude: runClaudeMock,
+      gitRunner: makeGitRunner(),
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+    })) as Extract<RunOnceResult, { kind: 'success' }>;
+
+    expect(result.kind).toBe('success');
+    expect(github.createPullRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('dispatchStatuses 外の Status しかなければ no_candidate を返す (#38)', async () => {
+    const candidate: Candidate = {
+      ...SAMPLE_CANDIDATE,
+      itemId: 'PVTI_done',
+      status: 'Done',
+    };
+    const projects = makeProjectsMock([candidate]);
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+
+    const result = await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      dispatchStatuses: ['Ready for Agent', 'Todo'],
+      runClaude: vi.fn(),
+      gitRunner: makeGitRunner(),
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+    });
+
+    expect(result).toEqual({ kind: 'no_candidate' });
+    expect(github.updateProjectV2ItemStatus).not.toHaveBeenCalled();
+    expect(workspace.createWorkspace).not.toHaveBeenCalled();
   });
 
   it('PR 作成が失敗すれば reason=pr_create で Failed 遷移する', async () => {

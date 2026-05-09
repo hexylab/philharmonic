@@ -42,6 +42,18 @@ describe('selectFirstByStatus', () => {
       selectFirstByStatus({ candidates: [a, b], dispatchStatuses: ['Ready for Agent'] })?.itemId,
     ).toBe('b');
   });
+
+  it('dispatchStatuses 外の Status (In Progress / Done 等) は dispatch されない (#38)', () => {
+    const inProgress = makeCandidate({ itemId: 'a', status: 'In Progress' });
+    const done = makeCandidate({ itemId: 'b', status: 'Done' });
+    const todo = makeCandidate({ itemId: 'c', status: 'Todo' });
+    expect(
+      selectFirstByStatus({
+        candidates: [inProgress, done, todo],
+        dispatchStatuses: ['Ready for Agent'],
+      }),
+    ).toBeNull();
+  });
 });
 
 describe('isAcceptableIssue', () => {
