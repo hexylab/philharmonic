@@ -12,7 +12,13 @@ import { ConfigFileNotFoundError } from '../../src/config/index.js';
 import { GitHubTokenNotSetError, type GitHubClient } from '../../src/github/index.js';
 import type { RunOnceResult } from '../../src/orchestrator/index.js';
 import type { ProjectsClient } from '../../src/projects/index.js';
-import { ServeLockHeldError, type ServeLockHandle } from '../../src/serve/index.js';
+import {
+  ServeLockHeldError,
+  type RetryDecision,
+  type RetryReadyEntry,
+  type RetryScheduler,
+  type ServeLockHandle,
+} from '../../src/serve/index.js';
 import type { WorkspaceManager } from '../../src/workspace/index.js';
 
 type Streams = {
@@ -39,6 +45,7 @@ function fakeConfig(overrides: Partial<Config> = {}): Config {
     cleanRetentionDays: 7,
     logLevel: 'info',
     polling: { intervalMs: 30_000 },
+    retry: { maxAttempts: 3, maxBackoffMs: 600_000 },
     ...overrides,
   };
 }
@@ -537,6 +544,162 @@ describe('philharmonic serve CLI コマンド', () => {
       'recovery aborted',
       expect.objectContaining({ error: 'boom' }),
     );
+  });
+
+  it('runOnce が failed を返すと scheduler.recordFailure を呼ぶ (retry スケジュール)', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const recordFailure = vi.fn(
+      async (): Promise<RetryDecision> => ({
+        kind: 'scheduled',
+        attempts: 1,
+        backoffMs: 10_000,
+        nextAttemptAt: new Date('2026-05-09T00:00:10Z'),
+      }),
+    );
+    const recordSuccess = vi.fn(async () => undefined);
+    const pickReady = vi.fn(async (): Promise<RetryReadyEntry[]> => []);
+    const scheduler: RetryScheduler = { recordFailure, recordSuccess, pickReady };
+
+    const runOnceMock = vi.fn(
+      async (): Promise<RunOnceResult> => ({
+        kind: 'failed',
+        runId: 'rid-1',
+        issueNumber: 42,
+        reason: 'runner_error',
+        branch: 'feature/42-x',
+      }),
+    );
+    const promoteSpy = vi.fn(async () => ({ ready: 0, promoted: 0, skipped: 0, failed: 0 }));
+
+    const serveLoopMock = vi.fn(
+      async (deps: { runOnce: () => Promise<RunOnceResult>; signal: AbortSignal }) => {
+        await deps.runOnce();
+        subscription.emit('SIGTERM');
+        await new Promise<void>((resolve) => {
+          if (deps.signal.aborted) resolve();
+          else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+      },
+    );
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      getToken: () => 'tok',
+      loadConfig: async () => fakeConfig(),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: runOnceMock as never,
+      serveLoop: serveLoopMock as never,
+      promoteRetryReady: promoteSpy as never,
+      createRetryScheduler: () => scheduler,
+      createSignalSubscription: () => subscription,
+    });
+
+    expect(promoteSpy).toHaveBeenCalledTimes(1);
+    expect(recordFailure).toHaveBeenCalledTimes(1);
+    expect(recordFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ issueNumber: 42, reason: 'runner_error' }),
+    );
+    expect(recordSuccess).not.toHaveBeenCalled();
+  });
+
+  it('runOnce が success を返すと scheduler.recordSuccess を呼ぶ (retry-state クリア)', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const recordFailure = vi.fn();
+    const recordSuccess = vi.fn(async () => undefined);
+    const pickReady = vi.fn(async (): Promise<RetryReadyEntry[]> => []);
+    const scheduler: RetryScheduler = { recordFailure, recordSuccess, pickReady };
+
+    const runOnceMock = vi.fn(
+      async (): Promise<RunOnceResult> => ({
+        kind: 'success',
+        runId: 'rid-1',
+        issueNumber: 99,
+        prNumber: 7,
+        branch: 'feature/99-x',
+      }),
+    );
+
+    const serveLoopMock = vi.fn(
+      async (deps: { runOnce: () => Promise<RunOnceResult>; signal: AbortSignal }) => {
+        await deps.runOnce();
+        subscription.emit('SIGTERM');
+        await new Promise<void>((resolve) => {
+          if (deps.signal.aborted) resolve();
+          else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+      },
+    );
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      getToken: () => 'tok',
+      loadConfig: async () => fakeConfig(),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: runOnceMock as never,
+      serveLoop: serveLoopMock as never,
+      promoteRetryReady: vi.fn(async () => ({
+        ready: 0,
+        promoted: 0,
+        skipped: 0,
+        failed: 0,
+      })) as never,
+      createRetryScheduler: () => scheduler,
+      createSignalSubscription: () => subscription,
+    });
+
+    expect(recordSuccess).toHaveBeenCalledWith(99);
+    expect(recordFailure).not.toHaveBeenCalled();
+  });
+
+  it('promoteRetryReady を runOnce より前に呼ぶ', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const callOrder: string[] = [];
+    const promoteSpy = vi.fn(async () => {
+      callOrder.push('promote');
+      return { ready: 0, promoted: 0, skipped: 0, failed: 0 };
+    });
+    const runOnceMock = vi.fn(async () => {
+      callOrder.push('runOnce');
+      return { kind: 'no_candidate' as const };
+    });
+    const serveLoopMock = vi.fn(
+      async (deps: { runOnce: () => Promise<RunOnceResult>; signal: AbortSignal }) => {
+        await deps.runOnce();
+        subscription.emit('SIGTERM');
+        await new Promise<void>((resolve) => {
+          if (deps.signal.aborted) resolve();
+          else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+      },
+    );
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      getToken: () => 'tok',
+      loadConfig: async () => fakeConfig(),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: runOnceMock as never,
+      serveLoop: serveLoopMock as never,
+      promoteRetryReady: promoteSpy as never,
+      createSignalSubscription: () => subscription,
+    });
+
+    expect(callOrder).toEqual(['promote', 'runOnce']);
   });
 
   it('polling.intervalMs >= 5000ms なら警告ログを出さない', async () => {

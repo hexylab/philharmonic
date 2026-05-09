@@ -21,6 +21,8 @@ export const MIN_POLLING_INTERVAL_MS = 1_000;
  * 警告ログを 1 行出して GitHub API rate limit への注意を促す。
  */
 export const LOW_POLLING_INTERVAL_WARN_THRESHOLD_MS = 5_000;
+export const DEFAULT_RETRY_MAX_ATTEMPTS = 3;
+export const DEFAULT_RETRY_MAX_BACKOFF_MS = 10 * 60 * 1_000;
 
 const pollingSchema = z
   .object({
@@ -35,6 +37,25 @@ const pollingSchema = z
   })
   .strict()
   .default({ interval_ms: DEFAULT_POLLING_INTERVAL_MS });
+
+const retrySchema = z
+  .object({
+    max_attempts: z
+      .number({ message: 'retry.max_attempts は 0 以上の整数で指定してください' })
+      .int('retry.max_attempts は整数で指定してください')
+      .nonnegative('retry.max_attempts は 0 以上で指定してください')
+      .default(DEFAULT_RETRY_MAX_ATTEMPTS),
+    max_backoff_ms: z
+      .number({ message: 'retry.max_backoff_ms は正の整数で指定してください' })
+      .int('retry.max_backoff_ms は整数で指定してください')
+      .positive('retry.max_backoff_ms は 1 以上で指定してください')
+      .default(DEFAULT_RETRY_MAX_BACKOFF_MS),
+  })
+  .strict()
+  .default({
+    max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
+    max_backoff_ms: DEFAULT_RETRY_MAX_BACKOFF_MS,
+  });
 
 const rawConfigSchema = z
   .object({
@@ -60,6 +81,7 @@ const rawConfigSchema = z
       .default(DEFAULT_CLEAN_RETENTION_DAYS),
     log_level: z.enum(LOG_LEVELS).default(DEFAULT_LOG_LEVEL),
     polling: pollingSchema,
+    retry: retrySchema,
   })
   .strict();
 
@@ -78,6 +100,10 @@ export const configSchema = rawConfigSchema.transform((raw) => ({
   logLevel: raw.log_level,
   polling: {
     intervalMs: raw.polling.interval_ms,
+  },
+  retry: {
+    maxAttempts: raw.retry.max_attempts,
+    maxBackoffMs: raw.retry.max_backoff_ms,
   },
 }));
 

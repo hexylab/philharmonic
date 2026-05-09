@@ -18,6 +18,7 @@ import {
 } from '../github/index.js';
 import { createLogger, type Logger } from '../logger/index.js';
 import {
+  promoteRetryReady,
   recoverInProgress,
   runOnce,
   serveLoop,
@@ -26,9 +27,14 @@ import {
 import { createProjectsClient, type ProjectsClient } from '../projects/index.js';
 import {
   acquireServeLock,
+  createFileRetryStorage,
+  createRetryScheduler,
+  DEFAULT_RETRY_STATE_RELATIVE,
   ServeLockHeldError,
   ServeLockHeldOnDifferentHostError,
   type AcquireServeLockOptions,
+  type RetryDecision,
+  type RetryScheduler,
   type ServeLockHandle,
 } from '../serve/index.js';
 import { createWorkspaceManager, type WorkspaceManager } from '../workspace/index.js';
@@ -66,6 +72,8 @@ export type ServeCommandDeps = {
   runOnce?: typeof runOnce;
   serveLoop?: typeof serveLoop;
   recoverInProgress?: typeof recoverInProgress;
+  promoteRetryReady?: typeof promoteRetryReady;
+  createRetryScheduler?: (repoRoot: string, config: Config, logger: Logger) => RetryScheduler;
   createSignalSubscription?: CreateServeSignalSubscription;
   stdout?: NodeJS.WritableStream;
   stderr?: NodeJS.WritableStream;
@@ -85,6 +93,16 @@ const DEFAULT_DEPS: Required<ServeCommandDeps> = {
   runOnce,
   serveLoop,
   recoverInProgress,
+  promoteRetryReady,
+  createRetryScheduler: (repoRoot, config, logger) =>
+    createRetryScheduler({
+      storage: createFileRetryStorage({
+        filePath: path.resolve(repoRoot, DEFAULT_RETRY_STATE_RELATIVE),
+        logger,
+      }),
+      maxAttempts: config.retry.maxAttempts,
+      maxBackoffMs: config.retry.maxBackoffMs,
+    }),
   createSignalSubscription: createProcessSignalSubscription,
   stdout: process.stdout,
   stderr: process.stderr,
@@ -221,8 +239,27 @@ async function runServeCommand(
   subscription.on('SIGTERM', onSignal);
   subscription.on('SIGINT', onSignal);
 
-  const wrappedRunOnce = (): Promise<RunOnceResult> =>
-    deps.runOnce({
+  const retryScheduler = deps.createRetryScheduler(repoRoot, config, logger);
+
+  const wrappedRunOnce = async (): Promise<RunOnceResult> => {
+    // 1) retry-state にあって nextAttemptAt 到達済みの Item を Failed → Todo に戻す
+    //    state が空なら fetch を行わずに early return される (#22)
+    try {
+      await deps.promoteRetryReady({
+        config,
+        scheduler: retryScheduler,
+        projectsClient,
+        githubClient,
+        logger,
+      });
+    } catch (error) {
+      logger.warn('retry promote エラー (次 tick で再試行します)', {
+        error: describeError(error),
+      });
+    }
+
+    // 2) 通常 dispatch
+    const result = await deps.runOnce({
       config,
       repoRoot,
       githubClient,
@@ -232,6 +269,27 @@ async function runServeCommand(
       dispatchStatuses: config.dispatchStatuses,
       logger,
     });
+
+    // 3) 成功時は retry-state から削除、失敗時は attempts++ で再 schedule
+    try {
+      if (result.kind === 'success') {
+        await retryScheduler.recordSuccess(result.issueNumber);
+      } else if (result.kind === 'failed') {
+        const decision = await retryScheduler.recordFailure({
+          issueNumber: result.issueNumber,
+          reason: result.reason,
+          now: new Date(),
+        });
+        logRetryDecision(logger, result.runId, result.issueNumber, result.reason, decision);
+      }
+    } catch (error) {
+      logger.warn('retry scheduler の更新に失敗 (state ファイル I/O エラー)', {
+        error: describeError(error),
+      });
+    }
+
+    return result;
+  };
 
   try {
     // Recovery フェーズ: 前回プロセスのクラッシュ等で In Progress のまま残った Item を引き取る
@@ -284,6 +342,38 @@ function createProcessSignalSubscription(): ServeSignalSubscription {
       handlers.length = 0;
     },
   };
+}
+
+function logRetryDecision(
+  logger: Logger,
+  runId: string,
+  issueNumber: number,
+  reason: string,
+  decision: RetryDecision,
+): void {
+  switch (decision.kind) {
+    case 'scheduled':
+      logger.info('retry scheduled', {
+        runId,
+        issueNumber,
+        attempts: decision.attempts,
+        backoffMs: decision.backoffMs,
+        nextAttemptAt: decision.nextAttemptAt.toISOString(),
+        reason,
+      });
+      return;
+    case 'gave_up':
+      logger.info('retry gave up (max attempts reached)', {
+        runId,
+        issueNumber,
+        attempts: decision.attempts,
+        reason,
+      });
+      return;
+    case 'disabled':
+      // retry 機能無効化時はログを出さない (Failed のまま放置するという既存挙動と等価)
+      return;
+  }
 }
 
 function describeError(error: unknown): string {
