@@ -15,12 +15,8 @@ import {
   getGitHubTokenFromEnv,
   type GitHubClient,
 } from '../github/index.js';
-import {
-  BootstrapError,
-  runOnce,
-  type RunOnceLogger,
-  type RunOnceResult,
-} from '../orchestrator/index.js';
+import { createLogger, type Logger } from '../logger/index.js';
+import { BootstrapError, runOnce, type RunOnceResult } from '../orchestrator/index.js';
 import { createProjectsClient, type ProjectsClient } from '../projects/index.js';
 import { createWorkspaceManager, type WorkspaceManager } from '../workspace/index.js';
 
@@ -34,6 +30,7 @@ export type RunCommandDeps = {
   runOnce?: typeof runOnce;
   stdout?: NodeJS.WritableStream;
   stderr?: NodeJS.WritableStream;
+  createLogger?: typeof createLogger;
   exit?: (code: number) => never;
 };
 
@@ -47,6 +44,7 @@ const DEFAULT_DEPS: Required<RunCommandDeps> = {
   runOnce,
   stdout: process.stdout,
   stderr: process.stderr,
+  createLogger,
   exit: (code) => process.exit(code) as never,
 };
 
@@ -112,11 +110,10 @@ async function runRunCommand(
   });
   const runnerLogsRoot = path.resolve(repoRoot, '.philharmonic/runs');
 
-  const logger: RunOnceLogger = {
-    info: (message, fields) => writeLog(deps.stdout, 'INFO', message, fields),
-    warn: (message, fields) => writeLog(deps.stderr, 'WARN', message, fields),
-    error: (message, fields) => writeLog(deps.stderr, 'ERROR', message, fields),
-  };
+  const logger: Logger = deps.createLogger({
+    level: config.logLevel,
+    destination: deps.stderr,
+  });
 
   let result: RunOnceResult;
   try {
@@ -157,17 +154,6 @@ async function runRunCommand(
       deps.exit(1);
       return;
   }
-}
-
-function writeLog(
-  stream: NodeJS.WritableStream,
-  level: string,
-  message: string,
-  fields: Record<string, unknown> | undefined,
-): void {
-  const suffix =
-    fields !== undefined && Object.keys(fields).length > 0 ? ` ${JSON.stringify(fields)}` : '';
-  stream.write(`[${level}] ${message}${suffix}\n`);
 }
 
 function describeError(error: unknown): string {

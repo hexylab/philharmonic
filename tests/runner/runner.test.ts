@@ -282,6 +282,82 @@ describe('runClaude — result aggregation', () => {
   });
 });
 
+describe('runClaude — logger integration (#28)', () => {
+  type LogCall = { level: string; message: string; fields: Record<string, unknown> };
+
+  function makeFakeLogger(initialBindings: Record<string, unknown> = {}) {
+    const calls: LogCall[] = [];
+    const make = (bindings: Record<string, unknown>) => {
+      const log = (level: string) => (msg: string, fields?: Record<string, unknown>) => {
+        calls.push({ level, message: msg, fields: { ...bindings, ...fields } });
+      };
+      return {
+        level: 'debug' as const,
+        debug: log('debug'),
+        info: log('info'),
+        warn: log('warn'),
+        error: log('error'),
+        child: (extra: Record<string, unknown>) => make({ ...bindings, ...extra }),
+      };
+    };
+    return { logger: make(initialBindings), calls };
+  }
+
+  it('logger 未指定でも例外を起こさず通常完了する', async () => {
+    const { spawn, calls } = createSpawnFn();
+    const promise = runClaude(baseOptions({ spawn }));
+    const call = await waitForSpawn(calls);
+    call.child.stdout.write(fixture('stream-success.jsonl'));
+    call.child.stdout.end();
+    call.child.emit('close', 0, null);
+    await promise;
+  });
+
+  it('runner started / finished のログが logger 経由で出る', async () => {
+    const { spawn, calls } = createSpawnFn();
+    const { logger, calls: logCalls } = makeFakeLogger({ runId: 'r1' });
+    const promise = runClaude(baseOptions({ spawn, logger }));
+    const call = await waitForSpawn(calls);
+    call.child.stdout.write(fixture('stream-success.jsonl'));
+    call.child.stdout.end();
+    call.child.emit('close', 0, null);
+    await promise;
+
+    const messages = logCalls.map((c) => c.message);
+    expect(messages).toContain('runner started');
+    expect(messages).toContain('runner finished');
+  });
+
+  it('system event の session_id を取得して以降のログに付与する', async () => {
+    const { spawn, calls } = createSpawnFn();
+    const { logger, calls: logCalls } = makeFakeLogger({ runId: 'r1' });
+    const promise = runClaude(baseOptions({ spawn, logger }));
+    const call = await waitForSpawn(calls);
+    call.child.stdout.write(fixture('stream-success.jsonl'));
+    call.child.stdout.end();
+    call.child.emit('close', 0, null);
+    await promise;
+
+    const finishedCall = logCalls.find((c) => c.message === 'runner finished');
+    expect(finishedCall).toBeDefined();
+    expect(finishedCall?.fields.runId).toBe('r1');
+    expect(finishedCall?.fields.sessionId).toBe('74fb7504-6563-4222-bafb-cf9a161003bb');
+  });
+
+  it('spawn が同期で失敗したときは runner spawn failed をログに残す', async () => {
+    const enoent = Object.assign(new Error("spawn 'claude' ENOENT"), { code: 'ENOENT' });
+    const spawn: SpawnFn = () => {
+      throw enoent;
+    };
+    const { logger, calls: logCalls } = makeFakeLogger({ runId: 'r1' });
+    await expect(runClaude(baseOptions({ spawn, logger }))).rejects.toBeInstanceOf(
+      ClaudeNotInstalledError,
+    );
+    const messages = logCalls.map((c) => c.message);
+    expect(messages).toContain('runner spawn failed');
+  });
+});
+
 describe('runClaude — timeout', () => {
   beforeEach(() => {
     vi.useFakeTimers();

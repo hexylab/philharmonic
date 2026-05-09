@@ -13,6 +13,7 @@ import type {
   UpdateProjectV2ItemStatusInput,
   UpdateProjectV2ItemStatusResult,
 } from '../../src/github/index.js';
+import type { LogFields, Logger } from '../../src/logger/index.js';
 import { runOnce, type RunOnceResult } from '../../src/orchestrator/index.js';
 import type { Candidate, ProjectMetadata, ProjectsClient } from '../../src/projects/index.js';
 import type { RunResult } from '../../src/runner/index.js';
@@ -102,6 +103,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     killGracePeriodMs: 5_000,
     workspaceRoot: '.philharmonic/worktrees',
     dispatchStatuses: ['Todo'],
+    cleanRetentionDays: 7,
+    logLevel: 'info',
     ...overrides,
   };
 }
@@ -164,6 +167,52 @@ function makeProjectsMock(
     fetchProjectCandidates: vi.fn(async () => candidates),
     fetchProjectMetadata: vi.fn(async () => metadata),
   };
+}
+
+type FakeLogger = Logger & {
+  debug: ReturnType<typeof vi.fn>;
+  info: ReturnType<typeof vi.fn>;
+  warn: ReturnType<typeof vi.fn>;
+  error: ReturnType<typeof vi.fn>;
+  bindings: LogFields;
+};
+
+function makeFakeLogger(bindings: LogFields = {}): FakeLogger {
+  const debug = vi.fn();
+  const info = vi.fn();
+  const warn = vi.fn();
+  const error = vi.fn();
+  const fake: FakeLogger = {
+    level: 'debug',
+    bindings,
+    debug,
+    info,
+    warn,
+    error,
+    child: (childBindings: LogFields) =>
+      makeChildLogger({ debug, info, warn, error }, { ...bindings, ...childBindings }),
+  };
+  return fake;
+}
+
+type SharedFns = {
+  debug: ReturnType<typeof vi.fn>;
+  info: ReturnType<typeof vi.fn>;
+  warn: ReturnType<typeof vi.fn>;
+  error: ReturnType<typeof vi.fn>;
+};
+
+function makeChildLogger(fns: SharedFns, bindings: LogFields): FakeLogger {
+  const fake: FakeLogger = {
+    level: 'debug',
+    bindings,
+    debug: fns.debug,
+    info: fns.info,
+    warn: fns.warn,
+    error: fns.error,
+    child: (childBindings: LogFields) => makeChildLogger(fns, { ...bindings, ...childBindings }),
+  };
+  return fake;
 }
 
 function makeWorkspaceMock(workspacePath: string): WorkspaceMock {
@@ -457,7 +506,7 @@ describe('runOnce', () => {
     const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
     const runClaudeMock = vi.fn(async () => makeRunResult());
-    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const logger = makeFakeLogger();
 
     const result = (await runOnce({
       config: makeConfig({ permissionMode: 'bypass' }),
@@ -488,7 +537,7 @@ describe('runOnce', () => {
     const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
     const runClaudeMock = vi.fn(async () => makeRunResult());
-    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const logger = makeFakeLogger();
 
     await runOnce({
       config: makeConfig({ permissionMode: 'auto' }),
@@ -509,6 +558,64 @@ describe('runOnce', () => {
     );
     const warnMessages = logger.warn.mock.calls.map((c) => c[0] as string);
     expect(warnMessages.some((m) => m.includes('permission_mode=bypass'))).toBe(false);
+  });
+
+  it('runOnce は runId / issueNumber を child logger の bindings に注入する (#28)', async () => {
+    const projects = makeProjectsMock();
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+    const baseLogger = makeFakeLogger();
+
+    const childCalls: LogFields[] = [];
+    const baseChild = baseLogger.child.bind(baseLogger);
+    baseLogger.child = (bindings: LogFields) => {
+      childCalls.push(bindings);
+      return baseChild(bindings);
+    };
+
+    await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      runClaude: runClaudeMock,
+      gitRunner: makeGitRunner(),
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      logger: baseLogger,
+    });
+
+    expect(childCalls.some((b) => b.runId === FIXED_RUN_ID && b.issueNumber === 19)).toBe(true);
+  });
+
+  it('runOnce は runClaude に同じ logger を渡す (session_id 付与のため) (#28)', async () => {
+    const projects = makeProjectsMock();
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+    const logger = makeFakeLogger();
+
+    await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      runClaude: runClaudeMock,
+      gitRunner: makeGitRunner(),
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      logger,
+    });
+
+    expect(runClaudeMock).toHaveBeenCalledTimes(1);
+    const call = runClaudeMock.mock.calls[0]?.[0] as { logger?: Logger };
+    expect(call.logger).toBeDefined();
+    expect(typeof call.logger?.child).toBe('function');
   });
 
   it('PR 作成が失敗すれば reason=pr_create で Failed 遷移する', async () => {
