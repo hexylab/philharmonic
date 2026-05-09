@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   configSchema,
   DEFAULT_BASE_BRANCH,
+  DEFAULT_CLEAN_RETENTION_DAYS,
   DEFAULT_DISPATCH_STATUSES,
   DEFAULT_KILL_GRACE_PERIOD_MS,
   DEFAULT_PERMISSION_MODE,
@@ -26,6 +27,7 @@ describe('configSchema', () => {
       killGracePeriodMs: DEFAULT_KILL_GRACE_PERIOD_MS,
       workspaceRoot: DEFAULT_WORKSPACE_ROOT,
       dispatchStatuses: [...DEFAULT_DISPATCH_STATUSES],
+      cleanRetentionDays: DEFAULT_CLEAN_RETENTION_DAYS,
     });
   });
 
@@ -41,6 +43,7 @@ describe('configSchema', () => {
       kill_grace_period_ms: 1_000,
       workspace_root: '.tmp/worktrees',
       dispatch_statuses: ['Ready for Agent', 'Todo'],
+      clean_retention_days: 14,
     });
 
     expect(parsed.owner).toBe('hexylab');
@@ -53,6 +56,7 @@ describe('configSchema', () => {
     expect(parsed.killGracePeriodMs).toBe(1_000);
     expect(parsed.workspaceRoot).toBe('.tmp/worktrees');
     expect(parsed.dispatchStatuses).toEqual(['Ready for Agent', 'Todo']);
+    expect(parsed.cleanRetentionDays).toBe(14);
   });
 
   it('owner が空文字だと検証エラーになる', () => {
@@ -175,5 +179,28 @@ describe('configSchema', () => {
       dispatch_statuses: ['Ready for Agent', 'Todo'],
     });
     expect(parsed.dispatchStatuses).toEqual(['Ready for Agent', 'Todo']);
+  });
+
+  it('clean_retention_days 未指定時はデフォルト値 (7) が補完される', () => {
+    const parsed = configSchema.parse({ owner: 'hexylab', project_number: 1 });
+    expect(parsed.cleanRetentionDays).toBe(DEFAULT_CLEAN_RETENTION_DAYS);
+  });
+
+  it('clean_retention_days は 0 を許可する (即時削除相当)', () => {
+    const parsed = configSchema.parse({
+      owner: 'hexylab',
+      project_number: 1,
+      clean_retention_days: 0,
+    });
+    expect(parsed.cleanRetentionDays).toBe(0);
+  });
+
+  it('clean_retention_days が負数だと検証エラーになる', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      clean_retention_days: -1,
+    });
+    expect(result.success).toBe(false);
   });
 });

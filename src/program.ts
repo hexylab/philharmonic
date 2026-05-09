@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 
+import { createCleanCommand } from './cli/clean.js';
 import { createProjectsCommand } from './cli/projects.js';
 import { createRunCommand } from './cli/run.js';
 
@@ -18,6 +19,7 @@ export function createProgram(): Command {
 
   program.addCommand(createProjectsCommand());
   program.addCommand(createRunCommand());
+  program.addCommand(createCleanCommand());
 
   return program;
 }

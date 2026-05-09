@@ -9,6 +9,7 @@ export const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 export const DEFAULT_KILL_GRACE_PERIOD_MS = 5_000;
 export const DEFAULT_WORKSPACE_ROOT = '.philharmonic/worktrees';
 export const DEFAULT_DISPATCH_STATUSES: readonly string[] = ['Todo'];
+export const DEFAULT_CLEAN_RETENTION_DAYS = 7;
 
 const rawConfigSchema = z
   .object({
@@ -28,6 +29,10 @@ const rawConfigSchema = z
       .array(z.string().min(1, 'dispatch_statuses の各要素は空文字以外で指定してください'))
       .min(1, 'dispatch_statuses は 1 件以上の文字列配列で指定してください')
       .default([...DEFAULT_DISPATCH_STATUSES]),
+    clean_retention_days: z
+      .number({ message: 'clean_retention_days は 0 以上の数値で指定してください' })
+      .nonnegative('clean_retention_days は 0 以上で指定してください')
+      .default(DEFAULT_CLEAN_RETENTION_DAYS),
   })
   .strict();
 
@@ -42,6 +47,7 @@ export const configSchema = rawConfigSchema.transform((raw) => ({
   killGracePeriodMs: raw.kill_grace_period_ms,
   workspaceRoot: raw.workspace_root,
   dispatchStatuses: raw.dispatch_statuses,
+  cleanRetentionDays: raw.clean_retention_days,
 }));
 
 export type Config = z.infer<typeof configSchema>;

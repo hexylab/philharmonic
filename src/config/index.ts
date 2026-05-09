@@ -9,6 +9,7 @@ export { loadConfig, type LoadConfigOptions } from './loader.js';
 export {
   configSchema,
   DEFAULT_BASE_BRANCH,
+  DEFAULT_CLEAN_RETENTION_DAYS,
   DEFAULT_CONFIG_FILE,
   DEFAULT_DISPATCH_STATUSES,
   DEFAULT_KILL_GRACE_PERIOD_MS,
