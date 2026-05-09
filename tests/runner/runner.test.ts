@@ -386,4 +386,92 @@ describe('runClaude — timeout', () => {
     expect(result.status).toBe('timeout');
     expect(result.signal).toBe('SIGKILL');
   });
+
+  it('child.pid がある場合は process group kill (killProcessGroup) を使う', async () => {
+    const { spawn, calls } = createSpawnFn();
+    const killGroup = vi.fn();
+    const promise = runClaude(
+      baseOptions({
+        spawn,
+        timeoutMs: 1000,
+        killGracePeriodMs: 200,
+        killProcessGroup: killGroup,
+      }),
+    );
+    const call = await waitForSpawn(calls);
+    const child = call.child;
+    // FakeChild に pid を仕込む (実 spawn と同じ挙動)
+    (child as unknown as { pid: number }).pid = 12345;
+
+    expect(killGroup).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(killGroup).toHaveBeenCalledWith(12345, 'SIGTERM');
+    expect(child.kill).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(200);
+    expect(killGroup).toHaveBeenCalledWith(12345, 'SIGKILL');
+    expect(child.kill).not.toHaveBeenCalled();
+
+    child.emit('close', null, 'SIGKILL');
+    const result = await promise;
+    expect(result.status).toBe('timeout');
+    expect(killGroup).toHaveBeenCalledTimes(2);
+  });
+
+  it('killProcessGroup が throw したら child.kill にフォールバックする', async () => {
+    const { spawn, calls } = createSpawnFn();
+    const killGroup = vi.fn(() => {
+      throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    });
+    const promise = runClaude(
+      baseOptions({
+        spawn,
+        timeoutMs: 1000,
+        killGracePeriodMs: 200,
+        killProcessGroup: killGroup,
+      }),
+    );
+    const call = await waitForSpawn(calls);
+    const child = call.child;
+    (child as unknown as { pid: number }).pid = 12345;
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(killGroup).toHaveBeenCalledWith(12345, 'SIGTERM');
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+
+    await vi.advanceTimersByTimeAsync(200);
+    expect(killGroup).toHaveBeenCalledWith(12345, 'SIGKILL');
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+
+    child.emit('close', null, 'SIGKILL');
+    await promise;
+  });
+
+  it('child.pid が undefined のときは child.kill にフォールバック', async () => {
+    const { spawn, calls } = createSpawnFn();
+    const killGroup = vi.fn();
+    const promise = runClaude(
+      baseOptions({
+        spawn,
+        timeoutMs: 1000,
+        killGracePeriodMs: 200,
+        killProcessGroup: killGroup,
+      }),
+    );
+    const call = await waitForSpawn(calls);
+    const child = call.child;
+    // pid は仕込まない (undefined)
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(killGroup).not.toHaveBeenCalled();
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+
+    await vi.advanceTimersByTimeAsync(200);
+    expect(killGroup).not.toHaveBeenCalled();
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+
+    child.emit('close', null, 'SIGKILL');
+    await promise;
+  });
 });

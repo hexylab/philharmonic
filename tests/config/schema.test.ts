@@ -262,6 +262,28 @@ describe('configSchema', () => {
     }
   });
 
+  it('polling.interval_ms が下限 (1000ms) 未満だと検証エラーになる (Issue #49 hardening)', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      polling: { interval_ms: 999 },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]?.path).toEqual(['polling', 'interval_ms']);
+      expect(result.error.issues[0]?.message).toContain('1000');
+    }
+  });
+
+  it('polling.interval_ms = 1000 は受理される (下限ぴったり)', () => {
+    const parsed = configSchema.parse({
+      owner: 'hexylab',
+      project_number: 1,
+      polling: { interval_ms: 1000 },
+    });
+    expect(parsed.polling).toEqual({ intervalMs: 1000 });
+  });
+
   it('polling 配下の未知キーは strict で拒否する', () => {
     const result = configSchema.safeParse({
       owner: 'hexylab',

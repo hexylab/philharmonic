@@ -18,6 +18,13 @@ export type PermissionMode = 'auto' | 'bypass';
 
 export type RunStatus = 'success' | 'failed' | 'timeout';
 
+/**
+ * Process tree kill 用の関数型。`pid` は spawn された subprocess の pid (process group leader)。
+ * 既定実装では `process.kill(-pid, signal)` を呼んで process group 全体に signal を送る。
+ * Unix では子の `detached: true` 起動とセットで効く。
+ */
+export type KillProcessGroupFn = (pid: number, signal: NodeJS.Signals) => void;
+
 export type RunClaudeOptions = {
   prompt: string;
   workspacePath: string;
@@ -30,6 +37,11 @@ export type RunClaudeOptions = {
   spawn?: SpawnFn;
   command?: string;
   logger?: Logger;
+  /**
+   * テスト用 DI: process group 全体に signal を送る関数。
+   * 既定は `process.kill(-pid, signal)`。失敗時は単体 kill にフォールバックする。
+   */
+  killProcessGroup?: KillProcessGroupFn;
 };
 
 export type RunResult = {
@@ -65,6 +77,7 @@ export async function runClaude(options: RunClaudeOptions): Promise<RunResult> {
   const killGracePeriodMs = options.killGracePeriodMs ?? DEFAULT_KILL_GRACE_PERIOD_MS;
   const env = options.env ?? buildRunnerEnv();
   const spawnFn = options.spawn ?? defaultSpawn;
+  const killGroup = options.killProcessGroup ?? defaultKillProcessGroup;
   const args = buildArgs(options);
   const logPaths = await prepareLogDir(options.logDir);
   const streamLog = logPaths !== null ? createWriteStream(logPaths.stream, { flags: 'a' }) : null;
@@ -118,17 +131,38 @@ export async function runClaude(options: RunClaudeOptions): Promise<RunResult> {
     stderrTail = appendTail(stderrTail, chunk, STDERR_TAIL_LIMIT_BYTES);
   });
 
+  const sendSignalToTree = (signal: NodeJS.Signals): void => {
+    const pid = child.pid;
+    if (typeof pid === 'number' && pid > 0) {
+      try {
+        killGroup(pid, signal);
+        return;
+      } catch (error) {
+        runLogger?.warn('process group kill failed, falling back to direct kill', {
+          signal,
+          pid,
+          error: describeSpawnError(error),
+        });
+      }
+    }
+    child.kill(signal);
+  };
+
   return new Promise<RunResult>((resolve, reject) => {
     let killTimer: NodeJS.Timeout | null = null;
     const timeoutTimer: NodeJS.Timeout = setTimeout(() => {
       timedOut = true;
-      runLogger?.warn('runner timeout reached, sending SIGTERM', { timeoutMs });
-      child.kill('SIGTERM');
+      runLogger?.warn('runner timeout reached, sending SIGTERM to process group', {
+        timeoutMs,
+        pid: child.pid ?? null,
+      });
+      sendSignalToTree('SIGTERM');
       killTimer = setTimeout(() => {
-        runLogger?.warn('runner did not exit after SIGTERM, sending SIGKILL', {
+        runLogger?.warn('runner did not exit after SIGTERM, sending SIGKILL to process group', {
           killGracePeriodMs,
+          pid: child.pid ?? null,
         });
-        child.kill('SIGKILL');
+        sendSignalToTree('SIGKILL');
       }, killGracePeriodMs);
     }, timeoutMs);
 
@@ -280,3 +314,9 @@ function describeSpawnError(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
 }
+
+const defaultKillProcessGroup: KillProcessGroupFn = (pid, signal) => {
+  // Unix: process.kill に負の pid を渡すと process group 全体に signal を送る。
+  // detached:true で起動した子はその pid が group leader なので、孫まで届く。
+  process.kill(-pid, signal);
+};

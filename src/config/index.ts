@@ -19,6 +19,8 @@ export {
   DEFAULT_STATUS_FIELD,
   DEFAULT_TIMEOUT_MS,
   DEFAULT_WORKSPACE_ROOT,
+  LOW_POLLING_INTERVAL_WARN_THRESHOLD_MS,
+  MIN_POLLING_INTERVAL_MS,
   type Config,
   type RawConfigInput,
 } from './schema.js';
