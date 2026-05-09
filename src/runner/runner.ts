@@ -12,7 +12,7 @@ import {
 import { defaultSpawn, type SpawnFn, type SpawnedProcess } from './spawn.js';
 import { StreamEventParser, type ResultEvent, type StreamEvent } from './stream.js';
 
-export type PermissionMode = 'auto';
+export type PermissionMode = 'auto' | 'bypass';
 
 export type RunStatus = 'success' | 'failed' | 'timeout';
 
@@ -187,15 +187,13 @@ function validateOptions(options: RunClaudeOptions): void {
 }
 
 function buildArgs(options: RunClaudeOptions): string[] {
-  const args = [
-    '-p',
-    options.prompt,
-    '--output-format',
-    'stream-json',
-    '--verbose',
-    '--permission-mode',
-    'acceptEdits',
-  ];
+  const permissionMode: PermissionMode = options.permissionMode ?? 'auto';
+  const args = ['-p', options.prompt, '--output-format', 'stream-json', '--verbose'];
+  if (permissionMode === 'bypass') {
+    args.push('--dangerously-skip-permissions');
+  } else {
+    args.push('--permission-mode', 'acceptEdits');
+  }
   if (options.sessionId !== undefined) {
     args.push('--session-id', options.sessionId);
   }

@@ -28,7 +28,7 @@ Philharmonic の orchestration loop が必要とする設定値を `philharmonic
 - 未指定値はデフォルトを補完する (下表参照)
 - 設定ファイルが存在しない / YAML として不正 / 型違反のいずれの場合も、ユーザが原因を特定できる構造化エラー (ファイルパス・該当フィールドパス・期待値) を throw する
 - CLI フラグでの override を可能にするため、`Config` は plain object で返す (override 合成は CLI レイヤの責務)
-- bypass permission mode は config schema として受理可能だが、Runner 側 (`src/runner/`) が現時点で未対応な点はレイヤ境界の責務として割り切る
+- `permission_mode` は `'auto'` / `'bypass'` の 2 値を受理する。Runner 側 (`src/runner/`) との対応は Issue #29 で完了済み
 
 ## 非機能要件
 

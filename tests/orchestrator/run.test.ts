@@ -452,6 +452,65 @@ describe('runOnce', () => {
     expect(workspace.createWorkspace).not.toHaveBeenCalled();
   });
 
+  it('config.permissionMode は runClaude にそのまま渡され、bypass 時は警告ログを出す (#29)', async () => {
+    const projects = makeProjectsMock();
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    const result = (await runOnce({
+      config: makeConfig({ permissionMode: 'bypass' }),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      runClaude: runClaudeMock,
+      gitRunner: makeGitRunner(),
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      logger,
+    })) as Extract<RunOnceResult, { kind: 'success' }>;
+
+    expect(result.kind).toBe('success');
+    expect(runClaudeMock).toHaveBeenCalledTimes(1);
+    expect(runClaudeMock.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ permissionMode: 'bypass' }),
+    );
+
+    const warnMessages = logger.warn.mock.calls.map((c) => c[0] as string);
+    expect(warnMessages.some((m) => m.includes('permission_mode=bypass'))).toBe(true);
+  });
+
+  it('config.permissionMode=auto では bypass 警告ログを出さない (#29)', async () => {
+    const projects = makeProjectsMock();
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    await runOnce({
+      config: makeConfig({ permissionMode: 'auto' }),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      runClaude: runClaudeMock,
+      gitRunner: makeGitRunner(),
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      logger,
+    });
+
+    expect(runClaudeMock.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ permissionMode: 'auto' }),
+    );
+    const warnMessages = logger.warn.mock.calls.map((c) => c[0] as string);
+    expect(warnMessages.some((m) => m.includes('permission_mode=bypass'))).toBe(false);
+  });
+
   it('PR 作成が失敗すれば reason=pr_create で Failed 遷移する', async () => {
     const projects = makeProjectsMock();
     const github = makeGitHubMock({
