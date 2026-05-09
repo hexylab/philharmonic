@@ -36,6 +36,7 @@ function buildRestClient(overrides: Partial<RestClient> = {}): RestClient {
     },
     pulls: {
       create: vi.fn(),
+      list: vi.fn(),
       ...overrides.pulls,
     },
   };
@@ -288,6 +289,75 @@ describe('createGitHubClient.createPullRequest', () => {
         message: 'No commits between main and feature/x',
       });
       expect(apiError.message).toContain('No commits between main and feature/x');
+    }
+  });
+});
+
+describe('createGitHubClient.listOpenPullRequests', () => {
+  it('headBranchPrefix で一致する open PR のみ正規化して返す', async () => {
+    const list = vi.fn().mockResolvedValue({
+      data: [
+        { number: 10, html_url: 'u/10', head: { ref: 'feature/23-foo' } },
+        { number: 11, html_url: 'u/11', head: { ref: 'feature/24-bar' } },
+        { number: 12, html_url: 'u/12', head: { ref: 'feature/23-baz-something' } },
+      ],
+    });
+    const rest = buildRestClient({
+      pulls: { create: vi.fn(), list },
+    });
+
+    const client = createGitHubClient({ token: 't', restClient: rest });
+    const prs = await client.listOpenPullRequests({
+      owner: 'o',
+      repo: 'r',
+      headBranchPrefix: 'feature/23-',
+    });
+
+    expect(list).toHaveBeenCalledWith({
+      owner: 'o',
+      repo: 'r',
+      state: 'open',
+      per_page: 100,
+    });
+    expect(prs).toEqual([
+      { number: 10, headRef: 'feature/23-foo', htmlUrl: 'u/10' },
+      { number: 12, headRef: 'feature/23-baz-something', htmlUrl: 'u/12' },
+    ]);
+  });
+
+  it('headBranchPrefix を省略したら全件返す', async () => {
+    const list = vi.fn().mockResolvedValue({
+      data: [
+        { number: 1, html_url: 'u/1', head: { ref: 'feature/x' } },
+        { number: 2, html_url: 'u/2', head: { ref: 'fix/y' } },
+      ],
+    });
+    const rest = buildRestClient({ pulls: { create: vi.fn(), list } });
+    const client = createGitHubClient({ token: 't', restClient: rest });
+
+    const prs = await client.listOpenPullRequests({ owner: 'o', repo: 'r' });
+    expect(prs).toHaveLength(2);
+  });
+
+  it('REST 失敗時に GitHubApiError でラップする', async () => {
+    const list = vi.fn().mockRejectedValue(
+      new FakeOctokitRequestError({
+        message: 'forbidden',
+        status: 403,
+        method: 'GET',
+        url: '/repos/o/r/pulls',
+        data: { message: 'rate limit' },
+      }),
+    );
+    const rest = buildRestClient({ pulls: { create: vi.fn(), list } });
+    const client = createGitHubClient({ token: 't', restClient: rest });
+
+    expect.assertions(2);
+    try {
+      await client.listOpenPullRequests({ owner: 'o', repo: 'r' });
+    } catch (error) {
+      expect(error).toBeInstanceOf(GitHubApiError);
+      expect((error as GitHubApiError).status).toBe(403);
     }
   });
 });

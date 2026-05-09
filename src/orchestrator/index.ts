@@ -12,7 +12,15 @@ export {
   parseRepositoryNameWithOwner,
   type Repository,
 } from './repository.js';
-export { runOnce, type RunOnceClock, type RunOnceDeps, type RunOnceResult } from './run.js';
+export {
+  dispatchSelected,
+  runOnce,
+  type DispatchSelectedDeps,
+  type RunOnceClock,
+  type RunOnceDeps,
+  type RunOnceResult,
+} from './run.js';
+export { recoverInProgress, type RecoveryDeps, type RecoverySummary } from './recovery.js';
 export {
   abortableSleep,
   serveLoop,

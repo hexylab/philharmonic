@@ -20,7 +20,7 @@ import { defaultGitRunner, type GitRunner, type WorkspaceManager } from '../work
 import { BootstrapError, type FailureReason } from './errors.js';
 import { buildFailureCommentBody, buildPullRequestBody, summarizeRunResult } from './format.js';
 import { countCommitsAhead, fetchBaseBranch, pushBranch } from './git.js';
-import { parseRepositoryNameWithOwner } from './repository.js';
+import { parseRepositoryNameWithOwner, type Repository } from './repository.js';
 import { DEFAULT_DISPATCH_STATUSES, isAcceptableIssue, selectFirstByStatus } from './select.js';
 import { buildIssueSlug } from './slug.js';
 import { resolveStatusOptions, type StatusOptionMap } from './status.js';
@@ -77,9 +77,6 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
   const remote = deps.remote ?? DEFAULT_REMOTE;
   const dispatchStatuses =
     deps.dispatchStatuses ?? deps.config.dispatchStatuses ?? DEFAULT_DISPATCH_STATUSES;
-  const gitRunner = deps.gitRunner ?? defaultGitRunner;
-  const runner = deps.runClaude ?? runClaude;
-  const idGen = deps.generateRunId ?? generateRunId;
 
   // 1. Candidate Selection
   const candidates = await deps.projectsClient.fetchProjectCandidates({
@@ -100,14 +97,6 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
   }
 
   const { candidate, issue, repository } = selected;
-  const runId = idGen();
-  const startedAt = clock();
-  const runLog = await createRunLog({ runId, runsRoot: deps.runnerLogsRoot });
-  const logger = baseLogger.child({ runId, issueNumber: candidate.issueNumber });
-
-  logger.info('candidate selected', {
-    repository: candidate.repositoryNameWithOwner,
-  });
 
   // 2. Project metadata + status options
   let statusOptions: StatusOptionMap;
@@ -146,6 +135,74 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     );
   }
 
+  // 4-9. Workspace 作成以降は dispatchSelected に委譲する
+  return await dispatchSelected({
+    config: deps.config,
+    repoRoot: deps.repoRoot,
+    candidate,
+    issue,
+    repository,
+    projectId,
+    statusFieldId,
+    statusOptions,
+    githubClient: deps.githubClient,
+    workspaceManager: deps.workspaceManager,
+    runnerLogsRoot: deps.runnerLogsRoot,
+    remote,
+    runClaude: deps.runClaude,
+    gitRunner: deps.gitRunner,
+    baseLogger,
+    clock,
+    generateRunId: deps.generateRunId,
+  });
+}
+
+export type DispatchSelectedDeps = {
+  config: Config;
+  repoRoot: string;
+  candidate: Candidate;
+  issue: Issue;
+  repository: Repository;
+  projectId: string;
+  statusFieldId: string;
+  statusOptions: StatusOptionMap;
+  githubClient: GitHubClient;
+  workspaceManager: WorkspaceManager;
+  runnerLogsRoot: string;
+  remote?: string;
+  runClaude?: typeof runClaude;
+  gitRunner?: GitRunner;
+  baseLogger?: Logger;
+  clock?: RunOnceClock;
+  generateRunId?: () => string;
+};
+
+/**
+ * Project Item が選択され、Status が `In Progress` の状態から先を実行する。
+ *
+ * - `runOnce` は Todo → In Progress 遷移後にこの関数を呼ぶ
+ * - `recovery` は既に `In Progress` の Item を引き取って直接呼ぶ (Todo→IP は不要)
+ */
+export async function dispatchSelected(
+  deps: DispatchSelectedDeps,
+): Promise<Extract<RunOnceResult, { kind: 'success' | 'failed' }>> {
+  const baseLogger = deps.baseLogger ?? noopLogger;
+  const clock = deps.clock ?? (() => new Date());
+  const remote = deps.remote ?? DEFAULT_REMOTE;
+  const gitRunner = deps.gitRunner ?? defaultGitRunner;
+  const runner = deps.runClaude ?? runClaude;
+  const idGen = deps.generateRunId ?? generateRunId;
+
+  const { candidate, issue, repository } = deps;
+  const runId = idGen();
+  const startedAt = clock();
+  const runLog = await createRunLog({ runId, runsRoot: deps.runnerLogsRoot });
+  const logger = baseLogger.child({ runId, issueNumber: candidate.issueNumber });
+
+  logger.info('candidate selected', {
+    repository: candidate.repositoryNameWithOwner,
+  });
+
   const branch = `feature/${candidate.issueNumber}-${buildIssueSlug(candidate.issueTitle)}`;
   const taskKey = `issue-${candidate.issueNumber}`;
   const baseRef = `${remote}/${deps.config.baseBranch}`;
@@ -156,9 +213,9 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     issue,
     repository,
     branch,
-    projectId,
-    statusFieldId,
-    statusOptions,
+    projectId: deps.projectId,
+    statusFieldId: deps.statusFieldId,
+    statusOptions: deps.statusOptions,
     startedAt,
     githubClient: deps.githubClient,
     logger,
@@ -266,10 +323,10 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
   // 8.3 Status Update: In Progress → In Review
   try {
     await deps.githubClient.updateProjectV2ItemStatus({
-      projectId,
+      projectId: deps.projectId,
       itemId: candidate.itemId,
-      fieldId: statusFieldId,
-      optionId: statusOptions['In Review'],
+      fieldId: deps.statusFieldId,
+      optionId: deps.statusOptions['In Review'],
     });
   } catch (error) {
     logger.warn('Status を In Review に遷移できませんでした (PR は作成済み)', {
@@ -332,7 +389,7 @@ async function markFailed(
   reason: FailureReason,
   error: unknown,
   run?: RunResult,
-): Promise<RunOnceResult> {
+): Promise<Extract<RunOnceResult, { kind: 'failed' }>> {
   const finishedAt = ctx.clock();
   const durationMs = run?.durationMs ?? finishedAt.getTime() - ctx.startedAt.getTime();
   const totalCostUsd = run?.totalCostUsd ?? null;
