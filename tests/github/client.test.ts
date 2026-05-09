@@ -52,6 +52,8 @@ describe('createGitHubClient.getIssue', () => {
             body: 'world',
             state: 'open',
             html_url: 'https://github.com/o/r/issues/42',
+            labels: [{ name: 'task' }, 'agent:skip'],
+            assignees: [{ login: 'philharmonic-bot' }],
           },
         }),
         createComment: vi.fn(),
@@ -68,12 +70,37 @@ describe('createGitHubClient.getIssue', () => {
       body: 'world',
       state: 'open',
       htmlUrl: 'https://github.com/o/r/issues/42',
+      labels: [{ name: 'task' }, { name: 'agent:skip' }],
+      assignees: [{ login: 'philharmonic-bot' }],
     });
     expect(rest.issues.get).toHaveBeenCalledWith({
       owner: 'o',
       repo: 'r',
       issue_number: 42,
     });
+  });
+
+  it('labels / assignees が省略されたら空配列で返す', async () => {
+    const rest = buildRestClient({
+      issues: {
+        get: vi.fn().mockResolvedValue({
+          data: {
+            number: 1,
+            title: 't',
+            body: null,
+            state: 'open',
+            html_url: 'u',
+          },
+        }),
+        createComment: vi.fn(),
+      },
+    });
+
+    const client = createGitHubClient({ token: 't', restClient: rest });
+    const issue = await client.getIssue({ owner: 'o', repo: 'r', issueNumber: 1 });
+
+    expect(issue.labels).toEqual([]);
+    expect(issue.assignees).toEqual([]);
   });
 
   it('body が null のときは body=null として返す', async () => {
