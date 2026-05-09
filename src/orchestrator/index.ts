@@ -14,6 +14,13 @@ export {
 } from './repository.js';
 export { runOnce, type RunOnceClock, type RunOnceDeps, type RunOnceResult } from './run.js';
 export {
+  abortableSleep,
+  serveLoop,
+  type ServeLoopDeps,
+  type ServeLoopRunOnce,
+  type ServeLoopSleep,
+} from './serve.js';
+export {
   DEFAULT_DISPATCH_STATUSES,
   DEFAULT_SKIP_LABEL,
   isAcceptableIssue,

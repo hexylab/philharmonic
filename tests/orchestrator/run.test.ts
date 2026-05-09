@@ -105,6 +105,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     dispatchStatuses: ['Todo'],
     cleanRetentionDays: 7,
     logLevel: 'info',
+    polling: { intervalMs: 30_000 },
     ...overrides,
   };
 }

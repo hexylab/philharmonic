@@ -3,6 +3,7 @@ import { Command } from 'commander';
 import { createCleanCommand } from './cli/clean.js';
 import { createProjectsCommand } from './cli/projects.js';
 import { createRunCommand } from './cli/run.js';
+import { createServeCommand } from './cli/serve.js';
 
 const PROGRAM_NAME = 'philharmonic';
 const PROGRAM_DESCRIPTION =
@@ -19,6 +20,7 @@ export function createProgram(): Command {
 
   program.addCommand(createProjectsCommand());
   program.addCommand(createRunCommand());
+  program.addCommand(createServeCommand());
   program.addCommand(createCleanCommand());
 
   return program;
