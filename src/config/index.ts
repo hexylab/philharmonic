@@ -9,6 +9,8 @@ export { loadConfig, type LoadConfigOptions } from './loader.js';
 export {
   configSchema,
   DEFAULT_AGENT_MAX_CONCURRENT_AGENTS,
+  DEFAULT_AGENT_MAX_TURNS,
+  DEFAULT_AGENT_STALL_TIMEOUT_MS,
   DEFAULT_BASE_BRANCH,
   DEFAULT_CLEAN_RETENTION_DAYS,
   DEFAULT_CONFIG_FILE,

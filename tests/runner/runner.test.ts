@@ -475,3 +475,299 @@ describe('runClaude — timeout', () => {
     await promise;
   });
 });
+
+// stall detection / multi-turn のテスト用 helper
+const FIXED_SESSION_ID = '11111111-1111-4111-8111-111111111111';
+
+function makeSystemLine(sessionId: string): string {
+  return `${JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId })}\n`;
+}
+
+function makeResultLine(input: {
+  sessionId: string;
+  subtype: 'success' | 'error_max_turns';
+  isError: boolean;
+  numTurns: number;
+  totalCostUsd: number;
+  resultText: string;
+}): string {
+  return `${JSON.stringify({
+    type: 'result',
+    subtype: input.subtype,
+    is_error: input.isError,
+    duration_ms: 1000,
+    duration_api_ms: 800,
+    num_turns: input.numTurns,
+    result: input.resultText,
+    stop_reason: input.subtype === 'success' ? 'end_turn' : 'max_turns',
+    session_id: input.sessionId,
+    total_cost_usd: input.totalCostUsd,
+    usage: { input_tokens: 10, output_tokens: 5 },
+  })}\n`;
+}
+
+describe('runClaude — stall detection (#25)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('stallTimeoutMs の間 stdout が無音だと SIGTERM を送り status=stalled になる', async () => {
+    const { spawn, calls } = createSpawnFn();
+    const promise = runClaude(
+      baseOptions({
+        spawn,
+        timeoutMs: 60_000,
+        stallTimeoutMs: 1_000,
+        killGracePeriodMs: 100,
+      }),
+    );
+    const call = await waitForSpawn(calls);
+    const child = call.child;
+
+    expect(child.kill).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+
+    child.emit('close', null, 'SIGKILL');
+    const result = await promise;
+
+    expect(result.status).toBe('stalled');
+    expect(result.signal).toBe('SIGKILL');
+  });
+
+  it('stdout に data が届くたびに stall timer が reschedule される', async () => {
+    const { spawn, calls } = createSpawnFn();
+    const promise = runClaude(
+      baseOptions({
+        spawn,
+        timeoutMs: 60_000,
+        stallTimeoutMs: 1_000,
+      }),
+    );
+    const call = await waitForSpawn(calls);
+    const child = call.child;
+
+    // 800ms 経過 → まだ kill されない
+    await vi.advanceTimersByTimeAsync(800);
+    expect(child.kill).not.toHaveBeenCalled();
+
+    // data 受信 (parser に system event を渡す) → stall timer reschedule
+    child.stdout.write(makeSystemLine(FIXED_SESSION_ID));
+    await vi.advanceTimersByTimeAsync(800);
+    expect(child.kill).not.toHaveBeenCalled();
+
+    // 直近の data から 1000ms 経過 → SIGTERM
+    await vi.advanceTimersByTimeAsync(200);
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+
+    child.emit('close', null, 'SIGTERM');
+    const result = await promise;
+    expect(result.status).toBe('stalled');
+  });
+
+  it('stallTimeoutMs=0 で stall detection が無効化される', async () => {
+    const { spawn, calls } = createSpawnFn();
+    const promise = runClaude(
+      baseOptions({
+        spawn,
+        timeoutMs: 60_000,
+        stallTimeoutMs: 0,
+      }),
+    );
+    const call = await waitForSpawn(calls);
+    const child = call.child;
+
+    // 30 秒経過しても何も起きない
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(child.kill).not.toHaveBeenCalled();
+
+    // 自然完了
+    child.stdout.write(
+      makeSystemLine(FIXED_SESSION_ID) +
+        makeResultLine({
+          sessionId: FIXED_SESSION_ID,
+          subtype: 'success',
+          isError: false,
+          numTurns: 1,
+          totalCostUsd: 0.01,
+          resultText: 'ok',
+        }),
+    );
+    child.stdout.end();
+    child.emit('close', 0, null);
+    const result = await promise;
+    expect(result.status).toBe('success');
+  });
+});
+
+describe('runClaude — multi-turn loop (#25)', () => {
+  it('maxTurns=1 (default) では 1 回しか spawn しない (回帰)', async () => {
+    const { spawn, calls } = createSpawnFn();
+    const promise = runClaude(baseOptions({ spawn }));
+
+    const call = await waitForSpawn(calls);
+    call.child.stdout.write(
+      makeSystemLine(FIXED_SESSION_ID) +
+        makeResultLine({
+          sessionId: FIXED_SESSION_ID,
+          subtype: 'success',
+          isError: false,
+          numTurns: 1,
+          totalCostUsd: 0.01,
+          resultText: 'done',
+        }),
+    );
+    call.child.stdout.end();
+    call.child.emit('close', 0, null);
+    const result = await promise;
+
+    expect(calls).toHaveLength(1);
+    expect(result.status).toBe('success');
+    expect(result.turns).toBe(1);
+  });
+
+  it('error_max_turns で打ち切られたら --resume <UUID> で次ターンに進む', async () => {
+    const { spawn, calls } = createSpawnFn();
+    const promise = runClaude(
+      baseOptions({
+        spawn,
+        sessionId: FIXED_SESSION_ID,
+        maxTurns: 2,
+      }),
+    );
+
+    // 1 ターン目: error_max_turns で完了
+    const call1 = await waitForSpawn(calls);
+    expect(call1.args).toContain('--session-id');
+    expect(call1.args).toContain(FIXED_SESSION_ID);
+    expect(call1.args).not.toContain('--resume');
+
+    call1.child.stdout.write(
+      makeSystemLine(FIXED_SESSION_ID) +
+        makeResultLine({
+          sessionId: FIXED_SESSION_ID,
+          subtype: 'error_max_turns',
+          isError: true,
+          numTurns: 50,
+          totalCostUsd: 1.5,
+          resultText: '',
+        }),
+    );
+    call1.child.stdout.end();
+    call1.child.emit('close', 0, null);
+
+    // 2 ターン目: --resume で再開
+    for (let i = 0; i < 50 && calls.length < 2; i++) await Promise.resolve();
+    expect(calls).toHaveLength(2);
+    const call2 = calls[1]!;
+    expect(call2.args).toContain('--resume');
+    expect(call2.args).toContain(FIXED_SESSION_ID);
+    expect(call2.args).not.toContain('--session-id');
+    // continuationPrompt が渡されている (元の prompt は使わない)
+    const promptIndex = call2.args.indexOf('-p');
+    expect(call2.args[promptIndex + 1]).not.toBe('say hi');
+
+    call2.child.stdout.write(
+      makeSystemLine(FIXED_SESSION_ID) +
+        makeResultLine({
+          sessionId: FIXED_SESSION_ID,
+          subtype: 'success',
+          isError: false,
+          numTurns: 3,
+          totalCostUsd: 0.5,
+          resultText: 'finally done',
+        }),
+    );
+    call2.child.stdout.end();
+    call2.child.emit('close', 0, null);
+
+    const result = await promise;
+    expect(result.status).toBe('success');
+    expect(result.turns).toBe(2);
+    // session_id は両ターンで保持される (Acceptance Criteria 3)
+    expect(result.sessionId).toBe(FIXED_SESSION_ID);
+    // numTurns / totalCostUsd は加算される
+    expect(result.numTurns).toBe(53);
+    expect(result.totalCostUsd).toBeCloseTo(2.0, 6);
+    // finalText は最終ターンのもの
+    expect(result.finalText).toBe('finally done');
+  });
+
+  it('maxTurns=2 でも 1 ターン目が success なら loop に入らない', async () => {
+    const { spawn, calls } = createSpawnFn();
+    const promise = runClaude(baseOptions({ spawn, maxTurns: 2 }));
+
+    const call = await waitForSpawn(calls);
+    call.child.stdout.write(
+      makeSystemLine(FIXED_SESSION_ID) +
+        makeResultLine({
+          sessionId: FIXED_SESSION_ID,
+          subtype: 'success',
+          isError: false,
+          numTurns: 1,
+          totalCostUsd: 0.01,
+          resultText: 'done',
+        }),
+    );
+    call.child.stdout.end();
+    call.child.emit('close', 0, null);
+
+    const result = await promise;
+    expect(calls).toHaveLength(1);
+    expect(result.turns).toBe(1);
+  });
+
+  it('maxTurns 上限に達したらそれ以上 resume しない', async () => {
+    const { spawn, calls } = createSpawnFn();
+    const promise = runClaude(
+      baseOptions({
+        spawn,
+        sessionId: FIXED_SESSION_ID,
+        maxTurns: 2,
+      }),
+    );
+
+    // 1 ターン目 + 2 ターン目 とも error_max_turns
+    for (let turn = 0; turn < 2; turn++) {
+      for (let i = 0; i < 50 && calls.length <= turn; i++) await Promise.resolve();
+      const call = calls[turn]!;
+      call.child.stdout.write(
+        makeSystemLine(FIXED_SESSION_ID) +
+          makeResultLine({
+            sessionId: FIXED_SESSION_ID,
+            subtype: 'error_max_turns',
+            isError: true,
+            numTurns: 50,
+            totalCostUsd: 1.0,
+            resultText: '',
+          }),
+      );
+      call.child.stdout.end();
+      call.child.emit('close', 0, null);
+    }
+
+    const result = await promise;
+    expect(calls).toHaveLength(2); // 3 ターン目には進まない
+    expect(result.turns).toBe(2);
+    expect(result.status).toBe('failed');
+    expect(result.resultSubtype).toBe('error_max_turns');
+  });
+
+  it('InvalidRunOptionsError: maxTurns に小数を渡すと検証エラー', async () => {
+    await expect(runClaude(baseOptions({ maxTurns: 1.5 }))).rejects.toBeInstanceOf(
+      InvalidRunOptionsError,
+    );
+  });
+
+  it('InvalidRunOptionsError: stallTimeoutMs に負数を渡すと検証エラー', async () => {
+    await expect(runClaude(baseOptions({ stallTimeoutMs: -1 }))).rejects.toBeInstanceOf(
+      InvalidRunOptionsError,
+    );
+  });
+});

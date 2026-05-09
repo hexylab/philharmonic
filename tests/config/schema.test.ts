@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   configSchema,
   DEFAULT_AGENT_MAX_CONCURRENT_AGENTS,
+  DEFAULT_AGENT_MAX_TURNS,
+  DEFAULT_AGENT_STALL_TIMEOUT_MS,
   DEFAULT_BASE_BRANCH,
   DEFAULT_CLEAN_RETENTION_DAYS,
   DEFAULT_DISPATCH_STATUSES,
@@ -41,6 +43,8 @@ describe('configSchema', () => {
       },
       agent: {
         maxConcurrentAgents: DEFAULT_AGENT_MAX_CONCURRENT_AGENTS,
+        maxTurns: DEFAULT_AGENT_MAX_TURNS,
+        stallTimeoutMs: DEFAULT_AGENT_STALL_TIMEOUT_MS,
       },
     });
   });
@@ -380,14 +384,16 @@ describe('configSchema', () => {
     expect(result.success).toBe(false);
   });
 
-  it('agent キーが完全に未指定でもデフォルト値 (1) が補完される (#24)', () => {
+  it('agent キーが完全に未指定でもデフォルト値が補完される (#24 / #25)', () => {
     const parsed = configSchema.parse({ owner: 'hexylab', project_number: 1 });
     expect(parsed.agent).toEqual({
       maxConcurrentAgents: DEFAULT_AGENT_MAX_CONCURRENT_AGENTS,
+      maxTurns: DEFAULT_AGENT_MAX_TURNS,
+      stallTimeoutMs: DEFAULT_AGENT_STALL_TIMEOUT_MS,
     });
   });
 
-  it('agent: {} だけ指定でもデフォルト max_concurrent_agents が補完される', () => {
+  it('agent: {} だけ指定でもデフォルト値が補完される', () => {
     const parsed = configSchema.parse({
       owner: 'hexylab',
       project_number: 1,
@@ -395,6 +401,8 @@ describe('configSchema', () => {
     });
     expect(parsed.agent).toEqual({
       maxConcurrentAgents: DEFAULT_AGENT_MAX_CONCURRENT_AGENTS,
+      maxTurns: DEFAULT_AGENT_MAX_TURNS,
+      stallTimeoutMs: DEFAULT_AGENT_STALL_TIMEOUT_MS,
     });
   });
 
@@ -404,7 +412,63 @@ describe('configSchema', () => {
       project_number: 1,
       agent: { max_concurrent_agents: 5 },
     });
-    expect(parsed.agent).toEqual({ maxConcurrentAgents: 5 });
+    expect(parsed.agent).toEqual({
+      maxConcurrentAgents: 5,
+      maxTurns: DEFAULT_AGENT_MAX_TURNS,
+      stallTimeoutMs: DEFAULT_AGENT_STALL_TIMEOUT_MS,
+    });
+  });
+
+  it('agent.max_turns / agent.stall_timeout_ms を camelCase で取り出せる (#25)', () => {
+    const parsed = configSchema.parse({
+      owner: 'hexylab',
+      project_number: 1,
+      agent: { max_turns: 10, stall_timeout_ms: 60_000 },
+    });
+    expect(parsed.agent.maxTurns).toBe(10);
+    expect(parsed.agent.stallTimeoutMs).toBe(60_000);
+  });
+
+  it('agent.max_turns が 0 以下だと検証エラーになる (#25)', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      agent: { max_turns: 0 },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]?.path).toEqual(['agent', 'max_turns']);
+    }
+  });
+
+  it('agent.max_turns が小数だと検証エラーになる (#25)', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      agent: { max_turns: 1.5 },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('agent.stall_timeout_ms は 0 を許可する (stall detection 無効化, #25)', () => {
+    const parsed = configSchema.parse({
+      owner: 'hexylab',
+      project_number: 1,
+      agent: { stall_timeout_ms: 0 },
+    });
+    expect(parsed.agent.stallTimeoutMs).toBe(0);
+  });
+
+  it('agent.stall_timeout_ms が負数だと検証エラーになる (#25)', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      agent: { stall_timeout_ms: -1 },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]?.path).toEqual(['agent', 'stall_timeout_ms']);
+    }
   });
 
   it('agent.max_concurrent_agents が 0 以下だと検証エラーになる', () => {

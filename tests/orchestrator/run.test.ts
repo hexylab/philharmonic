@@ -107,7 +107,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     logLevel: 'info',
     polling: { intervalMs: 30_000 },
     retry: { maxAttempts: 3, maxBackoffMs: 600_000 },
-    agent: { maxConcurrentAgents: 1 },
+    agent: { maxConcurrentAgents: 1, maxTurns: 1, stallTimeoutMs: 300_000 },
     ...overrides,
   };
 }
@@ -120,6 +120,7 @@ function makeRunResult(overrides: Partial<RunResult> = {}): RunResult {
     durationMs: 1_234,
     durationApiMs: 567,
     numTurns: 3,
+    turns: 1,
     sessionId: FIXED_RUN_ID,
     resultSubtype: 'success',
     stopReason: 'end_turn',
@@ -327,6 +328,35 @@ describe('runOnce', () => {
     expect(github.commentIssue).not.toHaveBeenCalled();
     expect(workspace.cleanupWorkspace).toHaveBeenCalledTimes(1);
     expect(runClaudeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('Runner が stalled で返ったら reason=stalled で Failed 遷移する (#25)', async () => {
+    const projects = makeProjectsMock();
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const runClaudeMock = vi.fn(async () => makeRunResult({ status: 'stalled' }));
+
+    const result = (await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      runClaude: runClaudeMock,
+      gitRunner: makeGitRunner(),
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+    })) as Extract<RunOnceResult, { kind: 'failed' }>;
+
+    expect(result.kind).toBe('failed');
+    expect(result.reason).toBe('stalled');
+    const optionIds = github.updateProjectV2ItemStatus.mock.calls.map(
+      (c) => (c[0] as UpdateProjectV2ItemStatusInput).optionId,
+    );
+    expect(optionIds).toEqual(['opt_ip', 'opt_fail']);
+    expect(github.createPullRequest).not.toHaveBeenCalled();
+    expect(github.commentIssue).toHaveBeenCalledTimes(1);
   });
 
   it('Runner が failed で返ったら reason=runner_error で Failed 遷移する', async () => {
@@ -695,7 +725,9 @@ describe('runConcurrent', () => {
     const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
 
     const outcomes = await runConcurrent({
-      config: makeConfig({ agent: { maxConcurrentAgents: 3 } }),
+      config: makeConfig({
+        agent: { maxConcurrentAgents: 3, maxTurns: 1, stallTimeoutMs: 300_000 },
+      }),
       repoRoot: tempDir,
       githubClient: github,
       projectsClient: projects,
@@ -728,7 +760,9 @@ describe('runConcurrent', () => {
     };
 
     const outcomes = await runConcurrent({
-      config: makeConfig({ agent: { maxConcurrentAgents: 2 } }),
+      config: makeConfig({
+        agent: { maxConcurrentAgents: 2, maxTurns: 1, stallTimeoutMs: 300_000 },
+      }),
       repoRoot: tempDir,
       githubClient: github,
       projectsClient: projects,
@@ -775,7 +809,9 @@ describe('runConcurrent', () => {
     });
 
     const outcomes = await runConcurrent({
-      config: makeConfig({ agent: { maxConcurrentAgents: 3 } }),
+      config: makeConfig({
+        agent: { maxConcurrentAgents: 3, maxTurns: 1, stallTimeoutMs: 300_000 },
+      }),
       repoRoot: tempDir,
       githubClient: github,
       projectsClient: projects,
@@ -820,7 +856,9 @@ describe('runConcurrent', () => {
     const runClaudeMock = vi.fn(async () => makeRunResult());
 
     const outcomes = await runConcurrent({
-      config: makeConfig({ agent: { maxConcurrentAgents: 3 } }),
+      config: makeConfig({
+        agent: { maxConcurrentAgents: 3, maxTurns: 1, stallTimeoutMs: 300_000 },
+      }),
       repoRoot: tempDir,
       githubClient: github,
       projectsClient: projects,
@@ -861,7 +899,9 @@ describe('runConcurrent', () => {
     });
 
     const outcomes = await runConcurrent({
-      config: makeConfig({ agent: { maxConcurrentAgents: 2 } }),
+      config: makeConfig({
+        agent: { maxConcurrentAgents: 2, maxTurns: 1, stallTimeoutMs: 300_000 },
+      }),
       repoRoot: tempDir,
       githubClient: github,
       projectsClient: projects,
@@ -904,7 +944,7 @@ describe('runConcurrent', () => {
     const outcomes = await runConcurrent({
       config: makeConfig({
         agentUserLogin: 'philharmonic-bot',
-        agent: { maxConcurrentAgents: 2 },
+        agent: { maxConcurrentAgents: 2, maxTurns: 1, stallTimeoutMs: 300_000 },
       }),
       repoRoot: tempDir,
       githubClient: github,
