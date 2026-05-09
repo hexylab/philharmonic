@@ -45,6 +45,7 @@ type WorkspaceMock = WorkspaceManager & {
   resolveWorkspacePath: ReturnType<typeof vi.fn>;
   createWorkspace: ReturnType<typeof vi.fn>;
   cleanupWorkspace: ReturnType<typeof vi.fn>;
+  runHooks: ReturnType<typeof vi.fn>;
 };
 
 const FIXED_RUN_ID = '0190ce80-0000-7000-8000-000000000023';
@@ -182,6 +183,7 @@ function makeWorkspaceMock(workspacePath: string): WorkspaceMock {
       }),
     ),
     cleanupWorkspace: vi.fn(async (): Promise<void> => undefined),
+    runHooks: vi.fn(async (): Promise<void> => undefined),
   };
 }
 

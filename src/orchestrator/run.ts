@@ -15,7 +15,14 @@ import {
 } from '../runlog/index.js';
 import { runClaude, type RunResult } from '../runner/index.js';
 import type { WorkflowSource } from '../workflow/index.js';
-import { defaultGitRunner, type GitRunner, type WorkspaceManager } from '../workspace/index.js';
+import {
+  HookExecutionError,
+  HookTimeoutError,
+  defaultGitRunner,
+  type GitRunner,
+  type HookContext,
+  type WorkspaceManager,
+} from '../workspace/index.js';
 
 import { BootstrapError, type FailureReason } from './errors.js';
 import { buildFailureCommentBody, buildPullRequestBody, summarizeRunResult } from './format.js';
@@ -423,6 +430,27 @@ export async function dispatchSelected(
   await writeFile(path.join(runLog.dir, 'prompt.md'), prompt, 'utf8');
 
   // 6. Runner Execution
+  const hookContext: HookContext = {
+    taskKey,
+    branch,
+    workspacePath,
+    baseRef,
+    extraEnv: {
+      PHILHARMONIC_ISSUE_NUMBER: String(candidate.issueNumber),
+      PHILHARMONIC_RUN_ID: runId,
+    },
+  };
+
+  // before_run hook (runner 起動直前)
+  try {
+    await deps.workspaceManager.runHooks('before_run', hookContext);
+  } catch (error) {
+    if (isHookError(error)) {
+      return await markFailed(failureContext, 'hook_failed', error);
+    }
+    throw error;
+  }
+
   if (deps.config.permissionMode === 'bypass') {
     logger.warn(
       'permission_mode=bypass で Claude Code を起動します。--dangerously-skip-permissions の副作用は worktree 外 (ホスト全体) にも及び得るため、git worktree + 非特権ユーザによる隔離を必ず確認してください',
@@ -443,7 +471,24 @@ export async function dispatchSelected(
       logger,
     });
   } catch (error) {
+    await runAfterRunHooksSafely(deps.workspaceManager, hookContext, 'failed', logger);
     return await markFailed(failureContext, 'runner_error', error);
+  }
+
+  // after_run hook (runner status に関わらず必ず発火)
+  try {
+    await deps.workspaceManager.runHooks('after_run', {
+      ...hookContext,
+      extraEnv: {
+        ...hookContext.extraEnv,
+        PHILHARMONIC_RUN_STATUS: run.status,
+      },
+    });
+  } catch (error) {
+    if (isHookError(error)) {
+      return await markFailed(failureContext, 'hook_failed', error, run);
+    }
+    throw error;
   }
 
   // 7. Result Triage
@@ -744,4 +789,35 @@ function extractAcceptanceCriteria(body: string): string {
 function describeError(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+function isHookError(error: unknown): error is HookExecutionError | HookTimeoutError {
+  return error instanceof HookExecutionError || error instanceof HookTimeoutError;
+}
+
+/**
+ * runner が throw したパス用の after_run 発火ヘルパー。
+ *
+ * ここで hook が失敗しても、後段の `markFailed` が runner エラーで失敗を確定させるため
+ * 上書きせずに warn ログだけ残して飲み込む。
+ */
+async function runAfterRunHooksSafely(
+  workspaceManager: WorkspaceManager,
+  context: HookContext,
+  runStatus: string,
+  logger: Logger,
+): Promise<void> {
+  try {
+    await workspaceManager.runHooks('after_run', {
+      ...context,
+      extraEnv: {
+        ...context.extraEnv,
+        PHILHARMONIC_RUN_STATUS: runStatus,
+      },
+    });
+  } catch (error) {
+    logger.warn('after_run hook failed (already failing path)', {
+      error: describeError(error),
+    });
+  }
 }

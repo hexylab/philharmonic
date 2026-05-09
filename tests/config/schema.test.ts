@@ -48,6 +48,12 @@ describe('configSchema', () => {
         maxTurns: DEFAULT_AGENT_MAX_TURNS,
         stallTimeoutMs: DEFAULT_AGENT_STALL_TIMEOUT_MS,
       },
+      hooks: {
+        afterCreate: [],
+        beforeRun: [],
+        afterRun: [],
+        beforeRemove: [],
+      },
     });
   });
 
@@ -518,6 +524,87 @@ describe('configSchema', () => {
       owner: 'hexylab',
       project_number: 1,
       agent: { max_concurrent_agents: 3, by_state: 'foo' },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('hooks 未指定時は全 event 空配列に補完される (#26)', () => {
+    const parsed = configSchema.parse({ owner: 'hexylab', project_number: 1 });
+    expect(parsed.hooks).toEqual({
+      afterCreate: [],
+      beforeRun: [],
+      afterRun: [],
+      beforeRemove: [],
+    });
+  });
+
+  it('hooks 配下の各 event は配列で受け取る (#26)', () => {
+    const parsed = configSchema.parse({
+      owner: 'hexylab',
+      project_number: 1,
+      hooks: {
+        after_create: [
+          { command: 'pnpm', args: ['install'], timeout_ms: 60_000, on_failure: 'fail' },
+        ],
+        before_run: [],
+        after_run: [],
+        before_remove: [{ command: 'echo', args: ['bye'] }],
+      },
+    });
+    expect(parsed.hooks.afterCreate).toEqual([
+      { command: 'pnpm', args: ['install'], timeoutMs: 60_000, onFailure: 'fail' },
+    ]);
+    expect(parsed.hooks.beforeRemove[0]).toEqual({
+      command: 'echo',
+      args: ['bye'],
+      timeoutMs: 60_000,
+      onFailure: 'fail',
+    });
+  });
+
+  it('hooks の各 entry は command が必須 (#26)', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      hooks: {
+        after_create: [{ args: [] }],
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('hooks の on_failure は continue / fail のみ許可する (#26)', () => {
+    expect(
+      configSchema.safeParse({
+        owner: 'hexylab',
+        project_number: 1,
+        hooks: {
+          after_create: [{ command: 'echo', on_failure: 'panic' }],
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('hooks の timeout_ms は 1 以上の整数 (#26)', () => {
+    expect(
+      configSchema.safeParse({
+        owner: 'hexylab',
+        project_number: 1,
+        hooks: {
+          after_create: [{ command: 'echo', timeout_ms: 0 }],
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('hooks 配下の未知キーは strict で拒否する (#26)', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      hooks: {
+        after_create: [],
+        unknown_event: [],
+      },
     });
     expect(result.success).toBe(false);
   });

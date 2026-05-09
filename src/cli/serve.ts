@@ -45,7 +45,13 @@ import {
   type CreateWorkflowSourceOptions,
   type WorkflowSource,
 } from '../workflow/index.js';
-import { createWorkspaceManager, type WorkspaceManager } from '../workspace/index.js';
+import {
+  createWorkspaceManager,
+  type HookConfigMap,
+  type WorkspaceManager,
+} from '../workspace/index.js';
+
+import { configHooksToHookConfigMap } from './hooks.js';
 
 export type ServeSignal = 'SIGTERM' | 'SIGINT';
 
@@ -75,7 +81,12 @@ export type ServeCommandDeps = {
   getEnv?: (key: string) => string | undefined;
   createGitHubClient?: (token: string) => GitHubClient;
   createProjectsClient?: (token: string) => ProjectsClient;
-  createWorkspaceManager?: (input: { repoRoot: string; workspaceRoot: string }) => WorkspaceManager;
+  createWorkspaceManager?: (input: {
+    repoRoot: string;
+    workspaceRoot: string;
+    hooks?: HookConfigMap;
+    logger?: ReturnType<typeof createLogger>;
+  }) => WorkspaceManager;
   createWorkflowSource?: (options: CreateWorkflowSourceOptions) => Promise<WorkflowSource>;
   acquireServeLock?: (options: AcquireServeLockOptions) => Promise<ServeLockHandle>;
   runOnce?: typeof runOnce;
@@ -208,15 +219,18 @@ async function runServeCommand(
 
   const githubClient = deps.createGitHubClient(token);
   const projectsClient = deps.createProjectsClient(token);
-  const workspaceManager = deps.createWorkspaceManager({
-    repoRoot,
-    workspaceRoot: config.workspaceRoot,
-  });
   const runnerLogsRoot = path.resolve(repoRoot, '.philharmonic/runs');
 
   const logger: Logger = deps.createLogger({
     level: config.logLevel,
     destination: deps.stderr,
+  });
+
+  const workspaceManager = deps.createWorkspaceManager({
+    repoRoot,
+    workspaceRoot: config.workspaceRoot,
+    hooks: configHooksToHookConfigMap(config.hooks),
+    logger,
   });
 
   if (config.permissionMode === 'bypass') {

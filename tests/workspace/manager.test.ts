@@ -6,10 +6,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   GitCommandError,
+  HookExecutionError,
   PathTraversalError,
   createWorkspaceManager,
   type GitRunner,
+  type HookConfigMap,
+  type HookExecutor,
 } from '../../src/workspace/index.js';
+
+const EMPTY_HOOKS: HookConfigMap = {
+  after_create: [],
+  before_run: [],
+  after_run: [],
+  before_remove: [],
+};
 
 type RunGitMock = ReturnType<typeof vi.fn<Parameters<GitRunner>, ReturnType<GitRunner>>>;
 
@@ -271,5 +281,198 @@ describe('createWorkspaceManager', () => {
     const manager = createWorkspaceManager({ repoRoot, workspaceRoot, runGit });
     expect(manager.resolveWorkspacePath('issue-5')).toBe(path.join(workspaceRoot, 'issue-5'));
     expect(runGit).not.toHaveBeenCalled();
+  });
+
+  describe('lifecycle hooks', () => {
+    it('createWorkspace 新規作成時 after_create hook を発火する', async () => {
+      const hookExecutor = vi.fn(async () => undefined) as HookExecutor;
+      const hooks: HookConfigMap = {
+        ...EMPTY_HOOKS,
+        after_create: [
+          { command: 'pnpm', args: ['install'], timeoutMs: 60_000, onFailure: 'fail' },
+        ],
+      };
+
+      const manager = createWorkspaceManager({
+        repoRoot,
+        workspaceRoot,
+        runGit,
+        hooks,
+        hookExecutor,
+      });
+
+      await manager.createWorkspace({
+        taskKey: 'issue-5',
+        branch: 'feature/5-foo',
+        baseRef: 'origin/main',
+      });
+
+      expect(hookExecutor).toHaveBeenCalledTimes(1);
+      const call = vi.mocked(hookExecutor).mock.calls[0]?.[0];
+      expect(call?.event).toBe('after_create');
+      expect(call?.command).toBe('pnpm');
+      expect(call?.cwd).toBe(path.join(workspaceRoot, 'issue-5'));
+      expect(call?.env.PHILHARMONIC_TASK_KEY).toBe('issue-5');
+    });
+
+    it('reuse 時は after_create hook を発火しない', async () => {
+      const target = path.join(workspaceRoot, 'issue-5');
+      await mkdir(target, { recursive: true });
+      fixture.worktreeList = [
+        `worktree ${target}`,
+        'HEAD abc',
+        'branch refs/heads/feature/5-foo',
+        '',
+      ].join('\n');
+
+      const hookExecutor = vi.fn(async () => undefined) as HookExecutor;
+      const hooks: HookConfigMap = {
+        ...EMPTY_HOOKS,
+        after_create: [
+          { command: 'pnpm', args: ['install'], timeoutMs: 60_000, onFailure: 'fail' },
+        ],
+      };
+
+      const manager = createWorkspaceManager({
+        repoRoot,
+        workspaceRoot,
+        runGit,
+        hooks,
+        hookExecutor,
+      });
+
+      const ws = await manager.createWorkspace({
+        taskKey: 'issue-5',
+        branch: 'feature/5-foo',
+        baseRef: 'origin/main',
+      });
+
+      expect(ws.reused).toBe(true);
+      expect(hookExecutor).not.toHaveBeenCalled();
+    });
+
+    it('after_create が on_failure=fail で失敗すると HookExecutionError を伝播する', async () => {
+      const hookExecutor = vi.fn(async () => {
+        throw new HookExecutionError('after_create', 'pnpm', 1, 'install failed', '');
+      }) as HookExecutor;
+      const hooks: HookConfigMap = {
+        ...EMPTY_HOOKS,
+        after_create: [
+          { command: 'pnpm', args: ['install'], timeoutMs: 60_000, onFailure: 'fail' },
+        ],
+      };
+
+      const manager = createWorkspaceManager({
+        repoRoot,
+        workspaceRoot,
+        runGit,
+        hooks,
+        hookExecutor,
+      });
+
+      await expect(
+        manager.createWorkspace({
+          taskKey: 'issue-5',
+          branch: 'feature/5-foo',
+          baseRef: 'origin/main',
+        }),
+      ).rejects.toBeInstanceOf(HookExecutionError);
+      // worktree add は実行された (hook は worktree add 後に発火する)
+      expect(fixture.worktreeAdded).toHaveLength(1);
+    });
+
+    it('cleanupWorkspace は worktree remove 直前に before_remove hook を発火する', async () => {
+      const target = path.join(workspaceRoot, 'issue-5');
+      fixture.worktreeList = [`worktree ${target}`, 'branch refs/heads/feature/5-foo', ''].join(
+        '\n',
+      );
+
+      const callOrder: string[] = [];
+      const hookExecutor = vi.fn(async () => {
+        callOrder.push('hook');
+      }) as HookExecutor;
+      runGit.mockImplementation(async (args) => {
+        const argv = [...args];
+        if (argv[0] === 'worktree' && argv[1] === 'list') {
+          return { stdout: fixture.worktreeList, stderr: '' };
+        }
+        if (argv[0] === 'worktree' && argv[1] === 'remove') {
+          callOrder.push('worktree-remove');
+          return { stdout: '', stderr: '' };
+        }
+        return { stdout: '', stderr: '' };
+      });
+
+      const hooks: HookConfigMap = {
+        ...EMPTY_HOOKS,
+        before_remove: [{ command: 'cleanup', args: [], timeoutMs: 5_000, onFailure: 'fail' }],
+      };
+
+      const manager = createWorkspaceManager({
+        repoRoot,
+        workspaceRoot,
+        runGit,
+        hooks,
+        hookExecutor,
+      });
+
+      await manager.cleanupWorkspace({ taskKey: 'issue-5' });
+
+      expect(callOrder).toEqual(['hook', 'worktree-remove']);
+    });
+
+    it('before_remove hook が失敗しても cleanup は続行する (孤児 worktree 防止)', async () => {
+      const target = path.join(workspaceRoot, 'issue-5');
+      fixture.worktreeList = [`worktree ${target}`, 'branch refs/heads/feature/5-foo', ''].join(
+        '\n',
+      );
+
+      const hookExecutor = vi.fn(async () => {
+        throw new HookExecutionError('before_remove', 'cleanup', 1, 'fail', '');
+      }) as HookExecutor;
+      const hooks: HookConfigMap = {
+        ...EMPTY_HOOKS,
+        before_remove: [{ command: 'cleanup', args: [], timeoutMs: 5_000, onFailure: 'fail' }],
+      };
+
+      const manager = createWorkspaceManager({
+        repoRoot,
+        workspaceRoot,
+        runGit,
+        hooks,
+        hookExecutor,
+      });
+
+      await expect(manager.cleanupWorkspace({ taskKey: 'issue-5' })).resolves.toBeUndefined();
+      expect(fixture.worktreeRemoved).toEqual([target]);
+    });
+
+    it('runHooks() は orchestrator から before_run / after_run を発火するための API', async () => {
+      const hookExecutor = vi.fn(async () => undefined) as HookExecutor;
+      const hooks: HookConfigMap = {
+        ...EMPTY_HOOKS,
+        before_run: [{ command: 'precheck', args: [], timeoutMs: 5_000, onFailure: 'fail' }],
+      };
+
+      const manager = createWorkspaceManager({
+        repoRoot,
+        workspaceRoot,
+        runGit,
+        hooks,
+        hookExecutor,
+      });
+
+      await manager.runHooks('before_run', {
+        taskKey: 'issue-5',
+        branch: 'feature/5-foo',
+        workspacePath: path.join(workspaceRoot, 'issue-5'),
+        baseRef: 'origin/main',
+        extraEnv: { PHILHARMONIC_RUN_ID: 'rid' },
+      });
+
+      const call = vi.mocked(hookExecutor).mock.calls[0]?.[0];
+      expect(call?.event).toBe('before_run');
+      expect(call?.env.PHILHARMONIC_RUN_ID).toBe('rid');
+    });
   });
 });

@@ -48,6 +48,7 @@ function fakeConfig(overrides: Partial<Config> = {}): Config {
     polling: { intervalMs: 30_000 },
     retry: { maxAttempts: 3, maxBackoffMs: 600_000 },
     agent: { maxConcurrentAgents: 1, maxTurns: 1, stallTimeoutMs: 300_000 },
+    hooks: { afterCreate: [], beforeRun: [], afterRun: [], beforeRemove: [] },
     ...overrides,
   };
 }
@@ -74,6 +75,7 @@ const fakeWorkspace: WorkspaceManager = {
   resolveWorkspacePath: vi.fn(),
   createWorkspace: vi.fn(),
   cleanupWorkspace: vi.fn(),
+  runHooks: vi.fn(async () => undefined),
 };
 
 type FakeSubscription = ServeSignalSubscription & {
