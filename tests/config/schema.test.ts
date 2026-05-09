@@ -8,6 +8,7 @@ import {
   DEFAULT_KILL_GRACE_PERIOD_MS,
   DEFAULT_LOG_LEVEL,
   DEFAULT_PERMISSION_MODE,
+  DEFAULT_POLLING_INTERVAL_MS,
   DEFAULT_STATUS_FIELD,
   DEFAULT_TIMEOUT_MS,
   DEFAULT_WORKSPACE_ROOT,
@@ -30,6 +31,7 @@ describe('configSchema', () => {
       dispatchStatuses: [...DEFAULT_DISPATCH_STATUSES],
       cleanRetentionDays: DEFAULT_CLEAN_RETENTION_DAYS,
       logLevel: DEFAULT_LOG_LEVEL,
+      polling: { intervalMs: DEFAULT_POLLING_INTERVAL_MS },
     });
   });
 
@@ -221,6 +223,50 @@ describe('configSchema', () => {
       owner: 'hexylab',
       project_number: 1,
       clean_retention_days: -1,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('polling キーが完全に未指定でもデフォルト (30000) が補完される', () => {
+    const parsed = configSchema.parse({ owner: 'hexylab', project_number: 1 });
+    expect(parsed.polling).toEqual({ intervalMs: DEFAULT_POLLING_INTERVAL_MS });
+  });
+
+  it('polling: {} だけ指定でもデフォルト interval_ms が補完される', () => {
+    const parsed = configSchema.parse({
+      owner: 'hexylab',
+      project_number: 1,
+      polling: {},
+    });
+    expect(parsed.polling).toEqual({ intervalMs: DEFAULT_POLLING_INTERVAL_MS });
+  });
+
+  it('polling.interval_ms を明示指定すると camelCase で取り出せる', () => {
+    const parsed = configSchema.parse({
+      owner: 'hexylab',
+      project_number: 1,
+      polling: { interval_ms: 5000 },
+    });
+    expect(parsed.polling).toEqual({ intervalMs: 5000 });
+  });
+
+  it('polling.interval_ms が 0 以下だと検証エラーになる', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      polling: { interval_ms: 0 },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]?.path).toEqual(['polling', 'interval_ms']);
+    }
+  });
+
+  it('polling 配下の未知キーは strict で拒否する', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      polling: { interval_ms: 5000, jitter_ms: 1000 },
     });
     expect(result.success).toBe(false);
   });

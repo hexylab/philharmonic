@@ -13,6 +13,18 @@ export const DEFAULT_WORKSPACE_ROOT = '.philharmonic/worktrees';
 export const DEFAULT_DISPATCH_STATUSES: readonly string[] = ['Todo'];
 export const DEFAULT_CLEAN_RETENTION_DAYS = 7;
 export const DEFAULT_LOG_LEVEL: LogLevel = 'info';
+export const DEFAULT_POLLING_INTERVAL_MS = 30_000;
+
+const pollingSchema = z
+  .object({
+    interval_ms: z
+      .number({ message: 'polling.interval_ms は正の整数で指定してください' })
+      .int('polling.interval_ms は整数で指定してください')
+      .positive('polling.interval_ms は 1 以上で指定してください')
+      .default(DEFAULT_POLLING_INTERVAL_MS),
+  })
+  .strict()
+  .default({ interval_ms: DEFAULT_POLLING_INTERVAL_MS });
 
 const rawConfigSchema = z
   .object({
@@ -37,6 +49,7 @@ const rawConfigSchema = z
       .nonnegative('clean_retention_days は 0 以上で指定してください')
       .default(DEFAULT_CLEAN_RETENTION_DAYS),
     log_level: z.enum(LOG_LEVELS).default(DEFAULT_LOG_LEVEL),
+    polling: pollingSchema,
   })
   .strict();
 
@@ -53,6 +66,9 @@ export const configSchema = rawConfigSchema.transform((raw) => ({
   dispatchStatuses: raw.dispatch_statuses,
   cleanRetentionDays: raw.clean_retention_days,
   logLevel: raw.log_level,
+  polling: {
+    intervalMs: raw.polling.interval_ms,
+  },
 }));
 
 export type Config = z.infer<typeof configSchema>;

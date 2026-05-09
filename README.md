@@ -25,7 +25,7 @@ GitHub Projects v2 のボードに積んだ Issue を **Claude Code (headless mo
 
 失敗時 (timeout / 差分ゼロ / push 失敗 / PR 作成失敗 など) は Issue に失敗コメントを残し、Status を `Failed` に落とし、exit 1 で終了します。
 
-並列実行・自動 retry・自動 merge は行いません (1 コマンドで 1 ターン)。常駐したい場合は cron / systemd timer / GitHub Actions の `schedule` 等から定期的に呼んでください。
+並列実行・自動 retry・自動 merge は行いません (1 コマンドで 1 ターン)。常駐させたい場合は同梱の `philharmonic serve` (一定間隔で `runOnce` を繰り返すデーモン) を使うか、`philharmonic run` を cron / systemd timer / GitHub Actions の `schedule` から呼んでください。
 
 ## 必要なもの
 
@@ -68,16 +68,17 @@ project_number: 1
 
 主なキー:
 
-| キー               | 既定値    | 説明                                                                                                                                                                                                                                           |
-| ------------------ | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `owner`            | (必須)    | Project owner の GitHub login (user または org)                                                                                                                                                                                                |
-| `project_number`   | (必須)    | Project URL 末尾の整数 (`https://github.com/users/<owner>/projects/1` の `1`)                                                                                                                                                                  |
-| `base_branch`      | `main`    | PR の base ブランチ                                                                                                                                                                                                                            |
-| `status_field`     | `Status`  | Project の単一選択フィールド名                                                                                                                                                                                                                 |
-| `agent_user_login` | `null`    | `null` なら unassigned のみ拾う。bot に任せたいなら login を指定                                                                                                                                                                               |
-| `permission_mode`  | `auto`    | Claude Code の permission mode (`auto` = `--permission-mode acceptEdits`、`bypass` = `--dangerously-skip-permissions`。`bypass` は worktree 外 (ホスト全体) にも副作用が及び得るため、git worktree + 非特権ユーザによる隔離前提でのみ使用する) |
-| `timeout_ms`       | `1800000` | Runner の timeout (ミリ秒)                                                                                                                                                                                                                     |
-| `log_level`        | `info`    | 構造化ログの最低出力レベル (`debug` / `info` / `warn` / `error`)。詳細は [observability.md](./docs/specs/observability.md)                                                                                                                     |
+| キー                  | 既定値    | 説明                                                                                                                                                                                                                                           |
+| --------------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `owner`               | (必須)    | Project owner の GitHub login (user または org)                                                                                                                                                                                                |
+| `project_number`      | (必須)    | Project URL 末尾の整数 (`https://github.com/users/<owner>/projects/1` の `1`)                                                                                                                                                                  |
+| `base_branch`         | `main`    | PR の base ブランチ                                                                                                                                                                                                                            |
+| `status_field`        | `Status`  | Project の単一選択フィールド名                                                                                                                                                                                                                 |
+| `agent_user_login`    | `null`    | `null` なら unassigned のみ拾う。bot に任せたいなら login を指定                                                                                                                                                                               |
+| `permission_mode`     | `auto`    | Claude Code の permission mode (`auto` = `--permission-mode acceptEdits`、`bypass` = `--dangerously-skip-permissions`。`bypass` は worktree 外 (ホスト全体) にも副作用が及び得るため、git worktree + 非特権ユーザによる隔離前提でのみ使用する) |
+| `timeout_ms`          | `1800000` | Runner の timeout (ミリ秒)                                                                                                                                                                                                                     |
+| `log_level`           | `info`    | 構造化ログの最低出力レベル (`debug` / `info` / `warn` / `error`)。詳細は [observability.md](./docs/specs/observability.md)                                                                                                                     |
+| `polling.interval_ms` | `30000`   | `philharmonic serve` のポーリング間隔 (ミリ秒)。詳細は [serve-daemon.md](./docs/specs/serve-daemon.md)                                                                                                                                         |
 
 全キーの仕様は [docs/specs/config-schema.md](./docs/specs/config-schema.md) を参照してください。
 
@@ -117,6 +118,18 @@ philharmonic run --config ./path/to/philharmonic.yaml
 - 候補 0 件 → `no candidate` を出して exit 0
 - 成功 → `success run-id=... issue=#... pr=#... branch=...` を出して exit 0、PR が立つ
 - 失敗 → Issue に失敗コメントが入り、Status `Failed`、exit 1
+
+常駐デーモンとして使う:
+
+```sh
+# polling.interval_ms (default 30s) ごとに 1 件ずつ run を回す
+philharmonic serve
+
+# 別パスの設定ファイルを指定する場合
+philharmonic serve --config ./path/to/philharmonic.yaml
+```
+
+`philharmonic serve` は SIGTERM / SIGINT を受信すると **in-flight run の完了を待ってから** graceful に exit します (subprocess 強制終了はしません)。systemd / Docker など PID 1 として走らせるユースケースでも安全です。詳細は [docs/specs/serve-daemon.md](./docs/specs/serve-daemon.md) を参照してください。
 
 ## ログとデバッグ
 
