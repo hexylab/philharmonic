@@ -5,7 +5,8 @@ export type FailureReason =
   | 'stalled'
   | 'no_changes'
   | 'push'
-  | 'pr_create';
+  | 'pr_create'
+  | 'hook_failed';
 
 export type BootstrapErrorReason =
   | 'github_token_missing'

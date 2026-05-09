@@ -24,7 +24,13 @@ import {
   type CreateWorkflowSourceOptions,
   type WorkflowSource,
 } from '../workflow/index.js';
-import { createWorkspaceManager, type WorkspaceManager } from '../workspace/index.js';
+import {
+  createWorkspaceManager,
+  type HookConfigMap,
+  type WorkspaceManager,
+} from '../workspace/index.js';
+
+import { configHooksToHookConfigMap } from './hooks.js';
 
 export type RunCommandDeps = {
   cwd?: () => string;
@@ -32,7 +38,12 @@ export type RunCommandDeps = {
   getToken?: () => string;
   createGitHubClient?: (token: string) => GitHubClient;
   createProjectsClient?: (token: string) => ProjectsClient;
-  createWorkspaceManager?: (input: { repoRoot: string; workspaceRoot: string }) => WorkspaceManager;
+  createWorkspaceManager?: (input: {
+    repoRoot: string;
+    workspaceRoot: string;
+    hooks?: HookConfigMap;
+    logger?: ReturnType<typeof createLogger>;
+  }) => WorkspaceManager;
   createWorkflowSource?: (options: CreateWorkflowSourceOptions) => Promise<WorkflowSource>;
   runOnce?: typeof runOnce;
   stdout?: NodeJS.WritableStream;
@@ -112,15 +123,18 @@ async function runRunCommand(
   const githubClient = deps.createGitHubClient(token);
   const projectsClient = deps.createProjectsClient(token);
   const repoRoot = cwd;
-  const workspaceManager = deps.createWorkspaceManager({
-    repoRoot,
-    workspaceRoot: config.workspaceRoot,
-  });
   const runnerLogsRoot = path.resolve(repoRoot, '.philharmonic/runs');
 
   const logger: Logger = deps.createLogger({
     level: config.logLevel,
     destination: deps.stderr,
+  });
+
+  const workspaceManager = deps.createWorkspaceManager({
+    repoRoot,
+    workspaceRoot: config.workspaceRoot,
+    hooks: configHooksToHookConfigMap(config.hooks),
+    logger,
   });
 
   // WORKFLOW.md は repoRoot 直下に解決する。`philharmonic run` は単発実行のため watch=false。

@@ -64,6 +64,19 @@ Philharmonic の orchestration loop が必要とする設定値を `philharmonic
 | `agent.max_concurrent_agents` | `integer (>= 1)`                         | no   | `1`                       | `philharmonic serve` の 1 tick で並列 dispatch する Issue 件数の上限。`1` (default) で逐次実行 (MVP 互換)。`>= 2` で並列 dispatch (#24)。詳細: [serve-daemon.md#並列-dispatch-24](./serve-daemon.md#並列-dispatch-24)        |
 | `agent.max_turns`             | `integer (>= 1)`                         | no   | `1`                       | Runner の multi-turn loop 上限。`1` (default) で従来動作 (1 セッションで完結)。`>= 2` で `error_max_turns` のときに `--resume` で次ターンへ進む (#25)。詳細: [claude-runner.md#multi-turn-ループ-25](./claude-runner.md)     |
 | `agent.stall_timeout_ms`      | `integer (>= 0)`                         | no   | `300000` (5 分)           | Runner の stdout からの無音許容時間。`0` で stall detection を無効化する (#25)。詳細: [claude-runner.md#stall-detection-25](./claude-runner.md)                                                                              |
+| `hooks.after_create`          | `Hook[]`                                 | no   | `[]`                      | workspace 新規作成 (worktree add) 直後に発火する hook の配列。詳細: [workspace-manager.md#lifecycle-hooks-26](./workspace-manager.md#lifecycle-hooks-26)                                                                     |
+| `hooks.before_run`            | `Hook[]`                                 | no   | `[]`                      | Claude Code runner 起動直前に発火する hook の配列                                                                                                                                                                            |
+| `hooks.after_run`             | `Hook[]`                                 | no   | `[]`                      | runner 終了直後に発火する hook の配列。runner status (success / timeout / stalled / failed) に関わらず必ず発火する                                                                                                           |
+| `hooks.before_remove`         | `Hook[]`                                 | no   | `[]`                      | `git worktree remove` 直前に発火する hook の配列。`on_failure: 'fail'` でも cleanup は停止しない (孤児 worktree 防止)                                                                                                        |
+
+`Hook` の型定義 (上記 4 配列の各要素):
+
+| キー         | 型                     | 必須 | デフォルト | 説明                                                                               |
+| ------------ | ---------------------- | ---- | ---------- | ---------------------------------------------------------------------------------- |
+| `command`    | `string` (空文字不可)  | yes  | -          | 実行コマンド (PATH 解決される)                                                     |
+| `args`       | `string[]`             | no   | `[]`       | 引数の配列。shell を経由せず引数配列としてそのまま渡る                             |
+| `timeout_ms` | `integer (>= 1)`       | no   | `60000`    | hook 単体の timeout (ミリ秒)。超過時は SIGTERM → `kill_grace_period_ms` 後 SIGKILL |
+| `on_failure` | `'continue' \| 'fail'` | no   | `fail`     | 非ゼロ exit / spawn error / timeout のときの挙動                                   |
 
 未知のキーは zod の `strict()` で**拒否**する (typo を早期発見するため)。
 
@@ -101,6 +114,19 @@ agent:
   max_concurrent_agents: 1
   max_turns: 1
   stall_timeout_ms: 300000
+hooks:
+  after_create:
+    - command: pnpm
+      args: [install, --frozen-lockfile]
+      timeout_ms: 120000
+      on_failure: fail
+  before_run: []
+  after_run: []
+  before_remove:
+    - command: ./scripts/cleanup.sh
+      args: []
+      timeout_ms: 10000
+      on_failure: continue
 ```
 
 ### dispatch_statuses サンプル (#38)
@@ -150,6 +176,19 @@ type Config = {
     maxTurns: number;
     stallTimeoutMs: number;
   };
+  hooks: {
+    afterCreate: HookConfig[];
+    beforeRun: HookConfig[];
+    afterRun: HookConfig[];
+    beforeRemove: HookConfig[];
+  };
+};
+
+type HookConfig = {
+  command: string;
+  args: string[];
+  timeoutMs: number;
+  onFailure: 'continue' | 'fail';
 };
 ```
 

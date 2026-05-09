@@ -27,6 +27,8 @@ export const DEFAULT_RETRY_MAX_BACKOFF_MS = 10 * 60 * 1_000;
 export const DEFAULT_AGENT_MAX_CONCURRENT_AGENTS = 1;
 export const DEFAULT_AGENT_MAX_TURNS = 1;
 export const DEFAULT_AGENT_STALL_TIMEOUT_MS = 5 * 60 * 1_000;
+export const DEFAULT_HOOK_TIMEOUT_MS = 60 * 1_000;
+export const DEFAULT_HOOK_ON_FAILURE = 'fail' as const;
 
 const pollingSchema = z
   .object({
@@ -86,6 +88,34 @@ const agentSchema = z
     stall_timeout_ms: DEFAULT_AGENT_STALL_TIMEOUT_MS,
   });
 
+const hookEntrySchema = z
+  .object({
+    command: z.string().min(1, 'hooks.*.command は空文字以外で指定してください'),
+    args: z.array(z.string()).default([]),
+    timeout_ms: z
+      .number({ message: 'hooks.*.timeout_ms は 1 以上の整数で指定してください' })
+      .int('hooks.*.timeout_ms は整数で指定してください')
+      .positive('hooks.*.timeout_ms は 1 以上で指定してください')
+      .default(DEFAULT_HOOK_TIMEOUT_MS),
+    on_failure: z.enum(['continue', 'fail']).default(DEFAULT_HOOK_ON_FAILURE),
+  })
+  .strict();
+
+const hooksSchema = z
+  .object({
+    after_create: z.array(hookEntrySchema).default([]),
+    before_run: z.array(hookEntrySchema).default([]),
+    after_run: z.array(hookEntrySchema).default([]),
+    before_remove: z.array(hookEntrySchema).default([]),
+  })
+  .strict()
+  .default({
+    after_create: [],
+    before_run: [],
+    after_run: [],
+    before_remove: [],
+  });
+
 const rawConfigSchema = z
   .object({
     owner: z.string().min(1, 'owner は空文字以外の文字列で指定してください'),
@@ -116,6 +146,7 @@ const rawConfigSchema = z
     polling: pollingSchema,
     retry: retrySchema,
     agent: agentSchema,
+    hooks: hooksSchema,
   })
   .strict();
 
@@ -145,7 +176,27 @@ export const configSchema = rawConfigSchema.transform((raw) => ({
     maxTurns: raw.agent.max_turns,
     stallTimeoutMs: raw.agent.stall_timeout_ms,
   },
+  hooks: {
+    afterCreate: raw.hooks.after_create.map(toHookConfig),
+    beforeRun: raw.hooks.before_run.map(toHookConfig),
+    afterRun: raw.hooks.after_run.map(toHookConfig),
+    beforeRemove: raw.hooks.before_remove.map(toHookConfig),
+  },
 }));
+
+function toHookConfig(raw: z.infer<typeof hookEntrySchema>): {
+  command: string;
+  args: string[];
+  timeoutMs: number;
+  onFailure: 'continue' | 'fail';
+} {
+  return {
+    command: raw.command,
+    args: raw.args,
+    timeoutMs: raw.timeout_ms,
+    onFailure: raw.on_failure,
+  };
+}
 
 export type Config = z.infer<typeof configSchema>;
 export type RawConfigInput = z.input<typeof rawConfigSchema>;

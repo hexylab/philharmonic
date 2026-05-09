@@ -104,6 +104,12 @@ export type WorkspaceManager = {
   resolveWorkspacePath(taskKey: string): string;
   createWorkspace(input: CreateWorkspaceInput): Promise<Workspace>;
   cleanupWorkspace(input: CleanupWorkspaceInput): Promise<void>;
+  /**
+   * lifecycle hook を発火する。`after_create` / `before_remove` は manager が
+   * 自動で発火するため、呼び出し側 (orchestrator) は通常 `before_run` /
+   * `after_run` のみ呼ぶ。詳細は「Lifecycle Hooks (#26)」を参照
+   */
+  runHooks(event: HookEvent, context: HookContext): Promise<void>;
 };
 
 export function createWorkspaceManager(options: WorkspaceManagerOptions): WorkspaceManager;
@@ -111,13 +117,13 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions): Worksp
 
 ### Lifecycle
 
-| フェーズ | 動作                                                                                                                                                                                  |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 解決     | `resolveWorkspacePath(taskKey)` は task key の検査と path traversal 検査のみを行い、ファイルシステムには触れない                                                                      |
-| 作成     | `createWorkspace` は (1) workspace root を `mkdir -p`、(2) `git worktree list --porcelain` で既存 worktree を確認、(3) 既存があり再利用可なら早期 return、(4) なければ `worktree add` |
-| 再利用   | `reuse: true` のとき、同一 path に既存 worktree があり branch が一致すれば `reused=true` で即返す。path 一致 / branch 不一致なら `WorkspaceConflictError`                             |
-| 競合     | `reuse: false` で同一 path に worktree が存在する、または同名ローカルブランチが存在するときは `WorkspaceConflictError` を投げる                                                       |
-| 削除     | `cleanupWorkspace` は `git worktree remove --force <path>` を実行し、`deleteBranch: true` のとき `git branch -D <branch>` も実行する。冪等性のため、未登録 worktree は no-op          |
+| フェーズ | 動作                                                                                                                                                                                                                                     |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 解決     | `resolveWorkspacePath(taskKey)` は task key の検査と path traversal 検査のみを行い、ファイルシステムには触れない                                                                                                                         |
+| 作成     | `createWorkspace` は (1) workspace root を `mkdir -p`、(2) `git worktree list --porcelain` で既存 worktree を確認、(3) 既存があり再利用可なら早期 return、(4) なければ `worktree add`、(5) **新規作成時のみ `after_create` hook を発火** |
+| 再利用   | `reuse: true` のとき、同一 path に既存 worktree があり branch が一致すれば `reused=true` で即返す。path 一致 / branch 不一致なら `WorkspaceConflictError`。**`reused=true` のときは `after_create` を発火しない**                        |
+| 競合     | `reuse: false` で同一 path に worktree が存在する、または同名ローカルブランチが存在するときは `WorkspaceConflictError` を投げる                                                                                                          |
+| 削除     | `cleanupWorkspace` は (1) **`before_remove` hook を発火**、(2) `git worktree remove --force <path>` を実行し、`deleteBranch: true` のとき `git branch -D <branch>` も実行する。冪等性のため、未登録 worktree は no-op                    |
 
 `reuse: true` でも、worktree が登録されていない一方で同名のローカルブランチだけが既存の場合、`git worktree add -b <branch>` が `branch already exists` で失敗するため `GitCommandError` がそのまま伝播する。orchestrator 側はこのケースを `philharmonic clean` 等で先に解消するか、`reuse: false` を選んで `WorkspaceConflictError` の `branch_already_exists` で扱う。
 
@@ -144,6 +150,100 @@ export type GitRunner = (
 - `args` は配列で渡す。shell を経由しない
 - default 実装は `node:child_process` の `execFile` を Promise でラップする
 
+## Lifecycle Hooks (#26)
+
+Symphony の workspace hook 機構と同等のものを提供する。`philharmonic.yaml` の `hooks` セクションで指定された任意の shell コマンドを workspace ライフサイクルの各イベントで実行できる。
+
+### Hook イベント
+
+| イベント        | 発火タイミング                                                                                                        |
+| --------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `after_create`  | `createWorkspace` で **新規 worktree が作成された直後** (`reused=false` のときのみ)。reuse 時は発火しない             |
+| `before_run`    | orchestrator が Claude Code runner を起動する **直前**                                                                |
+| `after_run`     | runner が終了した **直後**。runner status (`success` / `timeout` / `stalled` / `failed`) に**かかわらず**毎回発火する |
+| `before_remove` | `cleanupWorkspace` で `git worktree remove` を呼ぶ **直前**。worktree が登録されていない (no-op) 場合は発火しない     |
+
+### 実行モデル
+
+- 各 event の hook は **配列順に逐次実行**される (並列実行はしない)
+- shell を経由せず引数を配列で `execFile` 相当で起動し、shell injection を避ける
+- `cwd` は workspace path (worktree root)。すべての event で同じ
+- 環境変数は親プロセスの env に以下を merge して渡す:
+  - `PHILHARMONIC_EVENT` — hook event 名 (`after_create` 等)
+  - `PHILHARMONIC_TASK_KEY` — task key (例: `issue-26`)
+  - `PHILHARMONIC_BRANCH` — sanitize 後の branch 名 (detached worktree の `before_remove` では `(detached)`)
+  - `PHILHARMONIC_WORKSPACE_PATH` — worktree の絶対パス
+  - `PHILHARMONIC_REPO_ROOT` — 主リポジトリの絶対パス
+  - `PHILHARMONIC_BASE_REF` — `createWorkspace` で渡した base ref (例: `origin/main`)。`before_remove` では未設定の場合あり
+  - `PHILHARMONIC_ISSUE_NUMBER` — orchestrator 経由の発火時のみ
+  - `PHILHARMONIC_RUN_ID` — orchestrator 経由の発火時のみ
+  - `PHILHARMONIC_RUN_STATUS` — `after_run` 時のみ。runner status をそのまま入れる
+
+### Hook 設定
+
+```yaml
+hooks:
+  after_create:
+    - command: pnpm
+      args: [install, --frozen-lockfile]
+      timeout_ms: 120000
+      on_failure: fail
+  before_run: []
+  after_run: []
+  before_remove:
+    - command: ./scripts/cleanup.sh
+      args: []
+      timeout_ms: 10000
+      on_failure: continue
+```
+
+| キー         | 型                     | 必須 | デフォルト | 説明                                                                              |
+| ------------ | ---------------------- | ---- | ---------- | --------------------------------------------------------------------------------- |
+| `command`    | `string` (空文字不可)  | yes  | -          | 実行コマンド (PATH 解決される)                                                    |
+| `args`       | `string[]`             | no   | `[]`       | 引数。配列のまま渡る                                                              |
+| `timeout_ms` | `integer (>= 1)`       | no   | `60000`    | 個別 hook の timeout。超過したら SIGTERM → grace period 後 SIGKILL                |
+| `on_failure` | `'continue' \| 'fail'` | no   | `fail`     | 非ゼロ exit / spawn error / timeout のときの挙動 (`fail` で `HookExecutionError`) |
+
+### 失敗時の挙動
+
+- `on_failure: continue` のとき、hook の失敗は warn ログ 1 行に留めて以降の hook を続行する。manager / orchestrator は throw しない
+- `on_failure: fail` のとき:
+  - `after_create` — `HookExecutionError` を throw する。worktree は作成済みのため、上位 (orchestrator) は `markFailed` で `before_remove` 経由のクリーンアップを行う
+  - `before_run` / `after_run` — `HookExecutionError` を throw し、orchestrator は `FailureReason='hook_failed'` として markFailed する
+  - **`before_remove` だけは特殊**: `on_failure: fail` でも cleanup を停止させない (孤児 worktree のほうが運用上有害)。warn ログを残し、後続の `git worktree remove` を続行する
+
+### Public API (hook 関連)
+
+```ts
+export type HookEvent = 'after_create' | 'before_run' | 'after_run' | 'before_remove';
+
+export type HookConfig = {
+  command: string;
+  args: readonly string[];
+  timeoutMs: number;
+  onFailure: 'continue' | 'fail';
+};
+
+export type HookConfigMap = Record<HookEvent, readonly HookConfig[]>;
+
+export type HookContext = {
+  taskKey: string;
+  branch: string;
+  workspacePath: string;
+  baseRef?: string;
+  extraEnv?: Record<string, string>;
+};
+
+export class HookExecutionError extends Error {
+  /* event / command / exitCode / stderr / stdout */
+}
+export class HookTimeoutError extends Error {
+  /* event / command / timeoutMs */
+}
+```
+
+`WorkspaceManagerOptions` に `hooks?: HookConfigMap` と `hookExecutor?: HookExecutor` (テスト用) を追加。`hooks` 未指定時は全 event 空配列扱い。
+
 ## エラーハンドリング
 
 | エラー                     | 発生条件                                                                      | 扱い方針                                                                             |
@@ -153,6 +253,8 @@ export type GitRunner = (
 | `InvalidBranchNameError`   | sanitize 後も git refname ルールに違反する (理論上は発生しない安全網)         | throw                                                                                |
 | `WorkspaceConflictError`   | `reuse: false` で同一 path / 同名ブランチが既存、または再利用不能             | throw。orchestrator 側で `Failure` フェーズに遷移する                                |
 | `GitCommandError`          | `git` の exit code が 0 以外                                                  | throw。`args` / `exitCode` / `stderr` / `stdout` を保持し、上位で構造化ログに残せる  |
+| `HookExecutionError`       | hook の非ゼロ exit / spawn error。`on_failure: 'fail'` のときのみ throw       | `before_remove` ではログのみで cleanup 続行、それ以外は throw                        |
+| `HookTimeoutError`         | hook が `timeout_ms` を超えた。`on_failure: 'fail'` のときのみ throw          | 同上                                                                                 |
 | 既存 worktree の path 不在 | `git worktree list --porcelain` には載っているがディレクトリは存在しない      | `git worktree prune` を試みず、`WorkspaceConflictError` で抜ける (運用 clean を要求) |
 
 ## 外部依存

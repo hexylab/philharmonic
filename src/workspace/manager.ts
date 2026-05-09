@@ -1,8 +1,18 @@
 import { mkdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 
+import type { Logger } from '../logger/index.js';
+
 import { GitCommandError, WorkspaceConflictError } from './errors.js';
 import { defaultGitRunner, parseWorktreeList, type GitRunner } from './git.js';
+import {
+  EMPTY_HOOK_CONFIG_MAP,
+  runHooksForEvent,
+  type HookConfigMap,
+  type HookContext,
+  type HookEvent,
+  type HookExecutor,
+} from './hooks.js';
 import { resolveWorkspacePath, resolveWorkspaceRoot } from './paths.js';
 import { sanitizeBranchName } from './sanitize.js';
 
@@ -10,6 +20,14 @@ export type WorkspaceManagerOptions = {
   repoRoot: string;
   workspaceRoot: string;
   runGit?: GitRunner;
+  /** lifecycle hook 設定。未指定時は全 event 空配列 */
+  hooks?: HookConfigMap;
+  /** hook 実行関数。テスト時のモック注入用。default は spawn ベース */
+  hookExecutor?: HookExecutor;
+  /** hook timeout 後 SIGTERM → SIGKILL までの猶予 (ミリ秒)。default 5000ms */
+  hookKillGracePeriodMs?: number;
+  /** hook 実行のログ出力先 */
+  logger?: Logger;
 };
 
 export type CreateWorkspaceInput = {
@@ -36,12 +54,36 @@ export type WorkspaceManager = {
   resolveWorkspacePath(taskKey: string): string;
   createWorkspace(input: CreateWorkspaceInput): Promise<Workspace>;
   cleanupWorkspace(input: CleanupWorkspaceInput): Promise<void>;
+  /**
+   * lifecycle hook を発火する。
+   * `after_create` / `before_remove` は manager 内部で自動発火するため、
+   * 上位レイヤ (orchestrator) は通常 `before_run` / `after_run` でのみ呼ぶ。
+   */
+  runHooks(event: HookEvent, context: HookContext): Promise<void>;
 };
 
 export function createWorkspaceManager(options: WorkspaceManagerOptions): WorkspaceManager {
   const repoRoot = options.repoRoot;
   const workspaceRootAbs = resolveWorkspaceRoot(repoRoot, options.workspaceRoot);
   const runGit = options.runGit ?? defaultGitRunner;
+  const hooks = options.hooks ?? EMPTY_HOOK_CONFIG_MAP;
+  const hookExecutor = options.hookExecutor;
+  const hookKillGracePeriodMs = options.hookKillGracePeriodMs;
+  const logger = options.logger;
+
+  const runHooks = async (event: HookEvent, context: HookContext): Promise<void> => {
+    await runHooksForEvent({
+      event,
+      hooks: hooks[event] ?? [],
+      context,
+      repoRoot,
+      executor: hookExecutor,
+      killGracePeriodMs: hookKillGracePeriodMs,
+      // before_remove は失敗しても cleanup を止めない (孤児 worktree 防止)
+      alwaysContinue: event === 'before_remove',
+      logger,
+    });
+  };
 
   return {
     resolveWorkspacePath(taskKey) {
@@ -97,6 +139,14 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions): Worksp
 
       await addWorktree(runGit, repoRoot, worktreePath, branch, input.baseRef);
 
+      // 新規作成時のみ after_create hook を発火 (reuse 時は skip)
+      await runHooks('after_create', {
+        taskKey: input.taskKey,
+        branch,
+        workspacePath: worktreePath,
+        baseRef: input.baseRef,
+      });
+
       return { taskKey: input.taskKey, path: worktreePath, branch, reused: false };
     },
 
@@ -105,6 +155,17 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions): Worksp
 
       const existing = await findExistingWorktree(runGit, repoRoot, worktreePath);
       if (existing !== null) {
+        // before_remove hook を worktree remove 直前に発火 (worktree 未登録時は skip)
+        // detached worktree の場合 PHILHARMONIC_BRANCH は '(detached)' を入れる
+        const branchForHook =
+          input.branch !== undefined
+            ? sanitizeBranchName(input.branch)
+            : (existing.branch ?? '(detached)');
+        await runHooks('before_remove', {
+          taskKey: input.taskKey,
+          branch: branchForHook,
+          workspacePath: worktreePath,
+        });
         await runGit(['worktree', 'remove', '--force', worktreePath], { cwd: repoRoot });
       }
 
@@ -115,6 +176,8 @@ export function createWorkspaceManager(options: WorkspaceManagerOptions): Worksp
         }
       }
     },
+
+    runHooks,
   };
 }
 

@@ -18,6 +18,7 @@ import { runConcurrent, runOnce, type RunOnceResult } from '../../src/orchestrat
 import type { Candidate, ProjectMetadata, ProjectsClient } from '../../src/projects/index.js';
 import type { RunResult } from '../../src/runner/index.js';
 import type { WorkflowSource } from '../../src/workflow/index.js';
+import { HookExecutionError } from '../../src/workspace/index.js';
 import type {
   CreateWorkspaceInput,
   GitRunner,
@@ -99,6 +100,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     projectNumber: 1,
     baseBranch: 'main',
     statusField: 'Status',
+    workflowFile: 'WORKFLOW.md',
     agentUserLogin: null,
     permissionMode: 'auto',
     timeoutMs: 30 * 60 * 1000,
@@ -110,6 +112,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     polling: { intervalMs: 30_000 },
     retry: { maxAttempts: 3, maxBackoffMs: 600_000 },
     agent: { maxConcurrentAgents: 1, maxTurns: 1, stallTimeoutMs: 300_000 },
+    hooks: { afterCreate: [], beforeRun: [], afterRun: [], beforeRemove: [] },
     ...overrides,
   };
 }
@@ -233,6 +236,7 @@ function makeWorkspaceMock(workspacePath: string): WorkspaceMock {
       }),
     ),
     cleanupWorkspace: vi.fn(async () => undefined),
+    runHooks: vi.fn(async () => undefined),
   };
 }
 
@@ -700,6 +704,69 @@ describe('runOnce', () => {
       (c) => (c[0] as UpdateProjectV2ItemStatusInput).optionId,
     );
     expect(optionIds).toEqual(['opt_ip', 'opt_fail']);
+  });
+
+  it('before_run hook が失敗すると reason=hook_failed で Failed 遷移する (#26)', async () => {
+    const projects = makeProjectsMock();
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    workspace.runHooks = vi.fn(async (event: string) => {
+      if (event === 'before_run') {
+        throw new HookExecutionError('before_run', 'precheck', 1, 'oops', '');
+      }
+    }) as unknown as typeof workspace.runHooks;
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+
+    const result = (await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      runClaude: runClaudeMock,
+      gitRunner: makeGitRunner(),
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+    })) as Extract<RunOnceResult, { kind: 'failed' }>;
+
+    expect(result.kind).toBe('failed');
+    expect(result.reason).toBe('hook_failed');
+    expect(runClaudeMock).not.toHaveBeenCalled();
+    expect(github.commentIssue).toHaveBeenCalledTimes(1);
+    const optionIds = github.updateProjectV2ItemStatus.mock.calls.map(
+      (c) => (c[0] as UpdateProjectV2ItemStatusInput).optionId,
+    );
+    expect(optionIds).toEqual(['opt_ip', 'opt_fail']);
+  });
+
+  it('after_run hook は runner status に関わらず PHILHARMONIC_RUN_STATUS 付きで発火する (#26)', async () => {
+    const projects = makeProjectsMock();
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const runClaudeMock = vi.fn(async () => makeRunResult({ status: 'timeout' }));
+
+    await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      runClaude: runClaudeMock,
+      gitRunner: makeGitRunner(),
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+    });
+
+    const events = workspace.runHooks.mock.calls.map((c) => c[0] as string);
+    expect(events).toContain('before_run');
+    expect(events).toContain('after_run');
+    const afterRunCall = workspace.runHooks.mock.calls.find((c) => c[0] === 'after_run');
+    const ctx = afterRunCall?.[1] as { extraEnv?: Record<string, string> } | undefined;
+    expect(ctx?.extraEnv?.PHILHARMONIC_RUN_STATUS).toBe('timeout');
   });
 });
 

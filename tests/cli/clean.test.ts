@@ -25,6 +25,7 @@ function fakeConfig(overrides: Partial<Config> = {}): Config {
     projectNumber: 1,
     baseBranch: 'main',
     statusField: 'Status',
+    workflowFile: 'WORKFLOW.md',
     agentUserLogin: null,
     permissionMode: 'auto',
     timeoutMs: 1_800_000,
@@ -36,6 +37,7 @@ function fakeConfig(overrides: Partial<Config> = {}): Config {
     polling: { intervalMs: 30_000 },
     retry: { maxAttempts: 3, maxBackoffMs: 600_000 },
     agent: { maxConcurrentAgents: 1, maxTurns: 1, stallTimeoutMs: 300_000 },
+    hooks: { afterCreate: [], beforeRun: [], afterRun: [], beforeRemove: [] },
     ...overrides,
   };
 }
@@ -45,6 +47,7 @@ function fakeWorkspaceManager(): WorkspaceManager {
     resolveWorkspacePath: vi.fn(),
     createWorkspace: vi.fn(),
     cleanupWorkspace: vi.fn(async () => undefined),
+    runHooks: vi.fn(async () => undefined),
   };
 }
 

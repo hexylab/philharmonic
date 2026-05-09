@@ -11,6 +11,7 @@ import {
   createWorkspaceManager,
   defaultGitRunner,
   type GitRunner,
+  type HookConfigMap,
   type IssueWorktree,
   type ListIssueWorktreesInput,
   type WorkspaceManager,
@@ -18,12 +19,18 @@ import {
   selectExpiredWorktrees,
 } from '../workspace/index.js';
 
+import { configHooksToHookConfigMap } from './hooks.js';
+
 export type CleanCommandDeps = {
   cwd?: () => string;
   now?: () => Date;
   loadConfig?: (configPath?: string, options?: { cwd?: string }) => Promise<Config>;
   listIssueWorktrees?: (input: ListIssueWorktreesInput) => Promise<IssueWorktree[]>;
-  createWorkspaceManager?: (input: { repoRoot: string; workspaceRoot: string }) => WorkspaceManager;
+  createWorkspaceManager?: (input: {
+    repoRoot: string;
+    workspaceRoot: string;
+    hooks?: HookConfigMap;
+  }) => WorkspaceManager;
   runGit?: GitRunner;
   stdout?: NodeJS.WritableStream;
   stderr?: NodeJS.WritableStream;
@@ -124,6 +131,7 @@ async function runClean(options: CleanOptions, deps: Required<CleanCommandDeps>)
   const manager = deps.createWorkspaceManager({
     repoRoot,
     workspaceRoot: config.workspaceRoot,
+    hooks: configHooksToHookConfigMap(config.hooks),
   });
 
   let removed = 0;
