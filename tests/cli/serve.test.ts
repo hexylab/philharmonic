@@ -10,7 +10,7 @@ import {
 import type { Config } from '../../src/config/index.js';
 import { ConfigFileNotFoundError } from '../../src/config/index.js';
 import { GitHubTokenNotSetError, type GitHubClient } from '../../src/github/index.js';
-import type { RunOnceResult } from '../../src/orchestrator/index.js';
+import type { ConcurrentDispatchOutcome, RunOnceResult } from '../../src/orchestrator/index.js';
 import type { ProjectsClient } from '../../src/projects/index.js';
 import {
   ServeLockHeldError,
@@ -46,6 +46,7 @@ function fakeConfig(overrides: Partial<Config> = {}): Config {
     logLevel: 'info',
     polling: { intervalMs: 30_000 },
     retry: { maxAttempts: 3, maxBackoffMs: 600_000 },
+    agent: { maxConcurrentAgents: 1 },
     ...overrides,
   };
 }
@@ -743,5 +744,173 @@ describe('philharmonic serve CLI コマンド', () => {
       (call) => typeof call[0] === 'string' && call[0].includes('polling.interval_ms が低く'),
     );
     expect(lowPollingWarnings).toHaveLength(0);
+  });
+
+  it('agent.maxConcurrentAgents > 1 のとき runConcurrent を呼び、各結果を slot 付きでログに出す (#24)', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const infoSpy = vi.fn();
+    const warnSpy = vi.fn();
+    const fakeLogger = {
+      level: 'info' as const,
+      debug: vi.fn(),
+      info: infoSpy,
+      warn: warnSpy,
+      error: vi.fn(),
+      child: vi.fn(),
+    };
+    fakeLogger.child.mockReturnValue(fakeLogger);
+
+    const recordFailure = vi.fn(
+      async (): Promise<RetryDecision> => ({
+        kind: 'scheduled',
+        attempts: 1,
+        backoffMs: 10_000,
+        nextAttemptAt: new Date('2026-05-09T00:00:10Z'),
+      }),
+    );
+    const recordSuccess = vi.fn(async () => undefined);
+    const pickReady = vi.fn(async (): Promise<RetryReadyEntry[]> => []);
+    const scheduler: RetryScheduler = { recordFailure, recordSuccess, pickReady };
+
+    const runConcurrentMock = vi.fn(
+      async (): Promise<ConcurrentDispatchOutcome[]> => [
+        {
+          slot: 0,
+          result: {
+            kind: 'success',
+            runId: 'rid-A',
+            issueNumber: 11,
+            prNumber: 100,
+            branch: 'feature/11-x',
+          },
+        },
+        {
+          slot: 1,
+          result: {
+            kind: 'failed',
+            runId: 'rid-B',
+            issueNumber: 22,
+            reason: 'runner_error',
+            branch: 'feature/22-y',
+          },
+        },
+      ],
+    );
+
+    const runOnceMock = vi.fn();
+    const serveLoopMock = vi.fn(
+      async (deps: { runOnce: () => Promise<RunOnceResult | undefined>; signal: AbortSignal }) => {
+        const r = await deps.runOnce();
+        // 並列パスでは undefined を返す (= serveLoop の result-log は抑制される)
+        expect(r).toBeUndefined();
+        subscription.emit('SIGTERM');
+        await new Promise<void>((resolve) => {
+          if (deps.signal.aborted) resolve();
+          else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+      },
+    );
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      getToken: () => 'tok',
+      loadConfig: async () => fakeConfig({ agent: { maxConcurrentAgents: 3 } }),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: runOnceMock as never,
+      runConcurrent: runConcurrentMock as never,
+      serveLoop: serveLoopMock as never,
+      promoteRetryReady: vi.fn(async () => ({
+        ready: 0,
+        promoted: 0,
+        skipped: 0,
+        failed: 0,
+      })) as never,
+      createRetryScheduler: () => scheduler,
+      createSignalSubscription: () => subscription,
+      createLogger: () => fakeLogger,
+    });
+
+    expect(runConcurrentMock).toHaveBeenCalledTimes(1);
+    const concurrentArg = runConcurrentMock.mock.calls[0]?.[0] as { maxConcurrent: number };
+    expect(concurrentArg.maxConcurrent).toBe(3);
+    expect(runOnceMock).not.toHaveBeenCalled();
+
+    const successLog = infoSpy.mock.calls.find((c) => c[0] === 'dispatch success');
+    expect(successLog?.[1]).toMatchObject({
+      slot: 0,
+      runId: 'rid-A',
+      issueNumber: 11,
+      prNumber: 100,
+    });
+    const failedLog = warnSpy.mock.calls.find((c) => c[0] === 'dispatch failed');
+    expect(failedLog?.[1]).toMatchObject({
+      slot: 1,
+      runId: 'rid-B',
+      issueNumber: 22,
+      reason: 'runner_error',
+    });
+
+    expect(recordSuccess).toHaveBeenCalledWith(11);
+    expect(recordFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ issueNumber: 22, reason: 'runner_error' }),
+    );
+  });
+
+  it('並列 dispatch で候補 0 件のときは no candidate を 1 行ログする', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const infoSpy = vi.fn();
+    const fakeLogger = {
+      level: 'info' as const,
+      debug: vi.fn(),
+      info: infoSpy,
+      warn: vi.fn(),
+      error: vi.fn(),
+      child: vi.fn(),
+    };
+    fakeLogger.child.mockReturnValue(fakeLogger);
+
+    const runConcurrentMock = vi.fn(async (): Promise<ConcurrentDispatchOutcome[]> => []);
+    const runOnceMock = vi.fn();
+    const serveLoopMock = vi.fn(
+      async (deps: { runOnce: () => Promise<RunOnceResult | undefined>; signal: AbortSignal }) => {
+        await deps.runOnce();
+        subscription.emit('SIGTERM');
+        await new Promise<void>((resolve) => {
+          if (deps.signal.aborted) resolve();
+          else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+      },
+    );
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      getToken: () => 'tok',
+      loadConfig: async () => fakeConfig({ agent: { maxConcurrentAgents: 2 } }),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: runOnceMock as never,
+      runConcurrent: runConcurrentMock as never,
+      serveLoop: serveLoopMock as never,
+      promoteRetryReady: vi.fn(async () => ({
+        ready: 0,
+        promoted: 0,
+        skipped: 0,
+        failed: 0,
+      })) as never,
+      createSignalSubscription: () => subscription,
+      createLogger: () => fakeLogger,
+    });
+
+    const noCandidate = infoSpy.mock.calls.filter((c) => c[0] === 'no candidate');
+    expect(noCandidate).toHaveLength(1);
   });
 });

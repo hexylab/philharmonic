@@ -20,6 +20,7 @@ import { defaultGitRunner, type GitRunner, type WorkspaceManager } from '../work
 import { BootstrapError, type FailureReason } from './errors.js';
 import { buildFailureCommentBody, buildPullRequestBody, summarizeRunResult } from './format.js';
 import { countCommitsAhead, fetchBaseBranch, pushBranch } from './git.js';
+import { dispatchPool } from './pool.js';
 import { parseRepositoryNameWithOwner, type Repository } from './repository.js';
 import { DEFAULT_DISPATCH_STATUSES, isAcceptableIssue, selectFirstByStatus } from './select.js';
 import { buildIssueSlug } from './slug.js';
@@ -154,6 +155,153 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     baseLogger,
     clock,
     generateRunId: deps.generateRunId,
+  });
+}
+
+export type RunConcurrentDeps = RunOnceDeps & {
+  maxConcurrent: number;
+};
+
+export type ConcurrentDispatchOutcome = {
+  slot: number;
+  result: Extract<RunOnceResult, { kind: 'success' | 'failed' }>;
+};
+
+/**
+ * 1 tick で `maxConcurrent` 件まで並列 dispatch する。
+ *
+ * - 候補は acceptable filter を通った先頭 N 件だけを pick する (1 tick の処理上限が予測しやすい)
+ * - 各 dispatch は独立した Promise として走り、相互に状態を汚染しない
+ * - dispatch 中の予期せぬ例外は worker 内で握って `failed` として結果配列に落とす
+ *   (BootstrapError 相当の Status update 失敗は warn ログのみ出して該当 Issue だけ skip)
+ * - 結果配列は dispatch 完了順で返す (slot ごとに完了タイミングが違うため)
+ *
+ * 仕様: docs/specs/serve-daemon.md#並列-dispatch-24
+ */
+export async function runConcurrent(deps: RunConcurrentDeps): Promise<ConcurrentDispatchOutcome[]> {
+  const baseLogger = deps.logger ?? noopLogger;
+  const clock = deps.clock ?? (() => new Date());
+  const remote = deps.remote ?? DEFAULT_REMOTE;
+  const dispatchStatuses =
+    deps.dispatchStatuses ?? deps.config.dispatchStatuses ?? DEFAULT_DISPATCH_STATUSES;
+  const { maxConcurrent } = deps;
+
+  if (maxConcurrent < 1) {
+    throw new Error(`runConcurrent: maxConcurrent must be >= 1 (got ${maxConcurrent})`);
+  }
+
+  // 1. Candidate Selection (上から最大 N 件 acceptable な candidate を pick)
+  const candidates = await deps.projectsClient.fetchProjectCandidates({
+    owner: deps.config.owner,
+    projectNumber: deps.config.projectNumber,
+    statusFieldName: deps.config.statusField,
+  });
+  const selected = await selectAcceptableCandidates({
+    candidates,
+    dispatchStatuses,
+    githubClient: deps.githubClient,
+    agentUserLogin: deps.config.agentUserLogin,
+    logger: baseLogger,
+    limit: maxConcurrent,
+  });
+  if (selected.length === 0) {
+    baseLogger.info('no candidate', { dispatchStatuses });
+    return [];
+  }
+
+  // 2. Project metadata + status options (1 回だけ取得)
+  let statusOptions: StatusOptionMap;
+  let projectId: string;
+  let statusFieldId: string;
+  try {
+    const metadata = await deps.projectsClient.fetchProjectMetadata({
+      owner: deps.config.owner,
+      projectNumber: deps.config.projectNumber,
+      statusFieldName: deps.config.statusField,
+    });
+    statusOptions = resolveStatusOptions(metadata);
+    projectId = metadata.projectId;
+    statusFieldId = metadata.statusFieldId;
+  } catch (error) {
+    throw new BootstrapError(
+      'metadata_load_failed',
+      `Project metadata の取得に失敗しました: ${describeError(error)}`,
+      { cause: error },
+    );
+  }
+
+  // 3. Status: Todo → In Progress を逐次に試みる (失敗は warn だけで skip)
+  //    並列で叩いてもいいが、結果集計とログがシンプルになるので先に直列で確定させる。
+  const dispatchable: SelectResult[] = [];
+  for (const task of selected) {
+    try {
+      await deps.githubClient.updateProjectV2ItemStatus({
+        projectId,
+        itemId: task.candidate.itemId,
+        fieldId: statusFieldId,
+        optionId: statusOptions['In Progress'],
+      });
+      dispatchable.push(task);
+    } catch (error) {
+      baseLogger.warn('concurrent dispatch status_transition skipped', {
+        issueNumber: task.candidate.issueNumber,
+        error: describeError(error),
+      });
+    }
+  }
+  if (dispatchable.length === 0) return [];
+
+  baseLogger.info('concurrent tick', {
+    maxConcurrent,
+    dispatched: dispatchable.length,
+  });
+
+  // 4. dispatchSelected を slot pool で並列実行
+  return await dispatchPool({
+    tasks: dispatchable,
+    maxConcurrent,
+    worker: async (task, slot): Promise<ConcurrentDispatchOutcome> => {
+      try {
+        const result = await dispatchSelected({
+          config: deps.config,
+          repoRoot: deps.repoRoot,
+          candidate: task.candidate,
+          issue: task.issue,
+          repository: task.repository,
+          projectId,
+          statusFieldId,
+          statusOptions,
+          githubClient: deps.githubClient,
+          workspaceManager: deps.workspaceManager,
+          runnerLogsRoot: deps.runnerLogsRoot,
+          remote,
+          runClaude: deps.runClaude,
+          gitRunner: deps.gitRunner,
+          baseLogger,
+          clock,
+          generateRunId: deps.generateRunId,
+        });
+        return { slot, result };
+      } catch (error) {
+        // dispatchSelected は通常 markFailed 経由で `failed` を return するため、
+        // ここに来るのは想定外の throw のみ。daemon を落とさず failed として記録する。
+        baseLogger.warn('dispatch error', {
+          slot,
+          issueNumber: task.candidate.issueNumber,
+          error: describeError(error),
+        });
+        return {
+          slot,
+          result: {
+            kind: 'failed',
+            runId: 'unknown',
+            issueNumber: task.candidate.issueNumber,
+            reason: 'runner_error',
+            branch: null,
+          },
+        };
+      }
+    },
   });
 }
 
@@ -505,13 +653,21 @@ type SelectResult = {
 };
 
 async function selectAcceptableCandidate(input: SelectInput): Promise<SelectResult | null> {
+  const results = await selectAcceptableCandidates({ ...input, limit: 1 });
+  return results[0] ?? null;
+}
+
+async function selectAcceptableCandidates(
+  input: SelectInput & { limit: number },
+): Promise<SelectResult[]> {
+  const acceptable: SelectResult[] = [];
   let remaining: readonly Candidate[] = input.candidates;
-  while (remaining.length > 0) {
+  while (remaining.length > 0 && acceptable.length < input.limit) {
     const candidate = selectFirstByStatus({
       candidates: remaining,
       dispatchStatuses: input.dispatchStatuses,
     });
-    if (candidate === null) return null;
+    if (candidate === null) break;
     const repository = parseRepositoryNameWithOwner(candidate.repositoryNameWithOwner);
     const issue = await input.githubClient.getIssue({
       owner: repository.owner,
@@ -519,17 +675,18 @@ async function selectAcceptableCandidate(input: SelectInput): Promise<SelectResu
       issueNumber: candidate.issueNumber,
     });
     if (issue.state === 'open') {
-      const acceptable = isAcceptableIssue({
+      const result = isAcceptableIssue({
         labels: issue.labels,
         assignees: issue.assignees,
         agentUserLogin: input.agentUserLogin,
       });
-      if (acceptable.ok) {
-        return { candidate, issue, repository };
+      if (result.ok) {
+        acceptable.push({ candidate, issue, repository });
+      } else {
+        input.logger.info(`skip candidate (${result.reason})`, {
+          issueNumber: candidate.issueNumber,
+        });
       }
-      input.logger.info(`skip candidate (${acceptable.reason})`, {
-        issueNumber: candidate.issueNumber,
-      });
     } else {
       input.logger.info('skip candidate (issue closed)', {
         issueNumber: candidate.issueNumber,
@@ -537,7 +694,7 @@ async function selectAcceptableCandidate(input: SelectInput): Promise<SelectResu
     }
     remaining = remaining.filter((c) => c.itemId !== candidate.itemId);
   }
-  return null;
+  return acceptable;
 }
 
 function extractAcceptanceCriteria(body: string): string {

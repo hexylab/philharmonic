@@ -23,6 +23,7 @@ export const MIN_POLLING_INTERVAL_MS = 1_000;
 export const LOW_POLLING_INTERVAL_WARN_THRESHOLD_MS = 5_000;
 export const DEFAULT_RETRY_MAX_ATTEMPTS = 3;
 export const DEFAULT_RETRY_MAX_BACKOFF_MS = 10 * 60 * 1_000;
+export const DEFAULT_AGENT_MAX_CONCURRENT_AGENTS = 1;
 
 const pollingSchema = z
   .object({
@@ -57,6 +58,19 @@ const retrySchema = z
     max_backoff_ms: DEFAULT_RETRY_MAX_BACKOFF_MS,
   });
 
+const agentSchema = z
+  .object({
+    max_concurrent_agents: z
+      .number({ message: 'agent.max_concurrent_agents は 1 以上の整数で指定してください' })
+      .int('agent.max_concurrent_agents は整数で指定してください')
+      .positive('agent.max_concurrent_agents は 1 以上で指定してください')
+      .default(DEFAULT_AGENT_MAX_CONCURRENT_AGENTS),
+  })
+  .strict()
+  .default({
+    max_concurrent_agents: DEFAULT_AGENT_MAX_CONCURRENT_AGENTS,
+  });
+
 const rawConfigSchema = z
   .object({
     owner: z.string().min(1, 'owner は空文字以外の文字列で指定してください'),
@@ -82,6 +96,7 @@ const rawConfigSchema = z
     log_level: z.enum(LOG_LEVELS).default(DEFAULT_LOG_LEVEL),
     polling: pollingSchema,
     retry: retrySchema,
+    agent: agentSchema,
   })
   .strict();
 
@@ -104,6 +119,9 @@ export const configSchema = rawConfigSchema.transform((raw) => ({
   retry: {
     maxAttempts: raw.retry.max_attempts,
     maxBackoffMs: raw.retry.max_backoff_ms,
+  },
+  agent: {
+    maxConcurrentAgents: raw.agent.max_concurrent_agents,
   },
 }));
 

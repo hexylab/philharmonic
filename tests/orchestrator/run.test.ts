@@ -14,7 +14,7 @@ import type {
   UpdateProjectV2ItemStatusResult,
 } from '../../src/github/index.js';
 import type { LogFields, Logger } from '../../src/logger/index.js';
-import { runOnce, type RunOnceResult } from '../../src/orchestrator/index.js';
+import { runConcurrent, runOnce, type RunOnceResult } from '../../src/orchestrator/index.js';
 import type { Candidate, ProjectMetadata, ProjectsClient } from '../../src/projects/index.js';
 import type { RunResult } from '../../src/runner/index.js';
 import type {
@@ -107,6 +107,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     logLevel: 'info',
     polling: { intervalMs: 30_000 },
     retry: { maxAttempts: 3, maxBackoffMs: 600_000 },
+    agent: { maxConcurrentAgents: 1 },
     ...overrides,
   };
 }
@@ -650,5 +651,274 @@ describe('runOnce', () => {
       (c) => (c[0] as UpdateProjectV2ItemStatusInput).optionId,
     );
     expect(optionIds).toEqual(['opt_ip', 'opt_fail']);
+  });
+});
+
+describe('runConcurrent', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(path.join(tmpdir(), 'phil-orch-conc-'));
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  function makeCandidate(issueNumber: number, status: string = 'Todo'): Candidate {
+    return {
+      itemId: `PVTI_${issueNumber}`,
+      issueNumber,
+      issueTitle: `task ${issueNumber}`,
+      issueUrl: `https://example.com/issues/${issueNumber}`,
+      issueState: 'OPEN',
+      repositoryNameWithOwner: 'hexylab/philharmonic',
+      status,
+    };
+  }
+
+  function makeIssue(issueNumber: number): Issue {
+    return {
+      number: issueNumber,
+      title: `task ${issueNumber}`,
+      body: SAMPLE_ISSUE_BODY,
+      state: 'open',
+      htmlUrl: `https://example.com/issues/${issueNumber}`,
+      labels: [],
+      assignees: [],
+    };
+  }
+
+  it('候補 0 件のときは空配列を返し、metadata fetch も Status update もしない', async () => {
+    const projects = makeProjectsMock([]);
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+
+    const outcomes = await runConcurrent({
+      config: makeConfig({ agent: { maxConcurrentAgents: 3 } }),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      runClaude: vi.fn(),
+      gitRunner: makeGitRunner(),
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      maxConcurrent: 3,
+    });
+
+    expect(outcomes).toEqual([]);
+    expect(projects.fetchProjectMetadata).not.toHaveBeenCalled();
+    expect(github.updateProjectV2ItemStatus).not.toHaveBeenCalled();
+  });
+
+  it('候補が maxConcurrent より多くても上から N 件しか dispatch しない', async () => {
+    const candidates = [1, 2, 3, 4, 5].map((n) => makeCandidate(n));
+    const projects = makeProjectsMock(candidates);
+    const github = makeGitHubMock({
+      getIssue: vi.fn(async (input: { issueNumber: number }) => makeIssue(input.issueNumber)),
+    });
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+    let runIdCounter = 0;
+    const idGen = (): string => {
+      runIdCounter += 1;
+      return `${FIXED_RUN_ID.slice(0, -8)}${runIdCounter.toString().padStart(8, '0')}`;
+    };
+
+    const outcomes = await runConcurrent({
+      config: makeConfig({ agent: { maxConcurrentAgents: 2 } }),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      runClaude: runClaudeMock,
+      gitRunner: makeGitRunner(),
+      generateRunId: idGen,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      maxConcurrent: 2,
+    });
+
+    expect(outcomes).toHaveLength(2);
+    const handledIssueNumbers = outcomes.map((o) => o.result.issueNumber).sort((a, b) => a - b);
+    expect(handledIssueNumbers).toEqual([1, 2]);
+    // 上から 2 件だけ Issue 取得される (3, 4, 5 は触らない)
+    const fetchedIssues = (github.getIssue.mock.calls as Array<[{ issueNumber: number }]>).map(
+      (c) => c[0].issueNumber,
+    );
+    expect(fetchedIssues.sort((a, b) => a - b)).toEqual([1, 2]);
+  });
+
+  it('複数 Issue を並列 dispatch する (各 dispatch は独立した Promise として走る)', async () => {
+    const candidates = [101, 102, 103].map((n) => makeCandidate(n));
+    const projects = makeProjectsMock(candidates);
+    const github = makeGitHubMock({
+      getIssue: vi.fn(async (input: { issueNumber: number }) => makeIssue(input.issueNumber)),
+    });
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    let runIdCounter = 0;
+    const idGen = (): string => {
+      runIdCounter += 1;
+      return `${FIXED_RUN_ID.slice(0, -8)}${runIdCounter.toString().padStart(8, '0')}`;
+    };
+
+    let active = 0;
+    let maxActive = 0;
+    const runClaudeMock = vi.fn(async () => {
+      active += 1;
+      if (active > maxActive) maxActive = active;
+      await new Promise((r) => setTimeout(r, 20));
+      active -= 1;
+      return makeRunResult();
+    });
+
+    const outcomes = await runConcurrent({
+      config: makeConfig({ agent: { maxConcurrentAgents: 3 } }),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      runClaude: runClaudeMock,
+      gitRunner: makeGitRunner(),
+      generateRunId: idGen,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      maxConcurrent: 3,
+    });
+
+    expect(outcomes).toHaveLength(3);
+    expect(maxActive).toBe(3);
+    const slots = outcomes.map((o) => o.slot).sort((a, b) => a - b);
+    expect(slots).toEqual([0, 1, 2]);
+    expect(outcomes.every((o) => o.result.kind === 'success')).toBe(true);
+  });
+
+  it('Status update が個別失敗しても他の dispatch を巻き込まない (warn して skip)', async () => {
+    const candidates = [201, 202, 203].map((n) => makeCandidate(n));
+    const projects = makeProjectsMock(candidates);
+    const updateMock = vi.fn(
+      async (input: UpdateProjectV2ItemStatusInput): Promise<UpdateProjectV2ItemStatusResult> => {
+        // 202 の Status update は In Progress 遷移時に失敗させる
+        if (input.optionId === 'opt_ip' && input.itemId === 'PVTI_202') {
+          throw new Error('graphql 5xx (transient)');
+        }
+        return { itemId: input.itemId };
+      },
+    );
+    const github = makeGitHubMock({
+      getIssue: vi.fn(async (input: { issueNumber: number }) => makeIssue(input.issueNumber)),
+      updateProjectV2ItemStatus: updateMock,
+    });
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    let runIdCounter = 0;
+    const idGen = (): string => {
+      runIdCounter += 1;
+      return `${FIXED_RUN_ID.slice(0, -8)}${runIdCounter.toString().padStart(8, '0')}`;
+    };
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+
+    const outcomes = await runConcurrent({
+      config: makeConfig({ agent: { maxConcurrentAgents: 3 } }),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      runClaude: runClaudeMock,
+      gitRunner: makeGitRunner(),
+      generateRunId: idGen,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      maxConcurrent: 3,
+    });
+
+    expect(outcomes).toHaveLength(2); // 201 と 203 だけが dispatch される
+    const handledIssueNumbers = outcomes.map((o) => o.result.issueNumber).sort((a, b) => a - b);
+    expect(handledIssueNumbers).toEqual([201, 203]);
+    expect(outcomes.every((o) => o.result.kind === 'success')).toBe(true);
+  });
+
+  it('runner_error は failed outcome として返る (他の slot は影響を受けない)', async () => {
+    const candidates = [301, 302].map((n) => makeCandidate(n));
+    const projects = makeProjectsMock(candidates);
+    const github = makeGitHubMock({
+      getIssue: vi.fn(async (input: { issueNumber: number }) => makeIssue(input.issueNumber)),
+    });
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    let runIdCounter = 0;
+    const idGen = (): string => {
+      runIdCounter += 1;
+      return `${FIXED_RUN_ID.slice(0, -8)}${runIdCounter.toString().padStart(8, '0')}`;
+    };
+
+    const runClaudeMock = vi.fn(async (input: { sessionId: string; workspacePath: string }) => {
+      // ある 1 件だけ runner failed
+      if (input.workspacePath.includes('301') || input.sessionId.endsWith('1')) {
+        return makeRunResult({ status: 'failed', exitCode: 1 });
+      }
+      return makeRunResult();
+    });
+
+    const outcomes = await runConcurrent({
+      config: makeConfig({ agent: { maxConcurrentAgents: 2 } }),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      runClaude: runClaudeMock,
+      gitRunner: makeGitRunner(),
+      generateRunId: idGen,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      maxConcurrent: 2,
+    });
+
+    expect(outcomes).toHaveLength(2);
+    const failed = outcomes.find((o) => o.result.kind === 'failed');
+    const success = outcomes.find((o) => o.result.kind === 'success');
+    expect(failed).toBeDefined();
+    expect(success).toBeDefined();
+  });
+
+  it('agentUserLogin と Issue assignee の不一致は skip される (上から N 件 acceptable filter)', async () => {
+    const candidates = [401, 402].map((n) => makeCandidate(n));
+    const projects = makeProjectsMock(candidates);
+    const github = makeGitHubMock({
+      getIssue: vi.fn(async (input: { issueNumber: number }) => {
+        // 401 だけ assignee 不一致
+        if (input.issueNumber === 401) {
+          return { ...makeIssue(401), assignees: [{ login: 'other-user' }] };
+        }
+        return makeIssue(input.issueNumber);
+      }),
+    });
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    let runIdCounter = 0;
+    const idGen = (): string => {
+      runIdCounter += 1;
+      return `${FIXED_RUN_ID.slice(0, -8)}${runIdCounter.toString().padStart(8, '0')}`;
+    };
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+
+    const outcomes = await runConcurrent({
+      config: makeConfig({
+        agentUserLogin: 'philharmonic-bot',
+        agent: { maxConcurrentAgents: 2 },
+      }),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      runClaude: runClaudeMock,
+      gitRunner: makeGitRunner(),
+      generateRunId: idGen,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      maxConcurrent: 2,
+    });
+
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]?.result.issueNumber).toBe(402);
   });
 });
