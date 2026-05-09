@@ -12,10 +12,14 @@ export {
   parseRepositoryNameWithOwner,
   type Repository,
 } from './repository.js';
+export { dispatchPool } from './pool.js';
 export {
   dispatchSelected,
+  runConcurrent,
   runOnce,
+  type ConcurrentDispatchOutcome,
   type DispatchSelectedDeps,
+  type RunConcurrentDeps,
   type RunOnceClock,
   type RunOnceDeps,
   type RunOnceResult,

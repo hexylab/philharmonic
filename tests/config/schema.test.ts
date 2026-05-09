@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   configSchema,
+  DEFAULT_AGENT_MAX_CONCURRENT_AGENTS,
   DEFAULT_BASE_BRANCH,
   DEFAULT_CLEAN_RETENTION_DAYS,
   DEFAULT_DISPATCH_STATUSES,
@@ -37,6 +38,9 @@ describe('configSchema', () => {
       retry: {
         maxAttempts: DEFAULT_RETRY_MAX_ATTEMPTS,
         maxBackoffMs: DEFAULT_RETRY_MAX_BACKOFF_MS,
+      },
+      agent: {
+        maxConcurrentAgents: DEFAULT_AGENT_MAX_CONCURRENT_AGENTS,
       },
     });
   });
@@ -372,6 +376,63 @@ describe('configSchema', () => {
       owner: 'hexylab',
       project_number: 1,
       retry: { max_attempts: 3, jitter_ms: 1000 },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('agent キーが完全に未指定でもデフォルト値 (1) が補完される (#24)', () => {
+    const parsed = configSchema.parse({ owner: 'hexylab', project_number: 1 });
+    expect(parsed.agent).toEqual({
+      maxConcurrentAgents: DEFAULT_AGENT_MAX_CONCURRENT_AGENTS,
+    });
+  });
+
+  it('agent: {} だけ指定でもデフォルト max_concurrent_agents が補完される', () => {
+    const parsed = configSchema.parse({
+      owner: 'hexylab',
+      project_number: 1,
+      agent: {},
+    });
+    expect(parsed.agent).toEqual({
+      maxConcurrentAgents: DEFAULT_AGENT_MAX_CONCURRENT_AGENTS,
+    });
+  });
+
+  it('agent.max_concurrent_agents を明示指定すると camelCase で取り出せる', () => {
+    const parsed = configSchema.parse({
+      owner: 'hexylab',
+      project_number: 1,
+      agent: { max_concurrent_agents: 5 },
+    });
+    expect(parsed.agent).toEqual({ maxConcurrentAgents: 5 });
+  });
+
+  it('agent.max_concurrent_agents が 0 以下だと検証エラーになる', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      agent: { max_concurrent_agents: 0 },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]?.path).toEqual(['agent', 'max_concurrent_agents']);
+    }
+  });
+
+  it('agent.max_concurrent_agents が小数だと検証エラーになる', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      agent: { max_concurrent_agents: 1.5 },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('agent 配下の未知キーは strict で拒否する', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      agent: { max_concurrent_agents: 3, by_state: 'foo' },
     });
     expect(result.success).toBe(false);
   });

@@ -2,7 +2,15 @@ import type { Logger } from '../logger/index.js';
 
 import type { RunOnceResult } from './run.js';
 
-export type ServeLoopRunOnce = () => Promise<RunOnceResult>;
+/**
+ * 1 tick の dispatch を実行する関数。
+ *
+ * - `RunOnceResult` を返した場合: serveLoop が結果に応じて `dispatch success` / `dispatch failed`
+ *   / `no candidate` をログに出す (max_concurrent_agents == 1 の互換挙動)
+ * - `undefined` を返した場合: serveLoop は結果ログを抑制する。並列 dispatch (#24) では
+ *   呼び出し元が個別に slot 付きでログを出すため undefined を返す
+ */
+export type ServeLoopRunOnce = () => Promise<RunOnceResult | undefined>;
 
 export type ServeLoopSleep = (ms: number, signal: AbortSignal) => Promise<void>;
 
@@ -35,7 +43,7 @@ export async function serveLoop(deps: ServeLoopDeps): Promise<void> {
 
       try {
         const result = await runOnce();
-        logRunResult(logger, result);
+        if (result !== undefined) logRunResult(logger, result);
       } catch (error) {
         logger.warn('dispatch error', { error: describeError(error) });
       }

@@ -20,8 +20,10 @@ import { createLogger, type Logger } from '../logger/index.js';
 import {
   promoteRetryReady,
   recoverInProgress,
+  runConcurrent,
   runOnce,
   serveLoop,
+  type ConcurrentDispatchOutcome,
   type RunOnceResult,
 } from '../orchestrator/index.js';
 import { createProjectsClient, type ProjectsClient } from '../projects/index.js';
@@ -70,6 +72,7 @@ export type ServeCommandDeps = {
   createWorkspaceManager?: (input: { repoRoot: string; workspaceRoot: string }) => WorkspaceManager;
   acquireServeLock?: (options: AcquireServeLockOptions) => Promise<ServeLockHandle>;
   runOnce?: typeof runOnce;
+  runConcurrent?: typeof runConcurrent;
   serveLoop?: typeof serveLoop;
   recoverInProgress?: typeof recoverInProgress;
   promoteRetryReady?: typeof promoteRetryReady;
@@ -91,6 +94,7 @@ const DEFAULT_DEPS: Required<ServeCommandDeps> = {
   createWorkspaceManager: (input) => createWorkspaceManager(input),
   acquireServeLock,
   runOnce,
+  runConcurrent,
   serveLoop,
   recoverInProgress,
   promoteRetryReady,
@@ -241,7 +245,9 @@ async function runServeCommand(
 
   const retryScheduler = deps.createRetryScheduler(repoRoot, config, logger);
 
-  const wrappedRunOnce = async (): Promise<RunOnceResult> => {
+  const maxConcurrent = config.agent.maxConcurrentAgents;
+
+  const wrappedRunOnce = async (): Promise<RunOnceResult | undefined> => {
     // 1) retry-state にあって nextAttemptAt 到達済みの Item を Failed → Todo に戻す
     //    state が空なら fetch を行わずに early return される (#22)
     try {
@@ -258,8 +264,24 @@ async function runServeCommand(
       });
     }
 
-    // 2) 通常 dispatch
-    const result = await deps.runOnce({
+    if (maxConcurrent === 1) {
+      // 互換挙動: 1 件処理して RunOnceResult を返却 (serveLoop が dispatch success/failed をログに出す)
+      const result = await deps.runOnce({
+        config,
+        repoRoot,
+        githubClient,
+        projectsClient,
+        workspaceManager,
+        runnerLogsRoot,
+        dispatchStatuses: config.dispatchStatuses,
+        logger,
+      });
+      await applyRetryDecision(retryScheduler, logger, result, null);
+      return result;
+    }
+
+    // 並列 dispatch (#24): 1 tick で最大 N 件並列処理。各結果は slot 付きでログを出す
+    const outcomes = await deps.runConcurrent({
       config,
       repoRoot,
       githubClient,
@@ -268,27 +290,20 @@ async function runServeCommand(
       runnerLogsRoot,
       dispatchStatuses: config.dispatchStatuses,
       logger,
+      maxConcurrent,
     });
-
-    // 3) 成功時は retry-state から削除、失敗時は attempts++ で再 schedule
-    try {
-      if (result.kind === 'success') {
-        await retryScheduler.recordSuccess(result.issueNumber);
-      } else if (result.kind === 'failed') {
-        const decision = await retryScheduler.recordFailure({
-          issueNumber: result.issueNumber,
-          reason: result.reason,
-          now: new Date(),
-        });
-        logRetryDecision(logger, result.runId, result.issueNumber, result.reason, decision);
+    if (outcomes.length === 0) {
+      logger.info('no candidate');
+    } else {
+      for (const outcome of outcomes) {
+        logConcurrentDispatch(logger, outcome);
       }
-    } catch (error) {
-      logger.warn('retry scheduler の更新に失敗 (state ファイル I/O エラー)', {
-        error: describeError(error),
-      });
+      // retry-state はファイル I/O が「最後勝ち」のため逐次に更新する (race-free)
+      for (const outcome of outcomes) {
+        await applyRetryDecision(retryScheduler, logger, outcome.result, outcome.slot);
+      }
     }
-
-    return result;
+    return undefined;
   };
 
   try {
@@ -344,16 +359,64 @@ function createProcessSignalSubscription(): ServeSignalSubscription {
   };
 }
 
+async function applyRetryDecision(
+  scheduler: RetryScheduler,
+  logger: Logger,
+  result: RunOnceResult,
+  slot: number | null,
+): Promise<void> {
+  try {
+    if (result.kind === 'success') {
+      await scheduler.recordSuccess(result.issueNumber);
+    } else if (result.kind === 'failed') {
+      const decision = await scheduler.recordFailure({
+        issueNumber: result.issueNumber,
+        reason: result.reason,
+        now: new Date(),
+      });
+      logRetryDecision(logger, result.runId, result.issueNumber, result.reason, decision, slot);
+    }
+  } catch (error) {
+    logger.warn('retry scheduler の更新に失敗 (state ファイル I/O エラー)', {
+      error: describeError(error),
+      ...(slot !== null && { slot }),
+    });
+  }
+}
+
+function logConcurrentDispatch(logger: Logger, outcome: ConcurrentDispatchOutcome): void {
+  const { slot, result } = outcome;
+  if (result.kind === 'success') {
+    logger.info('dispatch success', {
+      slot,
+      runId: result.runId,
+      issueNumber: result.issueNumber,
+      prNumber: result.prNumber,
+      branch: result.branch,
+    });
+    return;
+  }
+  logger.warn('dispatch failed', {
+    slot,
+    runId: result.runId,
+    issueNumber: result.issueNumber,
+    reason: result.reason,
+  });
+}
+
 function logRetryDecision(
   logger: Logger,
   runId: string,
   issueNumber: number,
   reason: string,
   decision: RetryDecision,
+  slot: number | null = null,
 ): void {
+  const slotField = slot !== null ? { slot } : {};
   switch (decision.kind) {
     case 'scheduled':
       logger.info('retry scheduled', {
+        ...slotField,
         runId,
         issueNumber,
         attempts: decision.attempts,
@@ -364,6 +427,7 @@ function logRetryDecision(
       return;
     case 'gave_up':
       logger.info('retry gave up (max attempts reached)', {
+        ...slotField,
         runId,
         issueNumber,
         attempts: decision.attempts,
