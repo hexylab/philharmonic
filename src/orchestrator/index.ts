@@ -12,13 +12,7 @@ export {
   parseRepositoryNameWithOwner,
   type Repository,
 } from './repository.js';
-export {
-  runOnce,
-  type RunOnceClock,
-  type RunOnceDeps,
-  type RunOnceLogger,
-  type RunOnceResult,
-} from './run.js';
+export { runOnce, type RunOnceClock, type RunOnceDeps, type RunOnceResult } from './run.js';
 export {
   DEFAULT_DISPATCH_STATUSES,
   DEFAULT_SKIP_LABEL,

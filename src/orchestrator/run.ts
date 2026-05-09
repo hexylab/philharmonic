@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import type { Config } from '../config/index.js';
 import type { GitHubClient, Issue } from '../github/index.js';
+import type { Logger } from '../logger/index.js';
 import type { Candidate, ProjectsClient } from '../projects/index.js';
 import { buildPrompt } from '../prompt/index.js';
 import {
@@ -26,12 +27,6 @@ import { resolveStatusOptions, type StatusOptionMap } from './status.js';
 
 const DEFAULT_REMOTE = 'origin';
 
-export type RunOnceLogger = {
-  info(message: string, fields?: Record<string, unknown>): void;
-  warn(message: string, fields?: Record<string, unknown>): void;
-  error(message: string, fields?: Record<string, unknown>): void;
-};
-
 export type RunOnceClock = () => Date;
 
 export type RunOnceDeps = {
@@ -45,7 +40,7 @@ export type RunOnceDeps = {
   dispatchStatuses?: readonly string[];
   runClaude?: typeof runClaude;
   gitRunner?: GitRunner;
-  logger?: RunOnceLogger;
+  logger?: Logger;
   clock?: RunOnceClock;
   generateRunId?: () => string;
 };
@@ -67,14 +62,17 @@ export type RunOnceResult =
       branch: string | null;
     };
 
-const noopLogger: RunOnceLogger = {
+const noopLogger: Logger = {
+  level: 'info',
+  debug: () => {},
   info: () => {},
   warn: () => {},
   error: () => {},
+  child: () => noopLogger,
 };
 
 export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
-  const logger = deps.logger ?? noopLogger;
+  const baseLogger = deps.logger ?? noopLogger;
   const clock = deps.clock ?? (() => new Date());
   const remote = deps.remote ?? DEFAULT_REMOTE;
   const dispatchStatuses =
@@ -94,10 +92,10 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     dispatchStatuses,
     githubClient: deps.githubClient,
     agentUserLogin: deps.config.agentUserLogin,
-    logger,
+    logger: baseLogger,
   });
   if (selected === null) {
-    logger.info('no candidate', { dispatchStatuses });
+    baseLogger.info('no candidate', { dispatchStatuses });
     return { kind: 'no_candidate' };
   }
 
@@ -105,10 +103,9 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
   const runId = idGen();
   const startedAt = clock();
   const runLog = await createRunLog({ runId, runsRoot: deps.runnerLogsRoot });
+  const logger = baseLogger.child({ runId, issueNumber: candidate.issueNumber });
 
   logger.info('candidate selected', {
-    runId,
-    issueNumber: candidate.issueNumber,
     repository: candidate.repositoryNameWithOwner,
   });
 
@@ -199,7 +196,6 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
   if (deps.config.permissionMode === 'bypass') {
     logger.warn(
       'permission_mode=bypass で Claude Code を起動します。--dangerously-skip-permissions の副作用は worktree 外 (ホスト全体) にも及び得るため、git worktree + 非特権ユーザによる隔離を必ず確認してください',
-      { runId, issueNumber: candidate.issueNumber },
     );
   }
   let run: RunResult;
@@ -212,6 +208,7 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
       timeoutMs: deps.config.timeoutMs,
       killGracePeriodMs: deps.config.killGracePeriodMs,
       logDir: runLog.dir,
+      logger,
     });
   } catch (error) {
     return await markFailed(failureContext, 'runner_error', error);
@@ -276,7 +273,6 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     });
   } catch (error) {
     logger.warn('Status を In Review に遷移できませんでした (PR は作成済み)', {
-      runId,
       error: describeError(error),
     });
   }
@@ -286,7 +282,6 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     await deps.workspaceManager.cleanupWorkspace({ taskKey, branch, deleteBranch: true });
   } catch (error) {
     logger.warn('worktree のクリーンアップに失敗しました', {
-      runId,
       error: describeError(error),
     });
   }
@@ -303,8 +298,6 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
   });
 
   logger.info('run completed successfully', {
-    runId,
-    issueNumber: candidate.issueNumber,
     prNumber,
     branch,
   });
@@ -330,7 +323,7 @@ type FailureContext = {
   statusOptions: StatusOptionMap;
   startedAt: Date;
   githubClient: GitHubClient;
-  logger: RunOnceLogger;
+  logger: Logger;
   clock: RunOnceClock;
 };
 
@@ -347,8 +340,6 @@ async function markFailed(
   const detail = error !== undefined && error !== null ? describeError(error) : null;
 
   ctx.logger.error('run failed', {
-    runId: ctx.runId,
-    issueNumber: ctx.candidate.issueNumber,
     reason,
     detail,
   });
@@ -369,7 +360,6 @@ async function markFailed(
     });
   } catch (commentError) {
     ctx.logger.warn('Issue 失敗コメントの投稿に失敗しました', {
-      runId: ctx.runId,
       error: describeError(commentError),
     });
   }
@@ -383,7 +373,6 @@ async function markFailed(
     });
   } catch (statusError) {
     ctx.logger.warn('Status を Failed に遷移できませんでした', {
-      runId: ctx.runId,
       error: describeError(statusError),
     });
   }
@@ -449,7 +438,7 @@ type SelectInput = {
   dispatchStatuses: readonly string[];
   githubClient: GitHubClient;
   agentUserLogin: string | null;
-  logger: RunOnceLogger;
+  logger: Logger;
 };
 
 type SelectResult = {

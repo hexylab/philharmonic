@@ -32,6 +32,7 @@ function fakeConfig(overrides: Partial<Config> = {}): Config {
     workspaceRoot: '.philharmonic/worktrees',
     dispatchStatuses: ['Todo'],
     cleanRetentionDays: 7,
+    logLevel: 'info',
     ...overrides,
   };
 }

@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { LOG_LEVELS, type LogLevel } from '../logger/index.js';
+
 export const DEFAULT_CONFIG_FILE = 'philharmonic.yaml';
 
 export const DEFAULT_BASE_BRANCH = 'main';
@@ -10,6 +12,7 @@ export const DEFAULT_KILL_GRACE_PERIOD_MS = 5_000;
 export const DEFAULT_WORKSPACE_ROOT = '.philharmonic/worktrees';
 export const DEFAULT_DISPATCH_STATUSES: readonly string[] = ['Todo'];
 export const DEFAULT_CLEAN_RETENTION_DAYS = 7;
+export const DEFAULT_LOG_LEVEL: LogLevel = 'info';
 
 const rawConfigSchema = z
   .object({
@@ -33,6 +36,7 @@ const rawConfigSchema = z
       .number({ message: 'clean_retention_days は 0 以上の数値で指定してください' })
       .nonnegative('clean_retention_days は 0 以上で指定してください')
       .default(DEFAULT_CLEAN_RETENTION_DAYS),
+    log_level: z.enum(LOG_LEVELS).default(DEFAULT_LOG_LEVEL),
   })
   .strict();
 
@@ -48,6 +52,7 @@ export const configSchema = rawConfigSchema.transform((raw) => ({
   workspaceRoot: raw.workspace_root,
   dispatchStatuses: raw.dispatch_statuses,
   cleanRetentionDays: raw.clean_retention_days,
+  logLevel: raw.log_level,
 }));
 
 export type Config = z.infer<typeof configSchema>;

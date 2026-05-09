@@ -77,6 +77,7 @@ project_number: 1
 | `agent_user_login` | `null`    | `null` なら unassigned のみ拾う。bot に任せたいなら login を指定                                                                                                                                                                               |
 | `permission_mode`  | `auto`    | Claude Code の permission mode (`auto` = `--permission-mode acceptEdits`、`bypass` = `--dangerously-skip-permissions`。`bypass` は worktree 外 (ホスト全体) にも副作用が及び得るため、git worktree + 非特権ユーザによる隔離前提でのみ使用する) |
 | `timeout_ms`       | `1800000` | Runner の timeout (ミリ秒)                                                                                                                                                                                                                     |
+| `log_level`        | `info`    | 構造化ログの最低出力レベル (`debug` / `info` / `warn` / `error`)。詳細は [observability.md](./docs/specs/observability.md)                                                                                                                     |
 
 全キーの仕様は [docs/specs/config-schema.md](./docs/specs/config-schema.md) を参照してください。
 
@@ -118,6 +119,27 @@ philharmonic run --config ./path/to/philharmonic.yaml
 - 失敗 → Issue に失敗コメントが入り、Status `Failed`、exit 1
 
 ## ログとデバッグ
+
+### 構造化ログ (stderr)
+
+`philharmonic run` は進捗・警告・失敗を **JSON line 形式の構造化ログ** として `stderr` に出力します。
+全イベントに `run_id` / `issue_number` が付き、Claude Code の subprocess 起動後は `session_id` も
+付与されるため、`jq` で対象 run のログだけを絞り込めます。
+
+```sh
+# 対象 run のログだけ取り出す
+philharmonic run 2>&1 1>/dev/null | jq -c 'select(.run_id == "01956a91-...")'
+
+# warn 以上だけ取り出す
+philharmonic run 2>&1 1>/dev/null | jq -c 'select(.level == "warn" or .level == "error")'
+```
+
+`stdout` には人間向けの結果 (`success run-id=... pr=#... branch=...` / `no candidate`) のみが出るため、
+shell スクリプトで結果を読み取るときと、ログを別途集計するときの責務が分離されています。
+
+レベルは `philharmonic.yaml` の `log_level` で制御します (詳細: [docs/specs/observability.md](./docs/specs/observability.md))。
+
+### 実行ファイル
 
 実行ごとに **対象リポジトリ** の `.philharmonic/runs/<run-id>/` に以下が残ります (`run-id` は UUIDv7 で時刻順ソート可能)。
 

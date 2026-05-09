@@ -6,6 +6,7 @@ import {
   DEFAULT_CLEAN_RETENTION_DAYS,
   DEFAULT_DISPATCH_STATUSES,
   DEFAULT_KILL_GRACE_PERIOD_MS,
+  DEFAULT_LOG_LEVEL,
   DEFAULT_PERMISSION_MODE,
   DEFAULT_STATUS_FIELD,
   DEFAULT_TIMEOUT_MS,
@@ -28,7 +29,27 @@ describe('configSchema', () => {
       workspaceRoot: DEFAULT_WORKSPACE_ROOT,
       dispatchStatuses: [...DEFAULT_DISPATCH_STATUSES],
       cleanRetentionDays: DEFAULT_CLEAN_RETENTION_DAYS,
+      logLevel: DEFAULT_LOG_LEVEL,
     });
+  });
+
+  it('log_level は debug / info / warn / error のみ許可する', () => {
+    expect(
+      configSchema.safeParse({ owner: 'hexylab', project_number: 1, log_level: 'trace' }).success,
+    ).toBe(false);
+    for (const level of ['debug', 'info', 'warn', 'error']) {
+      const parsed = configSchema.parse({
+        owner: 'hexylab',
+        project_number: 1,
+        log_level: level,
+      });
+      expect(parsed.logLevel).toBe(level);
+    }
+  });
+
+  it('log_level 未指定時はデフォルト (info) が補完される', () => {
+    const parsed = configSchema.parse({ owner: 'hexylab', project_number: 1 });
+    expect(parsed.logLevel).toBe(DEFAULT_LOG_LEVEL);
   });
 
   it('snake_case 入力を camelCase に正規化する', () => {

@@ -2,6 +2,8 @@ import { createWriteStream, type WriteStream } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
+import type { Logger } from '../logger/index.js';
+
 import { buildRunnerEnv } from './env.js';
 import {
   ClaudeNotInstalledError,
@@ -27,6 +29,7 @@ export type RunClaudeOptions = {
   env?: NodeJS.ProcessEnv;
   spawn?: SpawnFn;
   command?: string;
+  logger?: Logger;
 };
 
 export type RunResult = {
@@ -66,6 +69,7 @@ export async function runClaude(options: RunClaudeOptions): Promise<RunResult> {
   const logPaths = await prepareLogDir(options.logDir);
   const streamLog = logPaths !== null ? createWriteStream(logPaths.stream, { flags: 'a' }) : null;
   const stderrLog = logPaths !== null ? createWriteStream(logPaths.stderr, { flags: 'a' }) : null;
+  let runLogger = options.logger;
 
   const startedAt = Date.now();
   let child: SpawnedProcess;
@@ -73,8 +77,18 @@ export async function runClaude(options: RunClaudeOptions): Promise<RunResult> {
     child = spawnFn(command, args, { cwd: options.workspacePath, env });
   } catch (error) {
     await closeLogStreams(streamLog, stderrLog);
+    runLogger?.error('runner spawn failed', {
+      command,
+      error: describeSpawnError(error),
+    });
     throw toSpawnError(error, command);
   }
+
+  runLogger?.info('runner started', {
+    command,
+    permissionMode: options.permissionMode ?? 'auto',
+    timeoutMs,
+  });
 
   const parser = new StreamEventParser();
   let lastResult: ResultEvent | null = null;
@@ -92,6 +106,9 @@ export async function runClaude(options: RunClaudeOptions): Promise<RunResult> {
       if (e.type === 'result') lastResult = e;
       else if (e.type === 'system' && systemSessionId === null && e.sessionId !== undefined) {
         systemSessionId = e.sessionId;
+        if (runLogger !== undefined) {
+          runLogger = runLogger.child({ sessionId: e.sessionId });
+        }
       }
     });
   });
@@ -105,8 +122,12 @@ export async function runClaude(options: RunClaudeOptions): Promise<RunResult> {
     let killTimer: NodeJS.Timeout | null = null;
     const timeoutTimer: NodeJS.Timeout = setTimeout(() => {
       timedOut = true;
+      runLogger?.warn('runner timeout reached, sending SIGTERM', { timeoutMs });
       child.kill('SIGTERM');
       killTimer = setTimeout(() => {
+        runLogger?.warn('runner did not exit after SIGTERM, sending SIGKILL', {
+          killGracePeriodMs,
+        });
         child.kill('SIGKILL');
       }, killGracePeriodMs);
     }, timeoutMs);
@@ -121,6 +142,7 @@ export async function runClaude(options: RunClaudeOptions): Promise<RunResult> {
     };
 
     child.on('error', (err) => {
+      runLogger?.error('runner error event', { error: describeSpawnError(err) });
       settle(() => reject(toSpawnError(err, command)));
     });
 
@@ -154,6 +176,14 @@ export async function runClaude(options: RunClaudeOptions): Promise<RunResult> {
         resultEventReceived: lastResult !== null,
         logPaths,
       };
+      runLogger?.info('runner finished', {
+        status: result.status,
+        exitCode: result.exitCode,
+        signal: result.signal,
+        durationMs: result.durationMs,
+        numTurns: result.numTurns,
+        totalCostUsd: result.totalCostUsd,
+      });
       settle(() => resolve(result));
     });
   });
@@ -244,4 +274,9 @@ function toSpawnError(error: unknown, command: string): Error {
 
 function isErrnoException(value: unknown): value is NodeJS.ErrnoException {
   return value instanceof Error && 'code' in value;
+}
+
+function describeSpawnError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
 }

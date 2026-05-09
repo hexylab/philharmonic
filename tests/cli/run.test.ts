@@ -29,6 +29,8 @@ function fakeConfig(overrides: Partial<Config> = {}): Config {
     killGracePeriodMs: 5_000,
     workspaceRoot: '.philharmonic/worktrees',
     dispatchStatuses: ['Todo'],
+    cleanRetentionDays: 7,
+    logLevel: 'info',
     ...overrides,
   };
 }

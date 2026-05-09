@@ -61,3 +61,4 @@
 <!-- 新規 ADR を追加したらこのリストを更新する -->
 
 - [ADR-0001: 初期アーキテクチャ — 技術スタックと MVP スコープ](./0001-initial-architecture.md) (Accepted)
+- [ADR-0002: 横串の構造化ロガーを自作で導入する](./0002-structured-logger.md) (Accepted)
