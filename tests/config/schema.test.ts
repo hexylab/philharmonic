@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   configSchema,
   DEFAULT_BASE_BRANCH,
+  DEFAULT_DISPATCH_STATUSES,
   DEFAULT_KILL_GRACE_PERIOD_MS,
   DEFAULT_PERMISSION_MODE,
   DEFAULT_STATUS_FIELD,
@@ -24,6 +25,7 @@ describe('configSchema', () => {
       timeoutMs: DEFAULT_TIMEOUT_MS,
       killGracePeriodMs: DEFAULT_KILL_GRACE_PERIOD_MS,
       workspaceRoot: DEFAULT_WORKSPACE_ROOT,
+      dispatchStatuses: [...DEFAULT_DISPATCH_STATUSES],
     });
   });
 
@@ -38,6 +40,7 @@ describe('configSchema', () => {
       timeout_ms: 60_000,
       kill_grace_period_ms: 1_000,
       workspace_root: '.tmp/worktrees',
+      dispatch_statuses: ['Ready for Agent', 'Todo'],
     });
 
     expect(parsed.owner).toBe('hexylab');
@@ -49,6 +52,7 @@ describe('configSchema', () => {
     expect(parsed.timeoutMs).toBe(60_000);
     expect(parsed.killGracePeriodMs).toBe(1_000);
     expect(parsed.workspaceRoot).toBe('.tmp/worktrees');
+    expect(parsed.dispatchStatuses).toEqual(['Ready for Agent', 'Todo']);
   });
 
   it('owner が空文字だと検証エラーになる', () => {
@@ -134,5 +138,42 @@ describe('configSchema', () => {
     });
 
     expect(parsed.killGracePeriodMs).toBe(0);
+  });
+
+  it('dispatch_statuses 未指定時は ["Todo"] が補完される (#38 互換性)', () => {
+    const parsed = configSchema.parse({ owner: 'hexylab', project_number: 1 });
+    expect(parsed.dispatchStatuses).toEqual(['Todo']);
+  });
+
+  it('dispatch_statuses が空配列だと検証エラーになる', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      dispatch_statuses: [],
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]?.path).toEqual(['dispatch_statuses']);
+    }
+  });
+
+  it('dispatch_statuses に空文字を含むと検証エラーになる', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      dispatch_statuses: ['Todo', ''],
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('dispatch_statuses に複数 Status を指定できる (#38)', () => {
+    const parsed = configSchema.parse({
+      owner: 'hexylab',
+      project_number: 1,
+      dispatch_statuses: ['Ready for Agent', 'Todo'],
+    });
+    expect(parsed.dispatchStatuses).toEqual(['Ready for Agent', 'Todo']);
   });
 });
