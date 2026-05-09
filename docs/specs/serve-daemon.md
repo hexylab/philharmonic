@@ -10,7 +10,8 @@ recovery は本仕様の範囲外 (別 Issue)。
 ## 関連 Issue
 
 - #21 — philharmonic serve で常駐ポーリングデーモンを実装する
-- 関連 spec: [orchestration-mvp.md](./orchestration-mvp.md), [config-schema.md](./config-schema.md), [observability.md](./observability.md)
+- #49 — serve daemon の安全性 hardening を行う (lock file / bypass guard / polling 下限 / process tree kill)
+- 関連 spec: [orchestration-mvp.md](./orchestration-mvp.md), [config-schema.md](./config-schema.md), [claude-runner.md](./claude-runner.md), [observability.md](./observability.md)
 
 ## 用語
 
@@ -145,12 +146,67 @@ function createServeCommand(deps?: ServeCommandDeps): Command;
 daemon が落ちると運用負担が大きい」ため log のみで継続させる方針を採る。連続失敗の上限制御や exponential
 backoff は別 Issue で扱う。
 
+## Hardening (#49)
+
+`serve` を長時間・無人で回す前提の安全対策を bootstrap 段階に集約している。連続失敗 / retry /
+recovery (#22 / #23 / #24) の前提となる「単発で事故を起こさない」ことを守る層。
+
+### 二重起動防止 (local lock file)
+
+- lock file: `<repoRoot>/.philharmonic/serve.lock` (相対固定)
+- 内容: `{ pid: number, hostname: string, startedAt: ISO8601 string }` を JSON で保存
+- 取得: `open(path, 'wx')` で **atomic** 作成 (既存ファイルがあると EEXIST)
+- 既存 lock 検出時の判定階層 (上から順に評価):
+  1. JSON parse 失敗 → 前回 crash の半端書きと見なし、stale 扱いで奪取
+  2. `hostname` が現在ホストと異なる → `ServeLockHeldOnDifferentHostError` で exit 1
+     (NFS / 共有 FS 越しの誤検出を避けるため自動奪取しない)
+  3. 同 host + pid 生存 (`process.kill(pid, 0)`) → `ServeLockHeldError` で exit 1
+  4. 同 host + pid 死亡 → stale 扱いで奪取
+- 解放 (`release()`): lock の中身が**自分の pid と一致しているとき**だけ `unlink`
+  - これで「他プロセスに既に奪取された後の自分の release」で他プロセスの lock を消さない (race 安全)
+- bootstrap (token / config / bypass guard) を全て通った後に lock を取る。失敗時に lock を残さないため
+- `serveLoop` の `finally` で必ず `release()` を呼ぶ。serveLoop が例外を投げた場合も lock は解放される
+
+### `permission_mode: bypass` の opt-in guard
+
+- `permission_mode: bypass` を `serve` で使う場合、env `PHILHARMONIC_ALLOW_BYPASS_IN_SERVE=1` を必須にする
+- 未設定なら **lock 取得前** に exit 1 (二重起動チェックの副作用を残さないため)
+- opt-in 済みでも起動時に強い警告ログ (`permission_mode=bypass で serve を起動します`) を 1 行出す
+- `philharmonic run` (一過的実行) は引き続き opt-in env 不要 — guard は serve 限定
+
+### `polling.interval_ms` の下限と warning
+
+- zod schema 側で **下限 1000ms** を強制 (`MIN_POLLING_INTERVAL_MS = 1_000`)。1000ms 未満は config validation error で起動失敗
+- 1000ms 以上 5000ms 未満は **warning ログを 1 行** 出して GitHub API rate limit への注意を促す
+  (`LOW_POLLING_INTERVAL_WARN_THRESHOLD_MS = 5_000`)
+- 既定値は `30000` (30s) のまま。下限は典型値より十分低く設定して、検証用の高速 polling を許容しつつ過剰 polling は止める
+
+### 起動シーケンス (Hardening 後)
+
+1. token 解決 (失敗 → exit 1)
+2. config 読み込み (失敗 → exit 1)
+3. **bypass guard** (`permission_mode: bypass` で opt-in env が無ければ exit 1)
+4. **lock 取得** (失敗 → exit 1)
+5. logger 初期化、`bypass` / 低 polling の warning を 1 行ずつ
+6. signal subscription を張り、`serveLoop` を呼ぶ
+7. (loop 終了) `subscription.dispose()` → `lock.release()` を `finally` で必ず呼ぶ
+
+### structured log 追加分
+
+| level | msg                                               | fields                           | 説明                                                               |
+| ----- | ------------------------------------------------- | -------------------------------- | ------------------------------------------------------------------ |
+| warn  | `permission_mode=bypass で serve を起動します...` | `optInEnv`                       | bypass + opt-in 済みの起動時 1 回                                  |
+| warn  | `polling.interval_ms が低く設定されています...`   | `intervalMs`, `recommendedMinMs` | `intervalMs < 5000` のときの起動時 1 回                            |
+| warn  | `serve lock release に失敗`                       | `error`                          | shutdown 時の release 失敗 (race / FS エラー等)。daemon は終了済み |
+
 ## 外部依存
 
 - 既存 `runOnce` (`src/orchestrator/run.ts`)
 - 既存 `createLogger` (`src/logger/`)
+- 新規 `acquireServeLock` (`src/serve/lock.ts`) — 二重起動防止用 local lock
 - Node.js `AbortController` / `AbortSignal` (Node 22 LTS で標準)
 - Node.js `process.on('SIG*', ...)` (CLI レイヤのみ)
+- Node.js `process.kill(pid, 0)` — pid 生存確認 (lock の stale 判定)
 
 ## オープンクエスチョン
 

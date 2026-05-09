@@ -4,7 +4,7 @@ export {
   InvalidRunOptionsError,
   InvalidSessionIdError,
 } from './errors.js';
-export { SENSITIVE_ENV_KEYS, SENSITIVE_ENV_PREFIXES, buildRunnerEnv } from './env.js';
+export { ALLOWED_ENV_KEYS, ALLOWED_ENV_PREFIXES, buildRunnerEnv } from './env.js';
 export {
   StreamEventParser,
   type AssistantEvent,
@@ -18,6 +18,7 @@ export {
 export { defaultSpawn, type SpawnFn, type SpawnedProcess } from './spawn.js';
 export {
   runClaude,
+  type KillProcessGroupFn,
   type PermissionMode,
   type RunClaudeOptions,
   type RunResult,

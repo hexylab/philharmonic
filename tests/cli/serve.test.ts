@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  BYPASS_OPT_IN_ENV,
   createServeCommand,
   type ServeCommandDeps,
   type ServeSignalListener,
@@ -11,6 +12,7 @@ import { ConfigFileNotFoundError } from '../../src/config/index.js';
 import { GitHubTokenNotSetError, type GitHubClient } from '../../src/github/index.js';
 import type { RunOnceResult } from '../../src/orchestrator/index.js';
 import type { ProjectsClient } from '../../src/projects/index.js';
+import { ServeLockHeldError, type ServeLockHandle } from '../../src/serve/index.js';
 import type { WorkspaceManager } from '../../src/workspace/index.js';
 
 type Streams = {
@@ -84,6 +86,31 @@ function createFakeSubscription(): FakeSubscription {
   return sub;
 }
 
+type FakeLock = {
+  handle: ServeLockHandle;
+  released: boolean;
+  acquireSpy: ReturnType<typeof vi.fn>;
+};
+
+function createFakeLock(lockPath = '/tmp/repo/.philharmonic/serve.lock'): FakeLock {
+  const state = { released: false };
+  const handle: ServeLockHandle = {
+    lockPath,
+    contents: { pid: 1234, hostname: 'host-a', startedAt: '2026-05-09T00:00:00.000Z' },
+    release: vi.fn(async () => {
+      state.released = true;
+    }),
+  };
+  const acquireSpy = vi.fn(async () => handle);
+  return {
+    handle,
+    get released() {
+      return state.released;
+    },
+    acquireSpy,
+  };
+}
+
 async function runCmd(streams: Streams, deps: ServeCommandDeps, args: string[] = []) {
   const exit = vi.fn(() => {
     throw new Error('__exit__');
@@ -105,43 +132,41 @@ describe('philharmonic serve CLI コマンド', () => {
 
   it('GITHUB_TOKEN 未設定時は exit 1', async () => {
     const streams = createStreams();
+    const lock = createFakeLock();
     const { exit } = await runCmd(streams, {
       cwd: () => '/tmp/repo',
       getToken: () => {
         throw new GitHubTokenNotSetError();
       },
+      acquireServeLock: lock.acquireSpy,
     });
     expect(streams.stderr.write).toHaveBeenCalledWith(expect.stringContaining('GITHUB_TOKEN'));
     expect(exit).toHaveBeenCalledWith(1);
+    expect(lock.acquireSpy).not.toHaveBeenCalled();
   });
 
   it('config 読み込み失敗時は stderr に出して exit 1', async () => {
     const streams = createStreams();
+    const lock = createFakeLock();
     const { exit } = await runCmd(streams, {
       cwd: () => '/tmp/repo',
       getToken: () => 'tok',
       loadConfig: vi.fn(async () => {
         throw new ConfigFileNotFoundError('/tmp/repo/philharmonic.yaml');
       }),
+      acquireServeLock: lock.acquireSpy,
     });
     expect(streams.stderr.write).toHaveBeenCalledWith(expect.stringContaining('philharmonic.yaml'));
     expect(exit).toHaveBeenCalledWith(1);
+    expect(lock.acquireSpy).not.toHaveBeenCalled();
   });
 
-  it('config.polling.intervalMs を serveLoop に引き渡す', async () => {
+  it('config.polling.intervalMs を serveLoop に引き渡し、終了時に lock を release する', async () => {
     const streams = createStreams();
     const subscription = createFakeSubscription();
+    const lock = createFakeLock();
     const serveLoopMock = vi.fn(async (deps: { signal: AbortSignal; intervalMs: number }) => {
-      // 即時 signal を立てて exit させる
-      await new Promise<void>((resolve) => {
-        if (deps.signal.aborted) resolve();
-        else deps.signal.addEventListener('abort', () => resolve(), { once: true });
-      });
-    });
-    // signal が抑止される前に subscription 経由で SIGTERM を投げる
-    const onCalled = vi.fn(() => subscription.emit('SIGTERM'));
-    serveLoopMock.mockImplementation(async (deps) => {
-      onCalled();
+      subscription.emit('SIGTERM');
       await new Promise<void>((resolve) => {
         if (deps.signal.aborted) resolve();
         else deps.signal.addEventListener('abort', () => resolve(), { once: true });
@@ -155,6 +180,7 @@ describe('philharmonic serve CLI コマンド', () => {
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
       createWorkspaceManager: () => fakeWorkspace,
+      acquireServeLock: lock.acquireSpy,
       runOnce: vi.fn(),
       serveLoop: serveLoopMock as never,
       createSignalSubscription: () => subscription,
@@ -164,11 +190,14 @@ describe('philharmonic serve CLI コマンド', () => {
     const arg = serveLoopMock.mock.calls[0]?.[0] as { intervalMs: number };
     expect(arg.intervalMs).toBe(7_500);
     expect(subscription.disposed).toBe(true);
+    expect(lock.acquireSpy).toHaveBeenCalledTimes(1);
+    expect(lock.released).toBe(true);
   });
 
   it('SIGTERM 受信で in-flight run の完了を待ってから exit する (Acceptance Criteria)', async () => {
     const streams = createStreams();
     const subscription = createFakeSubscription();
+    const lock = createFakeLock();
 
     let runOnceResolve!: (v: RunOnceResult) => void;
     const runOncePromise = new Promise<RunOnceResult>((res) => {
@@ -181,31 +210,28 @@ describe('philharmonic serve CLI コマンド', () => {
       return r;
     });
 
-    // 実 serveLoop を使って end-to-end 検証する
     const { serveLoop } = await import('../../src/orchestrator/index.js');
 
     const cmdPromise = runCmd(streams, {
       cwd: () => '/tmp/repo',
       getToken: () => 'tok',
-      loadConfig: async () => fakeConfig({ polling: { intervalMs: 50 } }),
+      loadConfig: async () => fakeConfig({ polling: { intervalMs: 1_000 } }),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
       createWorkspaceManager: () => fakeWorkspace,
+      acquireServeLock: lock.acquireSpy,
       runOnce: runOnceMock as never,
       serveLoop,
       createSignalSubscription: () => subscription,
     });
 
-    // 少し待って runOnce が走り出すのを確認
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(runOnceMock).toHaveBeenCalledTimes(1);
     expect(runOnceFinishedAt).toBeNull();
 
-    // SIGTERM を投げる
     subscription.emit('SIGTERM');
     const sigtermAt = Date.now();
 
-    // SIGTERM を投げただけでは終わらないことを確認
     let cmdResolved = false;
     void cmdPromise.then(() => {
       cmdResolved = true;
@@ -214,7 +240,6 @@ describe('philharmonic serve CLI コマンド', () => {
     expect(cmdResolved).toBe(false);
     expect(runOnceFinishedAt).toBeNull();
 
-    // run を完了させる
     runOnceResolve({ kind: 'no_candidate' });
     await cmdPromise;
 
@@ -222,11 +247,13 @@ describe('philharmonic serve CLI コマンド', () => {
     expect(runOnceFinishedAt).not.toBeNull();
     expect(runOnceFinishedAt!).toBeGreaterThanOrEqual(sigtermAt);
     expect(subscription.disposed).toBe(true);
+    expect(lock.released).toBe(true);
   });
 
   it('SIGINT でも graceful shutdown する', async () => {
     const streams = createStreams();
     const subscription = createFakeSubscription();
+    const lock = createFakeLock();
     const runOnceMock = vi.fn(async (): Promise<RunOnceResult> => ({ kind: 'no_candidate' }));
     const { serveLoop } = await import('../../src/orchestrator/index.js');
 
@@ -237,17 +264,225 @@ describe('philharmonic serve CLI コマンド', () => {
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
       createWorkspaceManager: () => fakeWorkspace,
+      acquireServeLock: lock.acquireSpy,
       runOnce: runOnceMock as never,
       serveLoop,
       createSignalSubscription: () => subscription,
     });
 
-    // runOnce が走るまで待つ
     await new Promise((resolve) => setTimeout(resolve, 20));
     subscription.emit('SIGINT');
 
     await cmdPromise;
     expect(runOnceMock.mock.calls.length).toBeGreaterThanOrEqual(1);
     expect(subscription.disposed).toBe(true);
+    expect(lock.released).toBe(true);
+  });
+
+  it('lock 取得失敗 (二重起動) で exit 1', async () => {
+    const streams = createStreams();
+    const acquire = vi.fn(async () => {
+      throw new ServeLockHeldError(
+        '/tmp/repo/.philharmonic/serve.lock',
+        9999,
+        'host-a',
+        '2026-05-09T00:00:00.000Z',
+      );
+    });
+    const { exit } = await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      getToken: () => 'tok',
+      loadConfig: async () => fakeConfig(),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      acquireServeLock: acquire,
+    });
+    expect(streams.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining('serve は既に起動中の可能性があります'),
+    );
+    expect(exit).toHaveBeenCalledWith(1);
+  });
+
+  it('serveLoop が例外を投げても finally で lock を release する', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const serveLoopMock = vi.fn(async () => {
+      throw new Error('boom');
+    });
+
+    let caught: unknown = null;
+    const exit = vi.fn(() => {
+      throw new Error('__exit__');
+    });
+    const cmd = createServeCommand({
+      ...streams,
+      cwd: () => '/tmp/repo',
+      getToken: () => 'tok',
+      loadConfig: async () => fakeConfig(),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: vi.fn(),
+      serveLoop: serveLoopMock as never,
+      createSignalSubscription: () => subscription,
+      exit: exit as never,
+    });
+    try {
+      await cmd.parseAsync([], { from: 'user' });
+    } catch (error) {
+      caught = error;
+    }
+    expect((caught as Error).message).toBe('boom');
+    expect(lock.released).toBe(true);
+    expect(subscription.disposed).toBe(true);
+  });
+
+  it('permission_mode=bypass + opt-in env なし → exit 1 (lock 取得前)', async () => {
+    const streams = createStreams();
+    const lock = createFakeLock();
+    const { exit } = await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      getToken: () => 'tok',
+      loadConfig: async () => fakeConfig({ permissionMode: 'bypass' }),
+      getEnv: () => undefined,
+      acquireServeLock: lock.acquireSpy,
+    });
+    expect(streams.stderr.write).toHaveBeenCalledWith(expect.stringContaining(BYPASS_OPT_IN_ENV));
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(lock.acquireSpy).not.toHaveBeenCalled();
+  });
+
+  it('permission_mode=bypass + opt-in env=1 なら起動して警告ログを出す', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const warnSpy = vi.fn();
+    const fakeLogger = {
+      level: 'info' as const,
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: warnSpy,
+      error: vi.fn(),
+      child: vi.fn(),
+    };
+    fakeLogger.child.mockReturnValue(fakeLogger);
+
+    const serveLoopMock = vi.fn(async (deps: { signal: AbortSignal }) => {
+      subscription.emit('SIGTERM');
+      await new Promise<void>((resolve) => {
+        if (deps.signal.aborted) resolve();
+        else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    });
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      getToken: () => 'tok',
+      loadConfig: async () => fakeConfig({ permissionMode: 'bypass' }),
+      getEnv: (key) => (key === BYPASS_OPT_IN_ENV ? '1' : undefined),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: vi.fn(),
+      serveLoop: serveLoopMock as never,
+      createSignalSubscription: () => subscription,
+      createLogger: () => fakeLogger,
+    });
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('permission_mode=bypass で serve を起動します'),
+      expect.objectContaining({ optInEnv: BYPASS_OPT_IN_ENV }),
+    );
+    expect(lock.released).toBe(true);
+  });
+
+  it('polling.intervalMs が 5000ms 未満なら警告ログを出す', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const warnSpy = vi.fn();
+    const fakeLogger = {
+      level: 'info' as const,
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: warnSpy,
+      error: vi.fn(),
+      child: vi.fn(),
+    };
+    fakeLogger.child.mockReturnValue(fakeLogger);
+
+    const serveLoopMock = vi.fn(async (deps: { signal: AbortSignal }) => {
+      subscription.emit('SIGTERM');
+      await new Promise<void>((resolve) => {
+        if (deps.signal.aborted) resolve();
+        else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    });
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      getToken: () => 'tok',
+      loadConfig: async () => fakeConfig({ polling: { intervalMs: 2_000 } }),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: vi.fn(),
+      serveLoop: serveLoopMock as never,
+      createSignalSubscription: () => subscription,
+      createLogger: () => fakeLogger,
+    });
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('polling.interval_ms が低く設定されています'),
+      expect.objectContaining({ intervalMs: 2_000 }),
+    );
+  });
+
+  it('polling.intervalMs >= 5000ms なら警告ログを出さない', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const warnSpy = vi.fn();
+    const fakeLogger = {
+      level: 'info' as const,
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: warnSpy,
+      error: vi.fn(),
+      child: vi.fn(),
+    };
+    fakeLogger.child.mockReturnValue(fakeLogger);
+
+    const serveLoopMock = vi.fn(async (deps: { signal: AbortSignal }) => {
+      subscription.emit('SIGTERM');
+      await new Promise<void>((resolve) => {
+        if (deps.signal.aborted) resolve();
+        else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    });
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      getToken: () => 'tok',
+      loadConfig: async () => fakeConfig({ polling: { intervalMs: 5_000 } }),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: vi.fn(),
+      serveLoop: serveLoopMock as never,
+      createSignalSubscription: () => subscription,
+      createLogger: () => fakeLogger,
+    });
+
+    const lowPollingWarnings = warnSpy.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].includes('polling.interval_ms が低く'),
+    );
+    expect(lowPollingWarnings).toHaveLength(0);
   });
 });

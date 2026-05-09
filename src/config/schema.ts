@@ -14,13 +14,23 @@ export const DEFAULT_DISPATCH_STATUSES: readonly string[] = ['Todo'];
 export const DEFAULT_CLEAN_RETENTION_DAYS = 7;
 export const DEFAULT_LOG_LEVEL: LogLevel = 'info';
 export const DEFAULT_POLLING_INTERVAL_MS = 30_000;
+export const MIN_POLLING_INTERVAL_MS = 1_000;
+/**
+ * 過剰 polling の suggestion threshold。下限 (`MIN_POLLING_INTERVAL_MS`) は超えているが
+ * `LOW_POLLING_INTERVAL_WARN_THRESHOLD_MS` 未満の場合、`philharmonic serve` 起動時に
+ * 警告ログを 1 行出して GitHub API rate limit への注意を促す。
+ */
+export const LOW_POLLING_INTERVAL_WARN_THRESHOLD_MS = 5_000;
 
 const pollingSchema = z
   .object({
     interval_ms: z
       .number({ message: 'polling.interval_ms は正の整数で指定してください' })
       .int('polling.interval_ms は整数で指定してください')
-      .positive('polling.interval_ms は 1 以上で指定してください')
+      .min(
+        MIN_POLLING_INTERVAL_MS,
+        `polling.interval_ms は ${MIN_POLLING_INTERVAL_MS} 以上で指定してください (過剰 polling 防止のため)`,
+      )
       .default(DEFAULT_POLLING_INTERVAL_MS),
   })
   .strict()
