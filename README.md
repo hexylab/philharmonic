@@ -1,13 +1,13 @@
 # Philharmonic
 
-> **GitHub Projects v2 の Todo に積んだ Issue を、隔離された git worktree の中で Claude Code に解かせ、Pull Request として返してもらう coding-agent オーケストレータ。**
+> **`philharmonic serve` を常駐させておけば、GitHub Projects v2 の Todo にチケットを積むだけで Claude Code が勝手に拾って Pull Request にしてくれる coding-agent オーケストレータ。**
 
 [OpenAI Symphony](https://github.com/openai/symphony) から着想を得た TypeScript / Node.js 実装で、個人開発者や小規模チームが「やりたいけど手が回っていないタスク」を Claude Code に少しずつ消化させたいときに使えます。
 
 ```
-   GitHub Projects v2: Todo
+   $ philharmonic serve   (常駐デーモン / 30 秒ごとに polling)
             │
-            │   $ philharmonic run
+            │   GitHub Projects v2: Todo  ←  Issue を積む
             ▼
    隔離 git worktree で Claude Code (headless mode)
             │
@@ -15,14 +15,14 @@
       Pull Request (Status: In Review)
 ```
 
-最小設定 2 行と 1 コマンドで、Claude Code に GitHub の鍵を渡さずにコード生成 → PR 化までを任せられます。最後の merge 判断は必ず人間に残ります。
+最小設定 2 行で daemon を立ち上げれば、Claude Code に GitHub の鍵を渡さずにコード生成 → PR 化までを任せられます。最後の merge 判断は必ず人間に残ります。
 
 ## なぜ Philharmonic を使うのか
 
-- **Issue → Pull Request まで 1 コマンド**: `philharmonic run` を 1 度叩けば、候補選定 → worktree 作成 → Claude Code 起動 → push → PR 作成 → Project Status 遷移までが同一プロセスで終わる
+- **チケットを積むだけで自動 dispatch**: `philharmonic serve` を常駐させると、Project の Todo に Issue が積まれた瞬間 (次の polling tick) に候補選定 → worktree 作成 → Claude Code 起動 → push → PR 作成 → Project Status 遷移までを自動でやり切る
 - **Claude には GitHub token を渡さない**: token は Orchestrator のみが保持。Runner の env は allowlist で絞られ、PR 作成や Status 駆動はすべて Orchestrator 側が握る
 - **タスクごとに git worktree で隔離**: 作業は `.philharmonic/worktrees/issue-<番号>/` の中だけ。ホスト環境を汚さず、複数タスクを並行して試せる
-- **常駐デーモンも cron 駆動も両対応**: 一発実行 (`philharmonic run`) と常駐ポーリング (`philharmonic serve`) を同梱。`serve` は SIGTERM で graceful shutdown し、`localhost` の Snapshot HTTP API でダッシュボードを繋げられる
+- **daemon 運用に必要なものが揃っている**: SIGTERM で in-flight 完了待ちの graceful shutdown、`Failed` の自動 retry (exponential backoff)、`max_concurrent_agents` で並列 dispatch、二重起動を防ぐ lock file、`localhost` の Snapshot HTTP API (`/api/v1/state`) で dashboard 連携も可能
 - **`WORKFLOW.md` で prompt をカスタマイズ**: Liquid テンプレートでリポジトリごとに Claude への指示を自由に組み立てられる
 - **Lifecycle hooks**: workspace 作成直後に `pnpm install`、削除直前に cleanup スクリプト、といった shell コマンドをイベントごとに差し込める
 
@@ -48,13 +48,15 @@ owner: your-github-login
 project_number: 1
 EOF
 
-# 4) Project の Todo に Issue を 1 件積んでから:
-philharmonic run
+# 4) 常駐デーモンを起動 (30 秒ごとに Project Todo を polling)
+philharmonic serve
 ```
 
-`success run-id=... issue=#... pr=#... branch=...` が出れば、PR が立って Project Status は `In Review` まで進んでいます。失敗時は Issue に失敗コメントが残り、Status は `Failed`、exit code は 1 になります。
+これで Philharmonic が立ち上がります。あとは Project の Todo に Issue を積めば、次の polling tick で自動的に dispatch され、`stderr` の構造化ログに `dispatch success run-id=... issue=#... pr=#...` が流れて Pull Request が立ちます。停止したいときは **Ctrl+C** (または SIGTERM) を送れば、in-flight の run の完了を待ってから graceful に exit します。
 
-ステップごとの詳しい手順 (Project Status の整備 / Issue 本文の書きかた / 候補確認コマンド 等) は [`docs/guide/getting-started.md`](./docs/guide/getting-started.md) を参照してください。
+> 1 件だけ単発で試したい場合や、cron / GitHub Actions の `schedule` から呼びたい場合は `philharmonic run` を使えます (1 ターンで exit する単発モード)。
+
+ステップごとの詳しい手順 (Project Status の整備 / Issue 本文の書きかた / 候補確認コマンド / Snapshot API での観測 等) は [`docs/guide/getting-started.md`](./docs/guide/getting-started.md) を参照してください。
 
 ## ユーザガイド
 
