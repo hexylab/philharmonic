@@ -129,7 +129,20 @@ philharmonic run --config ./path/to/philharmonic.yaml
 | `metadata.json` | run-id / issue / branch / PR 番号 / cost / status 等 |
 | `summary.md`    | Claude の最終応答 (Markdown 整形済み)                |
 
-worktree は **成功時のみ自動削除** されます。失敗時は `.philharmonic/worktrees/issue-<番号>/` に残るので、調査後に `git worktree remove --force <path>` で手動削除してください。
+worktree は **成功時のみ自動削除** されます。失敗時は `.philharmonic/worktrees/issue-<番号>/` に残るので、調査後に `git worktree remove --force <path>` で手動削除するか、`philharmonic clean` で retention 経過後にまとめて掃除してください。
+
+```sh
+# 削除候補の確認 (何も削除しない)
+philharmonic clean --dry-run
+
+# retention 経過済みの worktree とローカルブランチを掃除する
+philharmonic clean
+
+# retention をその場で上書き (config の clean_retention_days より優先)
+philharmonic clean --retention-days 3
+```
+
+`clean` の対象は `<workspace_root>/issue-*` worktree とそれに紐づくローカルブランチに限定されます。`main` などの主リポジトリ worktree や `issue-*` 以外のディレクトリは構造的に保護されます (詳細: [docs/specs/orchestration-mvp.md](./docs/specs/orchestration-mvp.md#philharmonic-clean-失敗-worktree-のクリーンアップ))。
 
 ## もっと知る
 

@@ -1,4 +1,12 @@
 export {
+  listIssueWorktrees,
+  selectExpiredWorktrees,
+  type IssueWorktree,
+  type ListIssueWorktreesInput,
+  type SelectExpiredOptions,
+  type StatFn,
+} from './clean.js';
+export {
   GitCommandError,
   InvalidBranchNameError,
   InvalidTaskKeyError,
