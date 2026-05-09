@@ -79,6 +79,7 @@ project_number: 1
 | `timeout_ms`          | `1800000` | Runner の timeout (ミリ秒)                                                                                                                                                                                                                     |
 | `log_level`           | `info`    | 構造化ログの最低出力レベル (`debug` / `info` / `warn` / `error`)。詳細は [observability.md](./docs/specs/observability.md)                                                                                                                     |
 | `polling.interval_ms` | `30000`   | `philharmonic serve` のポーリング間隔 (ミリ秒)。詳細は [serve-daemon.md](./docs/specs/serve-daemon.md)                                                                                                                                         |
+| `retry.max_attempts`  | `3`       | `philharmonic serve` が `Failed` を自動的に `Todo` に戻す最大回数。`0` で自動 retry 無効化。詳細は [serve-daemon.md#自動-retry-22](./docs/specs/serve-daemon.md#自動-retry-22)                                                                 |
 
 全キーの仕様は [docs/specs/config-schema.md](./docs/specs/config-schema.md) を参照してください。
 

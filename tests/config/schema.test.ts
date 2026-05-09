@@ -9,6 +9,8 @@ import {
   DEFAULT_LOG_LEVEL,
   DEFAULT_PERMISSION_MODE,
   DEFAULT_POLLING_INTERVAL_MS,
+  DEFAULT_RETRY_MAX_ATTEMPTS,
+  DEFAULT_RETRY_MAX_BACKOFF_MS,
   DEFAULT_STATUS_FIELD,
   DEFAULT_TIMEOUT_MS,
   DEFAULT_WORKSPACE_ROOT,
@@ -32,6 +34,10 @@ describe('configSchema', () => {
       cleanRetentionDays: DEFAULT_CLEAN_RETENTION_DAYS,
       logLevel: DEFAULT_LOG_LEVEL,
       polling: { intervalMs: DEFAULT_POLLING_INTERVAL_MS },
+      retry: {
+        maxAttempts: DEFAULT_RETRY_MAX_ATTEMPTS,
+        maxBackoffMs: DEFAULT_RETRY_MAX_BACKOFF_MS,
+      },
     });
   });
 
@@ -289,6 +295,83 @@ describe('configSchema', () => {
       owner: 'hexylab',
       project_number: 1,
       polling: { interval_ms: 5000, jitter_ms: 1000 },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('retry キーが完全に未指定でもデフォルト値が補完される', () => {
+    const parsed = configSchema.parse({ owner: 'hexylab', project_number: 1 });
+    expect(parsed.retry).toEqual({
+      maxAttempts: DEFAULT_RETRY_MAX_ATTEMPTS,
+      maxBackoffMs: DEFAULT_RETRY_MAX_BACKOFF_MS,
+    });
+  });
+
+  it('retry: {} だけ指定でもデフォルト値が補完される', () => {
+    const parsed = configSchema.parse({
+      owner: 'hexylab',
+      project_number: 1,
+      retry: {},
+    });
+    expect(parsed.retry).toEqual({
+      maxAttempts: DEFAULT_RETRY_MAX_ATTEMPTS,
+      maxBackoffMs: DEFAULT_RETRY_MAX_BACKOFF_MS,
+    });
+  });
+
+  it('retry.max_attempts と retry.max_backoff_ms を camelCase で取り出せる', () => {
+    const parsed = configSchema.parse({
+      owner: 'hexylab',
+      project_number: 1,
+      retry: { max_attempts: 5, max_backoff_ms: 60_000 },
+    });
+    expect(parsed.retry).toEqual({ maxAttempts: 5, maxBackoffMs: 60_000 });
+  });
+
+  it('retry.max_attempts は 0 を許可する (自動 retry 無効)', () => {
+    const parsed = configSchema.parse({
+      owner: 'hexylab',
+      project_number: 1,
+      retry: { max_attempts: 0 },
+    });
+    expect(parsed.retry.maxAttempts).toBe(0);
+  });
+
+  it('retry.max_attempts が負数だと検証エラーになる', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      retry: { max_attempts: -1 },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]?.path).toEqual(['retry', 'max_attempts']);
+    }
+  });
+
+  it('retry.max_attempts が小数だと検証エラーになる', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      retry: { max_attempts: 1.5 },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('retry.max_backoff_ms が 0 以下だと検証エラーになる', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      retry: { max_backoff_ms: 0 },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('retry 配下の未知キーは strict で拒否する', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      retry: { max_attempts: 3, jitter_ms: 1000 },
     });
     expect(result.success).toBe(false);
   });

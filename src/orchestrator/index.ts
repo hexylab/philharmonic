@@ -22,6 +22,11 @@ export {
 } from './run.js';
 export { recoverInProgress, type RecoveryDeps, type RecoverySummary } from './recovery.js';
 export {
+  promoteRetryReady,
+  type PromoteRetryReadyDeps,
+  type PromoteRetryReadySummary,
+} from './retry-promote.js';
+export {
   abortableSleep,
   serveLoop,
   type ServeLoopDeps,

@@ -76,6 +76,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     cleanRetentionDays: 7,
     logLevel: 'info',
     polling: { intervalMs: 30_000 },
+    retry: { maxAttempts: 3, maxBackoffMs: 600_000 },
     ...overrides,
   };
 }
