@@ -18,6 +18,7 @@ import type { Logger } from '../../src/logger/index.js';
 import { recoverInProgress } from '../../src/orchestrator/index.js';
 import type { Candidate, ProjectMetadata, ProjectsClient } from '../../src/projects/index.js';
 import type { RunResult } from '../../src/runner/index.js';
+import type { WorkflowSource } from '../../src/workflow/index.js';
 import type {
   CleanupWorkspaceInput,
   CreateWorkspaceInput,
@@ -25,6 +26,7 @@ import type {
   Workspace,
   WorkspaceManager,
 } from '../../src/workspace/index.js';
+import { makeFallbackWorkflowSource } from '../_helpers/workflow.js';
 
 type GitHubMock = GitHubClient & {
   getIssue: ReturnType<typeof vi.fn>;
@@ -215,12 +217,15 @@ function makeLogger(): FakeLogger {
 
 describe('recoverInProgress', () => {
   let tempDir: string;
+  let workflowSource: WorkflowSource;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tempDir = mkdtempSync(path.join(tmpdir(), 'phil-recovery-'));
+    workflowSource = await makeFallbackWorkflowSource(tempDir);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await workflowSource.close();
     rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -236,6 +241,7 @@ describe('recoverInProgress', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       signal: new AbortController().signal,
       runClaude: vi.fn(),
@@ -268,6 +274,7 @@ describe('recoverInProgress', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       signal: new AbortController().signal,
       runClaude: vi.fn(),
@@ -323,6 +330,7 @@ describe('recoverInProgress', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       signal: new AbortController().signal,
       runClaude: runClaudeMock,
@@ -372,6 +380,7 @@ describe('recoverInProgress', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       signal: new AbortController().signal,
       runClaude: runClaudeMock,
@@ -423,6 +432,7 @@ describe('recoverInProgress', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       signal: new AbortController().signal,
       runClaude: runClaudeMock,
@@ -474,6 +484,7 @@ describe('recoverInProgress', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       signal: ac.signal,
       runClaude: runClaudeMock,
@@ -502,6 +513,7 @@ describe('recoverInProgress', () => {
         githubClient: github,
         projectsClient: projects,
         workspaceManager: workspace,
+        workflowSource,
         runnerLogsRoot: path.join(tempDir, 'runs'),
         signal: new AbortController().signal,
         runClaude: vi.fn(),
@@ -528,6 +540,7 @@ describe('recoverInProgress', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       signal: new AbortController().signal,
       runClaude: vi.fn(),

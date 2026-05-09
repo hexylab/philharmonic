@@ -5,7 +5,6 @@ import type { Config } from '../config/index.js';
 import type { GitHubClient, Issue } from '../github/index.js';
 import type { Logger } from '../logger/index.js';
 import type { Candidate, ProjectsClient } from '../projects/index.js';
-import { buildPrompt } from '../prompt/index.js';
 import {
   createRunLog,
   generateRunId,
@@ -15,6 +14,7 @@ import {
   type RunLogStatus,
 } from '../runlog/index.js';
 import { runClaude, type RunResult } from '../runner/index.js';
+import type { WorkflowSource } from '../workflow/index.js';
 import { defaultGitRunner, type GitRunner, type WorkspaceManager } from '../workspace/index.js';
 
 import { BootstrapError, type FailureReason } from './errors.js';
@@ -30,15 +30,19 @@ const DEFAULT_REMOTE = 'origin';
 
 export type RunOnceClock = () => Date;
 
+export type ResolveAttempt = (issueNumber: number) => Promise<number> | number;
+
 export type RunOnceDeps = {
   config: Config;
   repoRoot: string;
   githubClient: GitHubClient;
   projectsClient: ProjectsClient;
   workspaceManager: WorkspaceManager;
+  workflowSource: WorkflowSource;
   runnerLogsRoot: string;
   remote?: string;
   dispatchStatuses?: readonly string[];
+  resolveAttempt?: ResolveAttempt;
   runClaude?: typeof runClaude;
   gitRunner?: GitRunner;
   logger?: Logger;
@@ -148,8 +152,10 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     statusOptions,
     githubClient: deps.githubClient,
     workspaceManager: deps.workspaceManager,
+    workflowSource: deps.workflowSource,
     runnerLogsRoot: deps.runnerLogsRoot,
     remote,
+    resolveAttempt: deps.resolveAttempt,
     runClaude: deps.runClaude,
     gitRunner: deps.gitRunner,
     baseLogger,
@@ -273,8 +279,10 @@ export async function runConcurrent(deps: RunConcurrentDeps): Promise<Concurrent
           statusOptions,
           githubClient: deps.githubClient,
           workspaceManager: deps.workspaceManager,
+          workflowSource: deps.workflowSource,
           runnerLogsRoot: deps.runnerLogsRoot,
           remote,
+          resolveAttempt: deps.resolveAttempt,
           runClaude: deps.runClaude,
           gitRunner: deps.gitRunner,
           baseLogger,
@@ -316,8 +324,10 @@ export type DispatchSelectedDeps = {
   statusOptions: StatusOptionMap;
   githubClient: GitHubClient;
   workspaceManager: WorkspaceManager;
+  workflowSource: WorkflowSource;
   runnerLogsRoot: string;
   remote?: string;
+  resolveAttempt?: ResolveAttempt;
   runClaude?: typeof runClaude;
   gitRunner?: GitRunner;
   baseLogger?: Logger;
@@ -386,15 +396,30 @@ export async function dispatchSelected(
   }
 
   // 5. Prompt Construction
-  const prompt = buildPrompt({
-    repository,
-    baseBranch: deps.config.baseBranch,
-    issueNumber: candidate.issueNumber,
-    issueTitle: candidate.issueTitle,
-    issueUrl: candidate.issueUrl,
-    issueBody: issue.body ?? '',
-    workspacePath,
-  });
+  //    WORKFLOW.md があれば Liquid テンプレート (上位レイヤ)、無ければ buildPrompt フォールバック (下位レイヤ)
+  //    spec: docs/specs/workflow.md / docs/adr/0003-prompt-templating.md
+  let attempt: number;
+  try {
+    attempt = deps.resolveAttempt ? await deps.resolveAttempt(candidate.issueNumber) : 1;
+  } catch (error) {
+    return await markFailed(failureContext, 'runner_error', error);
+  }
+  let prompt: string;
+  try {
+    prompt = await deps.workflowSource.render({
+      repository,
+      baseBranch: deps.config.baseBranch,
+      issueNumber: candidate.issueNumber,
+      issueTitle: candidate.issueTitle,
+      issueUrl: candidate.issueUrl,
+      issueBody: issue.body ?? '',
+      workspacePath,
+      attempt,
+      runId,
+    });
+  } catch (error) {
+    return await markFailed(failureContext, 'runner_error', error);
+  }
   await writeFile(path.join(runLog.dir, 'prompt.md'), prompt, 'utf8');
 
   // 6. Runner Execution

@@ -6,6 +6,7 @@ export const DEFAULT_CONFIG_FILE = 'philharmonic.yaml';
 
 export const DEFAULT_BASE_BRANCH = 'main';
 export const DEFAULT_STATUS_FIELD = 'Status';
+export const DEFAULT_WORKFLOW_FILE = 'WORKFLOW.md';
 export const DEFAULT_PERMISSION_MODE = 'auto';
 export const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 export const DEFAULT_KILL_GRACE_PERIOD_MS = 5_000;
@@ -94,6 +95,10 @@ const rawConfigSchema = z
       .positive('project_number は 1 以上で指定してください'),
     base_branch: z.string().min(1).default(DEFAULT_BASE_BRANCH),
     status_field: z.string().min(1).default(DEFAULT_STATUS_FIELD),
+    workflow_file: z
+      .string()
+      .min(1, 'workflow_file は空文字以外で指定してください')
+      .default(DEFAULT_WORKFLOW_FILE),
     agent_user_login: z.string().min(1).nullable().default(null),
     permission_mode: z.enum(['auto', 'bypass']).default(DEFAULT_PERMISSION_MODE),
     timeout_ms: z.number().int().positive().default(DEFAULT_TIMEOUT_MS),
@@ -119,6 +124,7 @@ export const configSchema = rawConfigSchema.transform((raw) => ({
   projectNumber: raw.project_number,
   baseBranch: raw.base_branch,
   statusField: raw.status_field,
+  workflowFile: raw.workflow_file,
   agentUserLogin: raw.agent_user_login,
   permissionMode: raw.permission_mode,
   timeoutMs: raw.timeout_ms,

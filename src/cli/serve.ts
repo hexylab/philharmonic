@@ -6,6 +6,7 @@ import {
   ConfigFileNotFoundError,
   ConfigParseError,
   ConfigValidationError,
+  DEFAULT_WORKFLOW_FILE,
   loadConfig,
   LOW_POLLING_INTERVAL_WARN_THRESHOLD_MS,
   type Config,
@@ -39,6 +40,11 @@ import {
   type RetryScheduler,
   type ServeLockHandle,
 } from '../serve/index.js';
+import {
+  createWorkflowSource,
+  type CreateWorkflowSourceOptions,
+  type WorkflowSource,
+} from '../workflow/index.js';
 import { createWorkspaceManager, type WorkspaceManager } from '../workspace/index.js';
 
 export type ServeSignal = 'SIGTERM' | 'SIGINT';
@@ -70,6 +76,7 @@ export type ServeCommandDeps = {
   createGitHubClient?: (token: string) => GitHubClient;
   createProjectsClient?: (token: string) => ProjectsClient;
   createWorkspaceManager?: (input: { repoRoot: string; workspaceRoot: string }) => WorkspaceManager;
+  createWorkflowSource?: (options: CreateWorkflowSourceOptions) => Promise<WorkflowSource>;
   acquireServeLock?: (options: AcquireServeLockOptions) => Promise<ServeLockHandle>;
   runOnce?: typeof runOnce;
   runConcurrent?: typeof runConcurrent;
@@ -92,6 +99,7 @@ const DEFAULT_DEPS: Required<ServeCommandDeps> = {
   createGitHubClient: (token) => createGitHubClient({ token }),
   createProjectsClient: (token) => createProjectsClient({ token }),
   createWorkspaceManager: (input) => createWorkspaceManager(input),
+  createWorkflowSource: (options) => createWorkflowSource(options),
   acquireServeLock,
   runOnce,
   runConcurrent,
@@ -245,6 +253,42 @@ async function runServeCommand(
 
   const retryScheduler = deps.createRetryScheduler(repoRoot, config, logger);
 
+  // WORKFLOW.md (Liquid テンプレート) を上位レイヤとして読む。serve daemon は長期稼働のため
+  // watch=true で hot-reload のログを出すが、各 dispatch も都度 mtime を確認するので
+  // watcher が platform 都合で動かなくても render の鮮度は保たれる。
+  let workflowSource: WorkflowSource;
+  try {
+    workflowSource = await deps.createWorkflowSource({
+      workflowPath: path.resolve(repoRoot, config.workflowFile),
+      fallbackOnMissing: config.workflowFile === DEFAULT_WORKFLOW_FILE,
+      watch: true,
+      logger,
+    });
+  } catch (error) {
+    deps.stderr.write(`${describeError(error)}\n`);
+    try {
+      await lock.release();
+    } catch (releaseError) {
+      logger.warn('serve lock release に失敗', { error: describeError(releaseError) });
+    }
+    deps.exit(1);
+    return;
+  }
+
+  // attempt は retry-state から「過去 Failed 試行回数 + 1」で解決する (#27)。
+  // 履歴が無い Issue は 1。state が壊れて読めなくても warn の上で 1 にフォールバックする。
+  const resolveAttempt = async (issueNumber: number): Promise<number> => {
+    try {
+      return (await retryScheduler.getAttempts(issueNumber)) + 1;
+    } catch (error) {
+      logger.warn('attempt 解決に失敗 (1 にフォールバック)', {
+        issueNumber,
+        error: describeError(error),
+      });
+      return 1;
+    }
+  };
+
   const maxConcurrent = config.agent.maxConcurrentAgents;
 
   const wrappedRunOnce = async (): Promise<RunOnceResult | undefined> => {
@@ -272,8 +316,10 @@ async function runServeCommand(
         githubClient,
         projectsClient,
         workspaceManager,
+        workflowSource,
         runnerLogsRoot,
         dispatchStatuses: config.dispatchStatuses,
+        resolveAttempt,
         logger,
       });
       await applyRetryDecision(retryScheduler, logger, result, null);
@@ -287,8 +333,10 @@ async function runServeCommand(
       githubClient,
       projectsClient,
       workspaceManager,
+      workflowSource,
       runnerLogsRoot,
       dispatchStatuses: config.dispatchStatuses,
+      resolveAttempt,
       logger,
       maxConcurrent,
     });
@@ -317,8 +365,10 @@ async function runServeCommand(
           githubClient,
           projectsClient,
           workspaceManager,
+          workflowSource,
           runnerLogsRoot,
           signal: controller.signal,
+          resolveAttempt,
           logger,
         });
       } catch (error) {
@@ -334,6 +384,11 @@ async function runServeCommand(
     });
   } finally {
     subscription.dispose();
+    try {
+      await workflowSource.close();
+    } catch (error) {
+      logger.warn('workflow source close に失敗', { error: describeError(error) });
+    }
     try {
       await lock.release();
     } catch (error) {

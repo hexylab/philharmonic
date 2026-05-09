@@ -16,6 +16,7 @@ import {
   DEFAULT_RETRY_MAX_BACKOFF_MS,
   DEFAULT_STATUS_FIELD,
   DEFAULT_TIMEOUT_MS,
+  DEFAULT_WORKFLOW_FILE,
   DEFAULT_WORKSPACE_ROOT,
 } from '../../src/config/index.js';
 
@@ -28,6 +29,7 @@ describe('configSchema', () => {
       projectNumber: 1,
       baseBranch: DEFAULT_BASE_BRANCH,
       statusField: DEFAULT_STATUS_FIELD,
+      workflowFile: DEFAULT_WORKFLOW_FILE,
       agentUserLogin: null,
       permissionMode: DEFAULT_PERMISSION_MODE,
       timeoutMs: DEFAULT_TIMEOUT_MS,
@@ -74,6 +76,7 @@ describe('configSchema', () => {
       project_number: 42,
       base_branch: 'develop',
       status_field: 'Workflow',
+      workflow_file: 'PROMPT.md',
       agent_user_login: 'philharmonic-bot',
       permission_mode: 'bypass',
       timeout_ms: 60_000,
@@ -87,6 +90,7 @@ describe('configSchema', () => {
     expect(parsed.projectNumber).toBe(42);
     expect(parsed.baseBranch).toBe('develop');
     expect(parsed.statusField).toBe('Workflow');
+    expect(parsed.workflowFile).toBe('PROMPT.md');
     expect(parsed.agentUserLogin).toBe('philharmonic-bot');
     expect(parsed.permissionMode).toBe('bypass');
     expect(parsed.timeoutMs).toBe(60_000);
@@ -143,6 +147,23 @@ describe('configSchema', () => {
       configSchema.safeParse({ owner: 'hexylab', project_number: 1, permission_mode: 'bypass' })
         .success,
     ).toBe(true);
+  });
+
+  it('workflow_file 未指定時は WORKFLOW.md が補完される (#27)', () => {
+    const parsed = configSchema.parse({ owner: 'hexylab', project_number: 1 });
+    expect(parsed.workflowFile).toBe(DEFAULT_WORKFLOW_FILE);
+  });
+
+  it('workflow_file が空文字だと検証エラーになる (#27)', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      workflow_file: '',
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]?.path).toEqual(['workflow_file']);
+    }
   });
 
   it('agent_user_login は null も明示指定もどちらも許可する', () => {

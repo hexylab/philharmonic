@@ -17,12 +17,14 @@ import type { LogFields, Logger } from '../../src/logger/index.js';
 import { runConcurrent, runOnce, type RunOnceResult } from '../../src/orchestrator/index.js';
 import type { Candidate, ProjectMetadata, ProjectsClient } from '../../src/projects/index.js';
 import type { RunResult } from '../../src/runner/index.js';
+import type { WorkflowSource } from '../../src/workflow/index.js';
 import type {
   CreateWorkspaceInput,
   GitRunner,
   Workspace,
   WorkspaceManager,
 } from '../../src/workspace/index.js';
+import { makeFallbackWorkflowSource } from '../_helpers/workflow.js';
 
 type GitHubMock = GitHubClient & {
   getIssue: ReturnType<typeof vi.fn>;
@@ -261,12 +263,15 @@ function makeGitRunner(
 
 describe('runOnce', () => {
   let tempDir: string;
+  let workflowSource: WorkflowSource;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tempDir = mkdtempSync(path.join(tmpdir(), 'phil-orch-'));
+    workflowSource = await makeFallbackWorkflowSource(tempDir);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await workflowSource.close();
     rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -281,6 +286,7 @@ describe('runOnce', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       runClaude: vi.fn(),
       gitRunner: makeGitRunner(),
@@ -306,6 +312,7 @@ describe('runOnce', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       runClaude: runClaudeMock,
       gitRunner: makeGitRunner(),
@@ -342,6 +349,7 @@ describe('runOnce', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       runClaude: runClaudeMock,
       gitRunner: makeGitRunner(),
@@ -373,6 +381,7 @@ describe('runOnce', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       runClaude: runClaudeMock,
       gitRunner: makeGitRunner(),
@@ -403,6 +412,7 @@ describe('runOnce', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       runClaude: runClaudeMock,
       gitRunner: makeGitRunner({
@@ -430,6 +440,7 @@ describe('runOnce', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       runClaude: runClaudeMock,
       gitRunner: makeGitRunner({
@@ -464,6 +475,7 @@ describe('runOnce', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       dispatchStatuses: ['Ready for Agent'],
       runClaude: runClaudeMock,
@@ -494,6 +506,7 @@ describe('runOnce', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       runClaude: runClaudeMock,
       gitRunner: makeGitRunner(),
@@ -521,6 +534,7 @@ describe('runOnce', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       dispatchStatuses: ['Ready for Agent', 'Todo'],
       runClaude: vi.fn(),
@@ -547,6 +561,7 @@ describe('runOnce', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       runClaude: runClaudeMock,
       gitRunner: makeGitRunner(),
@@ -578,6 +593,7 @@ describe('runOnce', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       runClaude: runClaudeMock,
       gitRunner: makeGitRunner(),
@@ -613,6 +629,7 @@ describe('runOnce', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       runClaude: runClaudeMock,
       gitRunner: makeGitRunner(),
@@ -637,6 +654,7 @@ describe('runOnce', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       runClaude: runClaudeMock,
       gitRunner: makeGitRunner(),
@@ -667,6 +685,7 @@ describe('runOnce', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       runClaude: runClaudeMock,
       gitRunner: makeGitRunner(),
@@ -686,12 +705,15 @@ describe('runOnce', () => {
 
 describe('runConcurrent', () => {
   let tempDir: string;
+  let workflowSource: WorkflowSource;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tempDir = mkdtempSync(path.join(tmpdir(), 'phil-orch-conc-'));
+    workflowSource = await makeFallbackWorkflowSource(tempDir);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await workflowSource.close();
     rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -732,6 +754,7 @@ describe('runConcurrent', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       runClaude: vi.fn(),
       gitRunner: makeGitRunner(),
@@ -767,6 +790,7 @@ describe('runConcurrent', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       runClaude: runClaudeMock,
       gitRunner: makeGitRunner(),
@@ -816,6 +840,7 @@ describe('runConcurrent', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       runClaude: runClaudeMock,
       gitRunner: makeGitRunner(),
@@ -863,6 +888,7 @@ describe('runConcurrent', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       runClaude: runClaudeMock,
       gitRunner: makeGitRunner(),
@@ -906,6 +932,7 @@ describe('runConcurrent', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       runClaude: runClaudeMock,
       gitRunner: makeGitRunner(),
@@ -950,6 +977,7 @@ describe('runConcurrent', () => {
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
+      workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       runClaude: runClaudeMock,
       gitRunner: makeGitRunner(),
