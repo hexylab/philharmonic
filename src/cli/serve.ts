@@ -17,7 +17,12 @@ import {
   type GitHubClient,
 } from '../github/index.js';
 import { createLogger, type Logger } from '../logger/index.js';
-import { runOnce, serveLoop, type RunOnceResult } from '../orchestrator/index.js';
+import {
+  recoverInProgress,
+  runOnce,
+  serveLoop,
+  type RunOnceResult,
+} from '../orchestrator/index.js';
 import { createProjectsClient, type ProjectsClient } from '../projects/index.js';
 import {
   acquireServeLock,
@@ -60,6 +65,7 @@ export type ServeCommandDeps = {
   acquireServeLock?: (options: AcquireServeLockOptions) => Promise<ServeLockHandle>;
   runOnce?: typeof runOnce;
   serveLoop?: typeof serveLoop;
+  recoverInProgress?: typeof recoverInProgress;
   createSignalSubscription?: CreateServeSignalSubscription;
   stdout?: NodeJS.WritableStream;
   stderr?: NodeJS.WritableStream;
@@ -78,6 +84,7 @@ const DEFAULT_DEPS: Required<ServeCommandDeps> = {
   acquireServeLock,
   runOnce,
   serveLoop,
+  recoverInProgress,
   createSignalSubscription: createProcessSignalSubscription,
   stdout: process.stdout,
   stderr: process.stderr,
@@ -227,6 +234,25 @@ async function runServeCommand(
     });
 
   try {
+    // Recovery フェーズ: 前回プロセスのクラッシュ等で In Progress のまま残った Item を引き取る
+    // (詳細: docs/specs/orchestration-mvp.md#tracker-driven-recovery-serve-起動時)
+    if (!controller.signal.aborted) {
+      try {
+        await deps.recoverInProgress({
+          config,
+          repoRoot,
+          githubClient,
+          projectsClient,
+          workspaceManager,
+          runnerLogsRoot,
+          signal: controller.signal,
+          logger,
+        });
+      } catch (error) {
+        logger.warn('recovery aborted', { error: describeError(error) });
+      }
+    }
+
     await deps.serveLoop({
       intervalMs: config.polling.intervalMs,
       signal: controller.signal,

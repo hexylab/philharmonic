@@ -443,6 +443,102 @@ describe('philharmonic serve CLI コマンド', () => {
     );
   });
 
+  it('serveLoop の前に recovery を実行し、同じ AbortSignal を共有する', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const order: string[] = [];
+
+    const recoverySpy = vi.fn(async (deps: { signal: AbortSignal }) => {
+      order.push('recovery');
+      // signal が共有されている (= 同じ controller) ことを確認するため subscription emit で abort を伝播
+      expect(deps.signal).toBeInstanceOf(AbortSignal);
+      return {
+        inProgressCount: 0,
+        processed: 0,
+        succeeded: 0,
+        failed: 0,
+        skipped: 0,
+      };
+    });
+    const serveLoopMock = vi.fn(async (deps: { signal: AbortSignal }) => {
+      order.push('serveLoop');
+      subscription.emit('SIGTERM');
+      await new Promise<void>((resolve) => {
+        if (deps.signal.aborted) resolve();
+        else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    });
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      getToken: () => 'tok',
+      loadConfig: async () => fakeConfig(),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: vi.fn(),
+      serveLoop: serveLoopMock as never,
+      recoverInProgress: recoverySpy as never,
+      createSignalSubscription: () => subscription,
+    });
+
+    expect(recoverySpy).toHaveBeenCalledTimes(1);
+    expect(serveLoopMock).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['recovery', 'serveLoop']);
+    expect(lock.released).toBe(true);
+  });
+
+  it('recovery が throw しても daemon は serveLoop に進む (落とさない)', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const warnSpy = vi.fn();
+    const fakeLogger = {
+      level: 'info' as const,
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: warnSpy,
+      error: vi.fn(),
+      child: vi.fn(),
+    };
+    fakeLogger.child.mockReturnValue(fakeLogger);
+
+    const recoverySpy = vi.fn(async () => {
+      throw new Error('boom');
+    });
+    const serveLoopMock = vi.fn(async (deps: { signal: AbortSignal }) => {
+      subscription.emit('SIGTERM');
+      await new Promise<void>((resolve) => {
+        if (deps.signal.aborted) resolve();
+        else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    });
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      getToken: () => 'tok',
+      loadConfig: async () => fakeConfig(),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: vi.fn(),
+      serveLoop: serveLoopMock as never,
+      recoverInProgress: recoverySpy as never,
+      createSignalSubscription: () => subscription,
+      createLogger: () => fakeLogger,
+    });
+
+    expect(recoverySpy).toHaveBeenCalledTimes(1);
+    expect(serveLoopMock).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      'recovery aborted',
+      expect.objectContaining({ error: 'boom' }),
+    );
+  });
+
   it('polling.intervalMs >= 5000ms なら警告ログを出さない', async () => {
     const streams = createStreams();
     const subscription = createFakeSubscription();

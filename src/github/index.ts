@@ -19,6 +19,8 @@ export {
   type IssueComment,
   type IssueLabel,
   type IssueState,
+  type ListOpenPullRequestsInput,
+  type OpenPullRequest,
   type PullRequest,
   type RestClient,
   type UpdateProjectV2ItemStatusInput,

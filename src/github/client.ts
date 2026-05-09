@@ -57,6 +57,21 @@ export type CreatePullRequestInput = {
   draft?: boolean;
 };
 
+export type ListOpenPullRequestsInput = {
+  owner: string;
+  repo: string;
+  /** `head.ref` が `headBranchPrefix` で始まる open PR だけを返すフィルタ。空文字なら全件。 */
+  headBranchPrefix?: string;
+  /** 1 ページあたりの件数。デフォルト 100 (= GitHub REST 最大値)。 */
+  perPage?: number;
+};
+
+export type OpenPullRequest = {
+  number: number;
+  headRef: string;
+  htmlUrl: string;
+};
+
 export type UpdateProjectV2ItemStatusInput = {
   projectId: string;
   itemId: string;
@@ -94,6 +109,18 @@ export type RestClient = {
       body?: string;
       draft?: boolean;
     }): Promise<{ data: { number: number; html_url: string; draft?: boolean } }>;
+    list(params: {
+      owner: string;
+      repo: string;
+      state?: 'open' | 'closed' | 'all';
+      per_page?: number;
+    }): Promise<{
+      data: ReadonlyArray<{
+        number: number;
+        html_url: string;
+        head: { ref: string };
+      }>;
+    }>;
   };
 };
 
@@ -112,6 +139,7 @@ export type GitHubClient = {
   getIssue(input: GetIssueInput): Promise<Issue>;
   commentIssue(input: CommentIssueInput): Promise<IssueComment>;
   createPullRequest(input: CreatePullRequestInput): Promise<PullRequest>;
+  listOpenPullRequests(input: ListOpenPullRequestsInput): Promise<OpenPullRequest[]>;
   updateProjectV2ItemStatus(
     input: UpdateProjectV2ItemStatusInput,
   ): Promise<UpdateProjectV2ItemStatusResult>;
@@ -166,6 +194,29 @@ export function createGitHubClient(options: CreateGitHubClientOptions): GitHubCl
       );
       const { data } = response;
       return { id: data.id, htmlUrl: data.html_url };
+    },
+
+    async listOpenPullRequests(input) {
+      const perPage = input.perPage ?? 100;
+      const response = await callRest(
+        () =>
+          restClient.pulls.list({
+            owner: input.owner,
+            repo: input.repo,
+            state: 'open',
+            per_page: perPage,
+          }),
+        'GET',
+        `/repos/${input.owner}/${input.repo}/pulls`,
+      );
+      const prefix = input.headBranchPrefix ?? '';
+      const out: OpenPullRequest[] = [];
+      for (const item of response.data) {
+        const headRef = item.head.ref;
+        if (prefix.length > 0 && !headRef.startsWith(prefix)) continue;
+        out.push({ number: item.number, headRef, htmlUrl: item.html_url });
+      }
+      return out;
     },
 
     async createPullRequest(input) {
