@@ -21,5 +21,6 @@ export {
   type RetryReadyEntry,
   type RetryScheduler,
   type RetryState,
+  type RetryStateEntry,
   type RetryStorage,
 } from './retry.js';

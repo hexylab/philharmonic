@@ -113,6 +113,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     retry: { maxAttempts: 3, maxBackoffMs: 600_000 },
     agent: { maxConcurrentAgents: 1, maxTurns: 1, stallTimeoutMs: 300_000 },
     hooks: { afterCreate: [], beforeRun: [], afterRun: [], beforeRemove: [] },
+    server: null,
     ...overrides,
   };
 }
@@ -768,7 +769,108 @@ describe('runOnce', () => {
     const ctx = afterRunCall?.[1] as { extraEnv?: Record<string, string> } | undefined;
     expect(ctx?.extraEnv?.PHILHARMONIC_RUN_STATUS).toBe('timeout');
   });
+
+  it('runTracker.runStarted / runFinished が success 経路で 1 回ずつ呼ばれる (#30)', async () => {
+    const projects = makeProjectsMock();
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const runClaudeMock = vi.fn(async () => makeRunResult({ totalCostUsd: 1.5 }));
+    const tracker = makeFakeTracker();
+
+    await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      runClaude: runClaudeMock,
+      gitRunner: makeGitRunner(),
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      runTracker: tracker,
+    });
+
+    expect(tracker.runStarted).toHaveBeenCalledTimes(1);
+    expect(tracker.runStarted).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: FIXED_RUN_ID,
+        issueNumber: 19,
+      }),
+    );
+    expect(tracker.runFinished).toHaveBeenCalled();
+    const successCalls = tracker.runFinished.mock.calls.filter(
+      (c) => (c[0] as { kind: string }).kind === 'success',
+    );
+    expect(successCalls).toHaveLength(1);
+    expect(successCalls[0]?.[0]).toMatchObject({
+      runId: FIXED_RUN_ID,
+      issueNumber: 19,
+      totalCostUsd: 1.5,
+    });
+  });
+
+  it('runTracker.runFinished は failure 経路でも reason 付きで呼ばれる (#30)', async () => {
+    const projects = makeProjectsMock();
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const runClaudeMock = vi.fn(async () => makeRunResult({ status: 'timeout' }));
+    const tracker = makeFakeTracker();
+
+    await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      runClaude: runClaudeMock,
+      gitRunner: makeGitRunner(),
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      runTracker: tracker,
+    });
+
+    const failedCalls = tracker.runFinished.mock.calls.filter(
+      (c) => (c[0] as { kind: string }).kind === 'failed',
+    );
+    expect(failedCalls.length).toBeGreaterThanOrEqual(1);
+    expect(failedCalls[0]?.[0]).toMatchObject({
+      runId: FIXED_RUN_ID,
+      issueNumber: 19,
+      reason: 'timeout',
+    });
+  });
 });
+
+function makeFakeTracker(): {
+  runStarted: ReturnType<typeof vi.fn>;
+  runFinished: ReturnType<typeof vi.fn>;
+  listRunning: ReturnType<typeof vi.fn>;
+  getRunningByIssue: ReturnType<typeof vi.fn>;
+  getTotals: ReturnType<typeof vi.fn>;
+  recordPollTick: ReturnType<typeof vi.fn>;
+  getLastPollTickAt: ReturnType<typeof vi.fn>;
+  getStartedAt: ReturnType<typeof vi.fn>;
+} {
+  return {
+    runStarted: vi.fn(),
+    runFinished: vi.fn(),
+    listRunning: vi.fn(() => []),
+    getRunningByIssue: vi.fn(() => null),
+    getTotals: vi.fn(() => ({
+      runsCompleted: 0,
+      runsSucceeded: 0,
+      runsFailed: 0,
+      totalCostUsd: 0,
+    })),
+    recordPollTick: vi.fn(),
+    getLastPollTickAt: vi.fn(() => null),
+    getStartedAt: vi.fn(() => '2026-05-09T00:00:00.000Z'),
+  };
+}
 
 describe('runConcurrent', () => {
   let tempDir: string;
@@ -1055,5 +1157,50 @@ describe('runConcurrent', () => {
 
     expect(outcomes).toHaveLength(1);
     expect(outcomes[0]?.result.issueNumber).toBe(402);
+  });
+
+  it('runTracker.runStarted は slot 番号付きで複数 dispatch ぶん呼ばれる (#30)', async () => {
+    const candidates = [201, 202].map((n) => makeCandidate(n));
+    const projects = makeProjectsMock(candidates);
+    const github = makeGitHubMock({
+      getIssue: vi.fn(async (input: { issueNumber: number }) => makeIssue(input.issueNumber)),
+    });
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const runClaudeMock = vi.fn(async () => makeRunResult({ totalCostUsd: 0.5 }));
+    let runIdCounter = 0;
+    const idGen = (): string => {
+      runIdCounter += 1;
+      return `${FIXED_RUN_ID.slice(0, -8)}${runIdCounter.toString().padStart(8, '0')}`;
+    };
+    const tracker = makeFakeTracker();
+
+    await runConcurrent({
+      config: makeConfig({
+        agent: { maxConcurrentAgents: 2, maxTurns: 1, stallTimeoutMs: 300_000 },
+      }),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      runClaude: runClaudeMock,
+      gitRunner: makeGitRunner(),
+      generateRunId: idGen,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      maxConcurrent: 2,
+      runTracker: tracker,
+    });
+
+    expect(tracker.runStarted).toHaveBeenCalledTimes(2);
+    const slots = tracker.runStarted.mock.calls
+      .map((c) => (c[0] as { slot: number | null }).slot)
+      .sort((a, b) => (a ?? 0) - (b ?? 0));
+    expect(slots).toEqual([0, 1]);
+    const issueNumbers = tracker.runStarted.mock.calls
+      .map((c) => (c[0] as { issueNumber: number }).issueNumber)
+      .sort((a, b) => a - b);
+    expect(issueNumbers).toEqual([201, 202]);
+    expect(tracker.runFinished).toHaveBeenCalled();
   });
 });

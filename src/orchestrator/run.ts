@@ -14,6 +14,7 @@ import {
   type RunLogStatus,
 } from '../runlog/index.js';
 import { runClaude, type RunResult } from '../runner/index.js';
+import { noopRunTracker, type RunTracker } from '../server/tracker.js';
 import type { WorkflowSource } from '../workflow/index.js';
 import {
   HookExecutionError,
@@ -55,6 +56,8 @@ export type RunOnceDeps = {
   logger?: Logger;
   clock?: RunOnceClock;
   generateRunId?: () => string;
+  /** snapshot HTTP API (#30) 用の in-memory tracker。未指定なら no-op */
+  runTracker?: RunTracker;
 };
 
 export type RunOnceResult =
@@ -168,6 +171,7 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     baseLogger,
     clock,
     generateRunId: deps.generateRunId,
+    runTracker: deps.runTracker,
   });
 }
 
@@ -295,6 +299,8 @@ export async function runConcurrent(deps: RunConcurrentDeps): Promise<Concurrent
           baseLogger,
           clock,
           generateRunId: deps.generateRunId,
+          runTracker: deps.runTracker,
+          slot,
         });
         return { slot, result };
       } catch (error) {
@@ -340,6 +346,10 @@ export type DispatchSelectedDeps = {
   baseLogger?: Logger;
   clock?: RunOnceClock;
   generateRunId?: () => string;
+  /** snapshot HTTP API (#30) 用の in-memory tracker。未指定なら no-op */
+  runTracker?: RunTracker;
+  /** 並列 dispatch 時の slot index。snapshot にそのまま載せる */
+  slot?: number;
 };
 
 /**
@@ -363,12 +373,20 @@ export async function dispatchSelected(
   const startedAt = clock();
   const runLog = await createRunLog({ runId, runsRoot: deps.runnerLogsRoot });
   const logger = baseLogger.child({ runId, issueNumber: candidate.issueNumber });
+  const tracker = deps.runTracker ?? noopRunTracker;
 
   logger.info('candidate selected', {
     repository: candidate.repositoryNameWithOwner,
   });
 
   const branch = `feature/${candidate.issueNumber}-${buildIssueSlug(candidate.issueTitle)}`;
+  tracker.runStarted({
+    runId,
+    issueNumber: candidate.issueNumber,
+    branch,
+    startedAt,
+    slot: deps.slot ?? null,
+  });
   const taskKey = `issue-${candidate.issueNumber}`;
   const baseRef = `${remote}/${deps.config.baseBranch}`;
   const failureContext: FailureContext = {
@@ -385,210 +403,230 @@ export async function dispatchSelected(
     githubClient: deps.githubClient,
     logger,
     clock,
+    runTracker: tracker,
   };
 
-  // 4. Workspace Provisioning
-  let workspacePath: string;
   try {
-    await fetchBaseBranch(gitRunner, deps.repoRoot, remote, deps.config.baseBranch);
-    const workspace = await deps.workspaceManager.createWorkspace({
+    // 4. Workspace Provisioning
+    let workspacePath: string;
+    try {
+      await fetchBaseBranch(gitRunner, deps.repoRoot, remote, deps.config.baseBranch);
+      const workspace = await deps.workspaceManager.createWorkspace({
+        taskKey,
+        branch,
+        baseRef,
+        reuse: false,
+      });
+      workspacePath = workspace.path;
+    } catch (error) {
+      return await markFailed(failureContext, 'workspace_provisioning', error);
+    }
+
+    // 5. Prompt Construction
+    //    WORKFLOW.md があれば Liquid テンプレート (上位レイヤ)、無ければ buildPrompt フォールバック (下位レイヤ)
+    //    spec: docs/specs/workflow.md / docs/adr/0003-prompt-templating.md
+    let attempt: number;
+    try {
+      attempt = deps.resolveAttempt ? await deps.resolveAttempt(candidate.issueNumber) : 1;
+    } catch (error) {
+      return await markFailed(failureContext, 'runner_error', error);
+    }
+    let prompt: string;
+    try {
+      prompt = await deps.workflowSource.render({
+        repository,
+        baseBranch: deps.config.baseBranch,
+        issueNumber: candidate.issueNumber,
+        issueTitle: candidate.issueTitle,
+        issueUrl: candidate.issueUrl,
+        issueBody: issue.body ?? '',
+        workspacePath,
+        attempt,
+        runId,
+      });
+    } catch (error) {
+      return await markFailed(failureContext, 'runner_error', error);
+    }
+    await writeFile(path.join(runLog.dir, 'prompt.md'), prompt, 'utf8');
+
+    // 6. Runner Execution
+    const hookContext: HookContext = {
       taskKey,
       branch,
+      workspacePath,
       baseRef,
-      reuse: false,
-    });
-    workspacePath = workspace.path;
-  } catch (error) {
-    return await markFailed(failureContext, 'workspace_provisioning', error);
-  }
-
-  // 5. Prompt Construction
-  //    WORKFLOW.md があれば Liquid テンプレート (上位レイヤ)、無ければ buildPrompt フォールバック (下位レイヤ)
-  //    spec: docs/specs/workflow.md / docs/adr/0003-prompt-templating.md
-  let attempt: number;
-  try {
-    attempt = deps.resolveAttempt ? await deps.resolveAttempt(candidate.issueNumber) : 1;
-  } catch (error) {
-    return await markFailed(failureContext, 'runner_error', error);
-  }
-  let prompt: string;
-  try {
-    prompt = await deps.workflowSource.render({
-      repository,
-      baseBranch: deps.config.baseBranch,
-      issueNumber: candidate.issueNumber,
-      issueTitle: candidate.issueTitle,
-      issueUrl: candidate.issueUrl,
-      issueBody: issue.body ?? '',
-      workspacePath,
-      attempt,
-      runId,
-    });
-  } catch (error) {
-    return await markFailed(failureContext, 'runner_error', error);
-  }
-  await writeFile(path.join(runLog.dir, 'prompt.md'), prompt, 'utf8');
-
-  // 6. Runner Execution
-  const hookContext: HookContext = {
-    taskKey,
-    branch,
-    workspacePath,
-    baseRef,
-    extraEnv: {
-      PHILHARMONIC_ISSUE_NUMBER: String(candidate.issueNumber),
-      PHILHARMONIC_RUN_ID: runId,
-    },
-  };
-
-  // before_run hook (runner 起動直前)
-  try {
-    await deps.workspaceManager.runHooks('before_run', hookContext);
-  } catch (error) {
-    if (isHookError(error)) {
-      return await markFailed(failureContext, 'hook_failed', error);
-    }
-    throw error;
-  }
-
-  if (deps.config.permissionMode === 'bypass') {
-    logger.warn(
-      'permission_mode=bypass で Claude Code を起動します。--dangerously-skip-permissions の副作用は worktree 外 (ホスト全体) にも及び得るため、git worktree + 非特権ユーザによる隔離を必ず確認してください',
-    );
-  }
-  let run: RunResult;
-  try {
-    run = await runner({
-      prompt,
-      workspacePath,
-      sessionId: runId,
-      permissionMode: deps.config.permissionMode,
-      timeoutMs: deps.config.timeoutMs,
-      killGracePeriodMs: deps.config.killGracePeriodMs,
-      maxTurns: deps.config.agent.maxTurns,
-      stallTimeoutMs: deps.config.agent.stallTimeoutMs,
-      logDir: runLog.dir,
-      logger,
-    });
-  } catch (error) {
-    await runAfterRunHooksSafely(deps.workspaceManager, hookContext, 'failed', logger);
-    return await markFailed(failureContext, 'runner_error', error);
-  }
-
-  // after_run hook (runner status に関わらず必ず発火)
-  try {
-    await deps.workspaceManager.runHooks('after_run', {
-      ...hookContext,
       extraEnv: {
-        ...hookContext.extraEnv,
-        PHILHARMONIC_RUN_STATUS: run.status,
+        PHILHARMONIC_ISSUE_NUMBER: String(candidate.issueNumber),
+        PHILHARMONIC_RUN_ID: runId,
       },
-    });
-  } catch (error) {
-    if (isHookError(error)) {
-      return await markFailed(failureContext, 'hook_failed', error, run);
+    };
+
+    // before_run hook (runner 起動直前)
+    try {
+      await deps.workspaceManager.runHooks('before_run', hookContext);
+    } catch (error) {
+      if (isHookError(error)) {
+        return await markFailed(failureContext, 'hook_failed', error);
+      }
+      throw error;
     }
-    throw error;
-  }
 
-  // 7. Result Triage
-  if (run.status === 'timeout') {
-    return await markFailed(failureContext, 'timeout', null, run);
-  }
-  if (run.status === 'stalled') {
-    return await markFailed(failureContext, 'stalled', null, run);
-  }
-  if (run.status === 'failed') {
-    return await markFailed(failureContext, 'runner_error', null, run);
-  }
+    if (deps.config.permissionMode === 'bypass') {
+      logger.warn(
+        'permission_mode=bypass で Claude Code を起動します。--dangerously-skip-permissions の副作用は worktree 外 (ホスト全体) にも及び得るため、git worktree + 非特権ユーザによる隔離を必ず確認してください',
+      );
+    }
+    let run: RunResult;
+    try {
+      run = await runner({
+        prompt,
+        workspacePath,
+        sessionId: runId,
+        permissionMode: deps.config.permissionMode,
+        timeoutMs: deps.config.timeoutMs,
+        killGracePeriodMs: deps.config.killGracePeriodMs,
+        maxTurns: deps.config.agent.maxTurns,
+        stallTimeoutMs: deps.config.agent.stallTimeoutMs,
+        logDir: runLog.dir,
+        logger,
+      });
+    } catch (error) {
+      await runAfterRunHooksSafely(deps.workspaceManager, hookContext, 'failed', logger);
+      return await markFailed(failureContext, 'runner_error', error);
+    }
 
-  let commits: number;
-  try {
-    commits = await countCommitsAhead(gitRunner, workspacePath, baseRef);
-  } catch (error) {
-    return await markFailed(failureContext, 'no_changes', error, run);
-  }
-  if (commits === 0) {
-    return await markFailed(failureContext, 'no_changes', null, run);
-  }
+    // after_run hook (runner status に関わらず必ず発火)
+    try {
+      await deps.workspaceManager.runHooks('after_run', {
+        ...hookContext,
+        extraEnv: {
+          ...hookContext.extraEnv,
+          PHILHARMONIC_RUN_STATUS: run.status,
+        },
+      });
+    } catch (error) {
+      if (isHookError(error)) {
+        return await markFailed(failureContext, 'hook_failed', error, run);
+      }
+      throw error;
+    }
 
-  // 8. PR Submission
-  try {
-    await pushBranch(gitRunner, workspacePath, branch, remote);
-  } catch (error) {
-    return await markFailed(failureContext, 'push', error, run);
-  }
+    // 7. Result Triage
+    if (run.status === 'timeout') {
+      return await markFailed(failureContext, 'timeout', null, run);
+    }
+    if (run.status === 'stalled') {
+      return await markFailed(failureContext, 'stalled', null, run);
+    }
+    if (run.status === 'failed') {
+      return await markFailed(failureContext, 'runner_error', null, run);
+    }
 
-  let prNumber: number;
-  try {
-    const acceptanceCriteria = extractAcceptanceCriteria(issue.body ?? '');
-    const pr = await deps.githubClient.createPullRequest({
-      owner: repository.owner,
-      repo: repository.name,
-      base: deps.config.baseBranch,
-      head: branch,
-      title: candidate.issueTitle,
-      body: buildPullRequestBody({
-        issueNumber: candidate.issueNumber,
-        acceptanceCriteria,
-        runId,
-        durationMs: run.durationMs,
-        totalCostUsd: run.totalCostUsd,
-        finalText: run.finalText,
-        numTurns: run.numTurns,
-      }),
+    let commits: number;
+    try {
+      commits = await countCommitsAhead(gitRunner, workspacePath, baseRef);
+    } catch (error) {
+      return await markFailed(failureContext, 'no_changes', error, run);
+    }
+    if (commits === 0) {
+      return await markFailed(failureContext, 'no_changes', null, run);
+    }
+
+    // 8. PR Submission
+    try {
+      await pushBranch(gitRunner, workspacePath, branch, remote);
+    } catch (error) {
+      return await markFailed(failureContext, 'push', error, run);
+    }
+
+    let prNumber: number;
+    try {
+      const acceptanceCriteria = extractAcceptanceCriteria(issue.body ?? '');
+      const pr = await deps.githubClient.createPullRequest({
+        owner: repository.owner,
+        repo: repository.name,
+        base: deps.config.baseBranch,
+        head: branch,
+        title: candidate.issueTitle,
+        body: buildPullRequestBody({
+          issueNumber: candidate.issueNumber,
+          acceptanceCriteria,
+          runId,
+          durationMs: run.durationMs,
+          totalCostUsd: run.totalCostUsd,
+          finalText: run.finalText,
+          numTurns: run.numTurns,
+        }),
+      });
+      prNumber = pr.number;
+    } catch (error) {
+      return await markFailed(failureContext, 'pr_create', error, run);
+    }
+
+    // 8.3 Status Update: In Progress → In Review
+    try {
+      await deps.githubClient.updateProjectV2ItemStatus({
+        projectId: deps.projectId,
+        itemId: candidate.itemId,
+        fieldId: deps.statusFieldId,
+        optionId: deps.statusOptions['In Review'],
+      });
+    } catch (error) {
+      logger.warn('Status を In Review に遷移できませんでした (PR は作成済み)', {
+        error: describeError(error),
+      });
+    }
+
+    // 8.4 worktree cleanup
+    try {
+      await deps.workspaceManager.cleanupWorkspace({ taskKey, branch, deleteBranch: true });
+    } catch (error) {
+      logger.warn('worktree のクリーンアップに失敗しました', {
+        error: describeError(error),
+      });
+    }
+
+    await persistRun(failureContext, {
+      status: 'success',
+      failureReason: null,
+      branch,
+      prNumber,
+      durationMs: run.durationMs,
+      totalCostUsd: run.totalCostUsd,
+      finalText: run.finalText,
+      finishedAt: clock(),
     });
-    prNumber = pr.number;
-  } catch (error) {
-    return await markFailed(failureContext, 'pr_create', error, run);
-  }
 
-  // 8.3 Status Update: In Progress → In Review
-  try {
-    await deps.githubClient.updateProjectV2ItemStatus({
-      projectId: deps.projectId,
-      itemId: candidate.itemId,
-      fieldId: deps.statusFieldId,
-      optionId: deps.statusOptions['In Review'],
+    logger.info('run completed successfully', {
+      prNumber,
+      branch,
     });
-  } catch (error) {
-    logger.warn('Status を In Review に遷移できませんでした (PR は作成済み)', {
-      error: describeError(error),
+
+    tracker.runFinished({
+      kind: 'success',
+      runId,
+      issueNumber: candidate.issueNumber,
+      totalCostUsd: run.totalCostUsd,
+    });
+
+    return {
+      kind: 'success',
+      runId,
+      issueNumber: candidate.issueNumber,
+      prNumber,
+      branch,
+    };
+  } finally {
+    // 防御策: hook の非 HookError 再 throw 等で markFailed/success のいずれにも入れず
+    // 抜けた場合に、tracker.running から確実に除去する (idempotent なので二重呼びは no-op)。
+    tracker.runFinished({
+      kind: 'failed',
+      runId,
+      issueNumber: candidate.issueNumber,
+      reason: 'runner_error',
+      totalCostUsd: null,
     });
   }
-
-  // 8.4 worktree cleanup
-  try {
-    await deps.workspaceManager.cleanupWorkspace({ taskKey, branch, deleteBranch: true });
-  } catch (error) {
-    logger.warn('worktree のクリーンアップに失敗しました', {
-      error: describeError(error),
-    });
-  }
-
-  await persistRun(failureContext, {
-    status: 'success',
-    failureReason: null,
-    branch,
-    prNumber,
-    durationMs: run.durationMs,
-    totalCostUsd: run.totalCostUsd,
-    finalText: run.finalText,
-    finishedAt: clock(),
-  });
-
-  logger.info('run completed successfully', {
-    prNumber,
-    branch,
-  });
-
-  return {
-    kind: 'success',
-    runId,
-    issueNumber: candidate.issueNumber,
-    prNumber,
-    branch,
-  };
 }
 
 type FailureContext = {
@@ -605,6 +643,7 @@ type FailureContext = {
   githubClient: GitHubClient;
   logger: Logger;
   clock: RunOnceClock;
+  runTracker: RunTracker;
 };
 
 async function markFailed(
@@ -666,6 +705,14 @@ async function markFailed(
     totalCostUsd,
     finalText: run?.finalText ?? null,
     finishedAt,
+  });
+
+  ctx.runTracker.runFinished({
+    kind: 'failed',
+    runId: ctx.runId,
+    issueNumber: ctx.candidate.issueNumber,
+    reason,
+    totalCostUsd,
   });
 
   return {

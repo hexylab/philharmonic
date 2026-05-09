@@ -55,6 +55,14 @@ export type RetryReadyEntry = {
   attempts: number;
 };
 
+export type RetryStateEntry = {
+  issueNumber: number;
+  attempts: number;
+  lastFailedAt: string;
+  nextAttemptAt: string;
+  lastReason: FailureReason;
+};
+
 export type RetryScheduler = {
   recordFailure(input: {
     issueNumber: number;
@@ -68,6 +76,16 @@ export type RetryScheduler = {
    * テンプレート変数 `attempt` の解決 (#27) に利用する。
    */
   getAttempts(issueNumber: number): Promise<number>;
+  /**
+   * retry-state の全エントリを返す (snapshot HTTP API #30 用)。
+   * `getEntry(issueNumber)` 単発との混在を避けるため一括取得 API のみ提供する。
+   */
+  listEntries(): Promise<RetryStateEntry[]>;
+  /**
+   * 指定 Issue の retry エントリを返す (snapshot HTTP API の per-issue 用)。
+   * 該当なしは null。
+   */
+  getEntry(issueNumber: number): Promise<RetryStateEntry | null>;
 };
 
 export type CreateRetrySchedulerOptions = {
@@ -163,6 +181,28 @@ export function createRetryScheduler(options: CreateRetrySchedulerOptions): Retr
     async getAttempts(issueNumber) {
       const state = await storage.load();
       return state.issues[String(issueNumber)]?.attempts ?? 0;
+    },
+    async listEntries() {
+      const state = await storage.load();
+      return Object.entries(state.issues).map(([key, entry]) => ({
+        issueNumber: Number(key),
+        attempts: entry.attempts,
+        lastFailedAt: entry.lastFailedAt,
+        nextAttemptAt: entry.nextAttemptAt,
+        lastReason: entry.lastReason,
+      }));
+    },
+    async getEntry(issueNumber) {
+      const state = await storage.load();
+      const entry = state.issues[String(issueNumber)];
+      if (entry === undefined) return null;
+      return {
+        issueNumber,
+        attempts: entry.attempts,
+        lastFailedAt: entry.lastFailedAt,
+        nextAttemptAt: entry.nextAttemptAt,
+        lastReason: entry.lastReason,
+      };
     },
   };
 }
