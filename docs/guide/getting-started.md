@@ -111,24 +111,70 @@ philharmonic projects list --owner <owner> --project <project-number> --json
 
 `Status: Todo` の Issue が表示されない場合は、Project への追加忘れ・Status 設定漏れ・assignee 設定 (`agent_user_login`) のいずれかを疑ってください。
 
-## 8. 1 ターン実行する
+## 8. `philharmonic serve` を起動する
+
+Philharmonic の基本の使いかたは、`philharmonic serve` を **常駐デーモン** として起動しっぱなしにしておくことです。`polling.interval_ms` (既定 30 秒) ごとに Project board を polling し、Todo にチケットが積まれたら自動的に dispatch されて PR が立ちます。
+
+```sh
+philharmonic serve
+
+# 別パスの設定ファイルを指定する場合
+philharmonic serve --config ./path/to/philharmonic.yaml
+```
+
+`stdout` には起動・停止メッセージなど最低限のみが流れ、`stderr` に JSON line 形式の構造化ログが流れます。
+
+```sh
+# 進捗ログを人間向けに眺める
+philharmonic serve 2>&1 1>/dev/null | jq -c '{ts, level, msg, run_id, issue_number}'
+```
+
+Todo に Issue を積めば、次の polling tick で以下のような流れがログに現れます。
+
+| 主なログイベント                                              | タイミング                            |
+| ------------------------------------------------------------- | ------------------------------------- |
+| `poll tick`                                                   | polling 周期ごと                      |
+| `candidate selected` / `dispatch success` / `dispatch failed` | 候補があったとき (1 件処理ごと)       |
+| `no candidate`                                                | Todo が空のとき                       |
+| `runner finished`                                             | Claude Code subprocess が終了したとき |
+
+成功時は Project Status が `In Review` まで進み、PR が立ちます。失敗時は Issue に失敗コメントが残り、Status が `Failed` に (`philharmonic serve` は `retry.max_attempts` の範囲で自動的に `Todo` に戻して再試行します)。
+
+### 停止のしかた
+
+`philharmonic serve` は **SIGTERM / SIGINT** を受信すると、in-flight の run の完了を待ってから graceful に exit します (subprocess を強制終了したりはしない)。
+
+```sh
+# 前景で動かしているなら Ctrl+C を 1 回押す (= SIGINT)
+# systemd や docker などで管理しているなら SIGTERM を送る
+```
+
+graceful shutdown 中の exit code は **0** です。systemd / Docker など PID 1 として走らせるユースケースでも安全に使えます。
+
+### 観測 (Snapshot HTTP API)
+
+`philharmonic.yaml` の `server.port` を指定すると、`philharmonic serve` 起動時に `127.0.0.1:<port>` に read-only な HTTP API が立ちます。dashboard や外部 health-check 用です。
+
+```yaml
+server:
+  port: 4000
+```
+
+```sh
+curl -s http://127.0.0.1:4000/api/v1/state | jq .
+```
+
+詳細は [operations.md#snapshot-http-api-philharmonic-serve-専用](./operations.md#snapshot-http-api-philharmonic-serve-専用) を参照。
+
+### 単発で試したい / cron 駆動したい場合
+
+1 件だけ動作確認したいとき、cron / systemd timer / GitHub Actions の `schedule` から呼びたいときは、daemon を立ち上げずに **単発実行** の `philharmonic run` を使えます (1 ターンで exit)。
 
 ```sh
 philharmonic run
-
-# 別パスの設定ファイルを指定する場合
-philharmonic run --config ./path/to/philharmonic.yaml
 ```
 
-stdout に以下が出ます:
-
-| 出力                                               | 意味                                                             |
-| -------------------------------------------------- | ---------------------------------------------------------------- |
-| `no candidate`                                     | `Status = Todo` の Issue が無い (exit 0)                         |
-| `success run-id=... issue=#... pr=#... branch=...` | 成功。PR が立ち、Status が `In Review` に遷移 (exit 0)           |
-| `failed run-id=... issue=#... reason=...` (stderr) | 失敗。Issue に失敗コメントが残り、Status が `Failed` に (exit 1) |
-
-`stderr` には JSON line 形式の構造化ログが流れます (詳細: [operations.md](./operations.md#構造化ログ))。
+`philharmonic run` の出力 / `serve` との違い (自動 retry / 並列 dispatch / Snapshot API は `serve` のみ) は [operations.md#philharmonic-run--1-ターン実行](./operations.md#philharmonic-run--1-ターン実行) を参照してください。
 
 ## 次に読む
 
