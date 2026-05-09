@@ -82,7 +82,8 @@ Philharmonic は、GitHub Projects v2 のアイテムを起点に Claude Code (h
 | `auto`                | `--permission-mode acceptEdits`  | ファイル編集は自動承認、Bash 等の他ツールは対話プロンプトが起こり得る                         |
 | `bypass`              | `--dangerously-skip-permissions` | すべての権限プロンプトをスキップ。git worktree + 非特権ユーザによる隔離環境前提でのみ推奨する |
 
-- デフォルト値の選定 (`auto` か `bypass` か) は本 ADR では決定せず、実装着手前に後続 Issue で決定する
+- デフォルトは `auto` (Issue #15 / `docs/specs/config-schema.md` で確定)。`bypass` はホストファイルシステム全体への副作用リスクを孕むため、`philharmonic.yaml` で明示指定したときのみ有効になる
+- `bypass` 指定時は orchestrator が runner 起動前に WARN ログを 1 行出して、隔離環境前提であることを呼び出し側に明示する (`docs/specs/claude-runner.md` 参照)
 
 ### 実行分離
 

@@ -196,12 +196,19 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
   await writeFile(path.join(runLog.dir, 'prompt.md'), prompt, 'utf8');
 
   // 6. Runner Execution
+  if (deps.config.permissionMode === 'bypass') {
+    logger.warn(
+      'permission_mode=bypass で Claude Code を起動します。--dangerously-skip-permissions の副作用は worktree 外 (ホスト全体) にも及び得るため、git worktree + 非特権ユーザによる隔離を必ず確認してください',
+      { runId, issueNumber: candidate.issueNumber },
+    );
+  }
   let run: RunResult;
   try {
     run = await runner({
       prompt,
       workspacePath,
       sessionId: runId,
+      permissionMode: deps.config.permissionMode,
       timeoutMs: deps.config.timeoutMs,
       killGracePeriodMs: deps.config.killGracePeriodMs,
       logDir: runLog.dir,

@@ -92,7 +92,7 @@ describe('runClaude — input validation', () => {
 });
 
 describe('runClaude — spawn arguments', () => {
-  it('claude -p <prompt> --output-format stream-json --verbose --permission-mode acceptEdits を渡す', async () => {
+  it('auto モード (デフォルト) では --permission-mode acceptEdits を渡す', async () => {
     const { spawn, calls } = createSpawnFn();
     const promise = runClaude(baseOptions({ spawn }));
 
@@ -113,14 +113,26 @@ describe('runClaude — spawn arguments', () => {
     ]);
   });
 
-  it('--dangerously-skip-permissions は絶対に渡さない', async () => {
+  it('auto モード時は --dangerously-skip-permissions を渡さない', async () => {
     const { spawn, calls } = createSpawnFn();
-    const promise = runClaude(baseOptions({ spawn }));
+    const promise = runClaude(baseOptions({ spawn, permissionMode: 'auto' }));
     const call = await waitForSpawn(calls);
     call.child.emit('close', 0, null);
     await promise;
 
     expect(call.args).not.toContain('--dangerously-skip-permissions');
+  });
+
+  it('bypass モードでは --dangerously-skip-permissions を渡し、--permission-mode フラグは付けない', async () => {
+    const { spawn, calls } = createSpawnFn();
+    const promise = runClaude(baseOptions({ spawn, permissionMode: 'bypass' }));
+    const call = await waitForSpawn(calls);
+    call.child.emit('close', 0, null);
+    await promise;
+
+    expect(call.args).toContain('--dangerously-skip-permissions');
+    expect(call.args).not.toContain('--permission-mode');
+    expect(call.args).not.toContain('acceptEdits');
   });
 
   it('sessionId 指定時は --session-id <UUID> を末尾に追加する', async () => {

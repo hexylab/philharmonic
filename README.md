@@ -68,15 +68,15 @@ project_number: 1
 
 主なキー:
 
-| キー               | 既定値    | 説明                                                                          |
-| ------------------ | --------- | ----------------------------------------------------------------------------- |
-| `owner`            | (必須)    | Project owner の GitHub login (user または org)                               |
-| `project_number`   | (必須)    | Project URL 末尾の整数 (`https://github.com/users/<owner>/projects/1` の `1`) |
-| `base_branch`      | `main`    | PR の base ブランチ                                                           |
-| `status_field`     | `Status`  | Project の単一選択フィールド名                                                |
-| `agent_user_login` | `null`    | `null` なら unassigned のみ拾う。bot に任せたいなら login を指定              |
-| `permission_mode`  | `auto`    | Claude Code の permission mode (`bypass` はホスト全体に副作用)                |
-| `timeout_ms`       | `1800000` | Runner の timeout (ミリ秒)                                                    |
+| キー               | 既定値    | 説明                                                                                                                                                                                                                                           |
+| ------------------ | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `owner`            | (必須)    | Project owner の GitHub login (user または org)                                                                                                                                                                                                |
+| `project_number`   | (必須)    | Project URL 末尾の整数 (`https://github.com/users/<owner>/projects/1` の `1`)                                                                                                                                                                  |
+| `base_branch`      | `main`    | PR の base ブランチ                                                                                                                                                                                                                            |
+| `status_field`     | `Status`  | Project の単一選択フィールド名                                                                                                                                                                                                                 |
+| `agent_user_login` | `null`    | `null` なら unassigned のみ拾う。bot に任せたいなら login を指定                                                                                                                                                                               |
+| `permission_mode`  | `auto`    | Claude Code の permission mode (`auto` = `--permission-mode acceptEdits`、`bypass` = `--dangerously-skip-permissions`。`bypass` は worktree 外 (ホスト全体) にも副作用が及び得るため、git worktree + 非特権ユーザによる隔離前提でのみ使用する) |
+| `timeout_ms`       | `1800000` | Runner の timeout (ミリ秒)                                                                                                                                                                                                                     |
 
 全キーの仕様は [docs/specs/config-schema.md](./docs/specs/config-schema.md) を参照してください。
 
