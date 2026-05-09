@@ -5,6 +5,7 @@ import type { GitHubClient } from '../github/index.js';
 import type { Logger } from '../logger/index.js';
 import type { Candidate, ProjectsClient } from '../projects/index.js';
 import type { runClaude } from '../runner/index.js';
+import type { RunTracker } from '../server/index.js';
 import type { WorkflowSource } from '../workflow/index.js';
 import type { GitRunner, WorkspaceManager } from '../workspace/index.js';
 
@@ -40,6 +41,8 @@ export type RecoveryDeps = {
   generateRunId?: () => string;
   /** worktree ディレクトリの存在確認を差し替えるためのフック (テスト用) */
   pathExists?: (target: string) => Promise<boolean>;
+  /** snapshot HTTP API (#30) 用の in-memory tracker。recovery 経路の dispatch も tracker に乗せる */
+  runTracker?: RunTracker;
 };
 
 export type RecoverySummary = {
@@ -247,6 +250,7 @@ export async function recoverInProgress(deps: RecoveryDeps): Promise<RecoverySum
         baseLogger: logger,
         clock: deps.clock,
         generateRunId: deps.generateRunId,
+        runTracker: deps.runTracker,
       });
       summary.processed += 1;
       logRunResult(logger, candidate, result);

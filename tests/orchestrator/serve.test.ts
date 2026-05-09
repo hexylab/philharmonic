@@ -239,4 +239,24 @@ describe('abortableSleep', () => {
     await abortableSleep(1000, ac.signal);
     expect(Date.now() - start).toBeLessThan(50);
   });
+
+  it('wakeSignal を中で abort したら即時 resolve する (#30 /api/v1/refresh)', async () => {
+    const ac = new AbortController();
+    const wake = new AbortController();
+    const start = Date.now();
+    setTimeout(() => wake.abort(), 5);
+    await abortableSleep(10_000, ac.signal, wake.signal);
+    expect(Date.now() - start).toBeLessThan(500);
+    // ループ自体は中断していないこと
+    expect(ac.signal.aborted).toBe(false);
+  });
+
+  it('wakeSignal が事前に aborted なら即時 resolve する', async () => {
+    const ac = new AbortController();
+    const wake = new AbortController();
+    wake.abort();
+    const start = Date.now();
+    await abortableSleep(1_000, ac.signal, wake.signal);
+    expect(Date.now() - start).toBeLessThan(50);
+  });
 });

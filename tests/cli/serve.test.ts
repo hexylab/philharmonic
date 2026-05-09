@@ -49,6 +49,7 @@ function fakeConfig(overrides: Partial<Config> = {}): Config {
     retry: { maxAttempts: 3, maxBackoffMs: 600_000 },
     agent: { maxConcurrentAgents: 1, maxTurns: 1, stallTimeoutMs: 300_000 },
     hooks: { afterCreate: [], beforeRun: [], afterRun: [], beforeRemove: [] },
+    server: null,
     ...overrides,
   };
 }
@@ -938,5 +939,166 @@ describe('philharmonic serve CLI コマンド', () => {
 
     const noCandidate = infoSpy.mock.calls.filter((c) => c[0] === 'no candidate');
     expect(noCandidate).toHaveLength(1);
+  });
+
+  it('config.server が null のときは snapshot api を起動しない (#30)', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const startSpy = vi.fn();
+    const serveLoopMock = vi.fn(async (deps: { signal: AbortSignal }) => {
+      subscription.emit('SIGTERM');
+      await new Promise<void>((resolve) => {
+        if (deps.signal.aborted) resolve();
+        else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    });
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      getToken: () => 'tok',
+      loadConfig: async () => fakeConfig(),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      createWorkflowSource: fakeCreateWorkflowSource,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: vi.fn(),
+      serveLoop: serveLoopMock as never,
+      createSignalSubscription: () => subscription,
+      startSnapshotApiServer: startSpy as never,
+    });
+
+    expect(startSpy).not.toHaveBeenCalled();
+  });
+
+  it('config.server.port が指定されていれば snapshot api を起動して shutdown 時に close する (#30)', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const closeSpy = vi.fn(async () => undefined);
+    const startSpy = vi.fn(async () => ({
+      port: 4_000,
+      host: '127.0.0.1',
+      url: 'http://127.0.0.1:4000',
+      close: closeSpy,
+    }));
+    const serveLoopMock = vi.fn(async (deps: { signal: AbortSignal }) => {
+      subscription.emit('SIGTERM');
+      await new Promise<void>((resolve) => {
+        if (deps.signal.aborted) resolve();
+        else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    });
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      getToken: () => 'tok',
+      loadConfig: async () => fakeConfig({ server: { port: 4_000 } }),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      createWorkflowSource: fakeCreateWorkflowSource,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: vi.fn(),
+      serveLoop: serveLoopMock as never,
+      createSignalSubscription: () => subscription,
+      startSnapshotApiServer: startSpy as never,
+    });
+
+    expect(startSpy).toHaveBeenCalledTimes(1);
+    const startArgs = startSpy.mock.calls[0]?.[0] as { port: number };
+    expect(startArgs.port).toBe(4_000);
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+    expect(lock.released).toBe(true);
+  });
+
+  it('snapshot api 起動失敗時は exit 1 で lock も release する (#30)', async () => {
+    const streams = createStreams();
+    const lock = createFakeLock();
+    const startSpy = vi.fn(async () => {
+      throw new Error('EADDRINUSE');
+    });
+
+    const { exit } = await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      getToken: () => 'tok',
+      loadConfig: async () => fakeConfig({ server: { port: 4_000 } }),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      createWorkflowSource: fakeCreateWorkflowSource,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: vi.fn(),
+      startSnapshotApiServer: startSpy as never,
+    });
+
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(streams.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining('snapshot api の起動に失敗しました'),
+    );
+    expect(lock.released).toBe(true);
+  });
+
+  it('serveLoop に acquireWakeSignal / onPollTick を注入する (#30)', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+
+    const acquireSignalSpy = vi.fn(() => new AbortController().signal);
+    const wakeController = {
+      acquire: acquireSignalSpy,
+      wake: vi.fn(() => true),
+    };
+    const tracker = {
+      runStarted: vi.fn(),
+      runFinished: vi.fn(),
+      listRunning: vi.fn(() => []),
+      getRunningByIssue: vi.fn(() => null),
+      getTotals: vi.fn(() => ({
+        runsCompleted: 0,
+        runsSucceeded: 0,
+        runsFailed: 0,
+        totalCostUsd: 0,
+      })),
+      recordPollTick: vi.fn(),
+      getLastPollTickAt: vi.fn(() => null),
+      getStartedAt: vi.fn(() => '2026-05-09T00:00:00.000Z'),
+    };
+
+    const serveLoopMock = vi.fn(
+      async (deps: {
+        signal: AbortSignal;
+        acquireWakeSignal?: () => AbortSignal | undefined;
+        onPollTick?: () => void;
+      }) => {
+        deps.acquireWakeSignal?.();
+        deps.onPollTick?.();
+        subscription.emit('SIGTERM');
+        await new Promise<void>((resolve) => {
+          if (deps.signal.aborted) resolve();
+          else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+      },
+    );
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      getToken: () => 'tok',
+      loadConfig: async () => fakeConfig(),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      createWorkflowSource: fakeCreateWorkflowSource,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: vi.fn(),
+      serveLoop: serveLoopMock as never,
+      createSignalSubscription: () => subscription,
+      createWakeController: () => wakeController,
+      createRunTracker: () => tracker,
+    });
+
+    expect(acquireSignalSpy).toHaveBeenCalled();
+    expect(tracker.recordPollTick).toHaveBeenCalled();
   });
 });

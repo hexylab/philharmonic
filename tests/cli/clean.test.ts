@@ -38,6 +38,7 @@ function fakeConfig(overrides: Partial<Config> = {}): Config {
     retry: { maxAttempts: 3, maxBackoffMs: 600_000 },
     agent: { maxConcurrentAgents: 1, maxTurns: 1, stallTimeoutMs: 300_000 },
     hooks: { afterCreate: [], beforeRun: [], afterRun: [], beforeRemove: [] },
+    server: null,
     ...overrides,
   };
 }

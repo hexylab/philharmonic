@@ -12,7 +12,11 @@ import type { RunOnceResult } from './run.js';
  */
 export type ServeLoopRunOnce = () => Promise<RunOnceResult | undefined>;
 
-export type ServeLoopSleep = (ms: number, signal: AbortSignal) => Promise<void>;
+export type ServeLoopSleep = (
+  ms: number,
+  signal: AbortSignal,
+  wakeSignal?: AbortSignal,
+) => Promise<void>;
 
 export type ServeLoopDeps = {
   intervalMs: number;
@@ -20,6 +24,14 @@ export type ServeLoopDeps = {
   logger: Logger;
   runOnce: ServeLoopRunOnce;
   sleep?: ServeLoopSleep;
+  /**
+   * 各 tick の sleep 直前に呼び、外部 (HTTP API `/api/v1/refresh`) から
+   * sleep を起こせるようにするための AbortSignal を返す。未指定なら通常の
+   * abortable sleep のみを行う。
+   */
+  acquireWakeSignal?: () => AbortSignal | undefined;
+  /** poll tick 開始時に呼ばれるフック (snapshot tracker への通知用) */
+  onPollTick?: () => void;
 };
 
 /**
@@ -33,13 +45,14 @@ export type ServeLoopDeps = {
  */
 export async function serveLoop(deps: ServeLoopDeps): Promise<void> {
   const sleep = deps.sleep ?? abortableSleep;
-  const { intervalMs, signal, logger, runOnce } = deps;
+  const { intervalMs, signal, logger, runOnce, acquireWakeSignal, onPollTick } = deps;
 
   logger.info('serve started', { intervalMs });
 
   try {
     while (!signal.aborted) {
       logger.info('poll tick', { intervalMs });
+      onPollTick?.();
 
       try {
         const result = await runOnce();
@@ -49,7 +62,8 @@ export async function serveLoop(deps: ServeLoopDeps): Promise<void> {
       }
 
       if (signal.aborted) break;
-      await sleep(intervalMs, signal);
+      const wakeSignal = acquireWakeSignal?.();
+      await sleep(intervalMs, signal, wakeSignal);
     }
   } finally {
     logger.info('serve stopped');
@@ -84,20 +98,30 @@ function describeError(error: unknown): string {
   return String(error);
 }
 
-export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+export function abortableSleep(
+  ms: number,
+  signal: AbortSignal,
+  wakeSignal?: AbortSignal,
+): Promise<void> {
   return new Promise((resolve) => {
-    if (signal.aborted) {
+    if (signal.aborted || wakeSignal?.aborted === true) {
       resolve();
       return;
     }
-    const onAbort = (): void => {
+    const cleanup = (): void => {
       clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      wakeSignal?.removeEventListener('abort', onAbort);
+    };
+    const onAbort = (): void => {
+      cleanup();
       resolve();
     };
     const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
+      cleanup();
       resolve();
     }, ms);
     signal.addEventListener('abort', onAbort, { once: true });
+    wakeSignal?.addEventListener('abort', onAbort, { once: true });
   });
 }

@@ -54,6 +54,7 @@ describe('configSchema', () => {
         afterRun: [],
         beforeRemove: [],
       },
+      server: null,
     });
   });
 
@@ -605,6 +606,49 @@ describe('configSchema', () => {
         after_create: [],
         unknown_event: [],
       },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('server 未指定時は null になる (#30)', () => {
+    const parsed = configSchema.parse({ owner: 'hexylab', project_number: 1 });
+    expect(parsed.server).toBeNull();
+  });
+
+  it('server.port を指定すると port が camelCase で展開される (#30)', () => {
+    const parsed = configSchema.parse({
+      owner: 'hexylab',
+      project_number: 1,
+      server: { port: 4000 },
+    });
+    expect(parsed.server).toEqual({ port: 4000 });
+  });
+
+  it('server.port は 1..65535 の整数のみ許可 (#30)', () => {
+    for (const invalid of [0, -1, 65_536, 1.5]) {
+      const result = configSchema.safeParse({
+        owner: 'hexylab',
+        project_number: 1,
+        server: { port: invalid },
+      });
+      expect(result.success).toBe(false);
+    }
+  });
+
+  it('server 配下の未知キーは strict で拒否する (#30)', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      server: { port: 4000, host: '0.0.0.0' },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('server.port を欠いた server セクションは reject (#30)', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      server: {},
     });
     expect(result.success).toBe(false);
   });

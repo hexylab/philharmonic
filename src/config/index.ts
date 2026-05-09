@@ -29,6 +29,8 @@ export {
   DEFAULT_WORKSPACE_ROOT,
   LOW_POLLING_INTERVAL_WARN_THRESHOLD_MS,
   MIN_POLLING_INTERVAL_MS,
+  SERVER_PORT_MAX,
+  SERVER_PORT_MIN,
   type Config,
   type RawConfigInput,
 } from './schema.js';

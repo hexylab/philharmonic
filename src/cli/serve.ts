@@ -41,6 +41,17 @@ import {
   type ServeLockHandle,
 } from '../serve/index.js';
 import {
+  buildIssueSnapshot,
+  buildStateSnapshot,
+  createRunTracker,
+  createWakeController,
+  startSnapshotApiServer,
+  type RunTracker,
+  type SnapshotApiServer,
+  type SnapshotApiServerOptions,
+  type WakeController,
+} from '../server/index.js';
+import {
   createWorkflowSource,
   type CreateWorkflowSourceOptions,
   type WorkflowSource,
@@ -100,6 +111,12 @@ export type ServeCommandDeps = {
   stderr?: NodeJS.WritableStream;
   createLogger?: typeof createLogger;
   exit?: (code: number) => never;
+  /** Snapshot HTTP API (#30) サーバ起動 (test 用に差し替え可能) */
+  startSnapshotApiServer?: (options: SnapshotApiServerOptions) => Promise<SnapshotApiServer>;
+  /** Snapshot HTTP API (#30) の in-memory tracker 生成 (test 用) */
+  createRunTracker?: (options?: { startedAt?: Date }) => RunTracker;
+  /** Snapshot HTTP API (#30) の wake controller 生成 (test 用) */
+  createWakeController?: () => WakeController;
 };
 
 const DEFAULT_DEPS: Required<ServeCommandDeps> = {
@@ -131,6 +148,9 @@ const DEFAULT_DEPS: Required<ServeCommandDeps> = {
   stderr: process.stderr,
   createLogger,
   exit: (code) => process.exit(code) as never,
+  startSnapshotApiServer,
+  createRunTracker: (options) => createRunTracker(options),
+  createWakeController,
 };
 
 export function createServeCommand(deps: ServeCommandDeps = {}): Command {
@@ -267,6 +287,51 @@ async function runServeCommand(
 
   const retryScheduler = deps.createRetryScheduler(repoRoot, config, logger);
 
+  // Snapshot HTTP API (#30) — daemon プロセスの起動以降のみを保持する in-memory tracker。
+  // server.port が未設定なら API は起動しない (config validation で port>=1 が保証されている)。
+  const runTracker = deps.createRunTracker({ startedAt: new Date() });
+  const wakeController = deps.createWakeController();
+  let apiServer: SnapshotApiServer | null = null;
+  if (config.server != null) {
+    try {
+      apiServer = await deps.startSnapshotApiServer({
+        port: config.server.port,
+        logger,
+        handlers: {
+          getState: () =>
+            buildStateSnapshot({
+              tracker: runTracker,
+              scheduler: retryScheduler,
+              intervalMs: config.polling.intervalMs,
+            }),
+          getIssue: async (issueNumber) => {
+            const snapshot = await buildIssueSnapshot({
+              issueNumber,
+              tracker: runTracker,
+              scheduler: retryScheduler,
+            });
+            if (snapshot.running === null && snapshot.retrying === null) return null;
+            return snapshot;
+          },
+          refresh: async () => ({ woken: wakeController.wake() }),
+        },
+      });
+      logger.info('snapshot api started', {
+        host: apiServer.host,
+        port: apiServer.port,
+      });
+    } catch (error) {
+      deps.stderr.write(`snapshot api の起動に失敗しました: ${describeError(error)}\n`);
+      try {
+        await lock.release();
+      } catch (releaseError) {
+        logger.warn('serve lock release に失敗', { error: describeError(releaseError) });
+      }
+      deps.exit(1);
+      return;
+    }
+  }
+
   // WORKFLOW.md (Liquid テンプレート) を上位レイヤとして読む。serve daemon は長期稼働のため
   // watch=true で hot-reload のログを出すが、各 dispatch も都度 mtime を確認するので
   // watcher が platform 都合で動かなくても render の鮮度は保たれる。
@@ -335,6 +400,7 @@ async function runServeCommand(
         dispatchStatuses: config.dispatchStatuses,
         resolveAttempt,
         logger,
+        runTracker,
       });
       await applyRetryDecision(retryScheduler, logger, result, null);
       return result;
@@ -353,6 +419,7 @@ async function runServeCommand(
       resolveAttempt,
       logger,
       maxConcurrent,
+      runTracker,
     });
     if (outcomes.length === 0) {
       logger.info('no candidate');
@@ -384,6 +451,7 @@ async function runServeCommand(
           signal: controller.signal,
           resolveAttempt,
           logger,
+          runTracker,
         });
       } catch (error) {
         logger.warn('recovery aborted', { error: describeError(error) });
@@ -395,9 +463,18 @@ async function runServeCommand(
       signal: controller.signal,
       logger,
       runOnce: wrappedRunOnce,
+      acquireWakeSignal: () => wakeController.acquire(),
+      onPollTick: () => runTracker.recordPollTick(new Date()),
     });
   } finally {
     subscription.dispose();
+    if (apiServer !== null) {
+      try {
+        await apiServer.close();
+      } catch (error) {
+        logger.warn('snapshot api close に失敗', { error: describeError(error) });
+      }
+    }
     try {
       await workflowSource.close();
     } catch (error) {

@@ -322,3 +322,42 @@ describe('createFileRetryStorage', () => {
     expect(() => readFileSync(`${filePath}.tmp`, 'utf8')).toThrow();
   });
 });
+
+describe('RetryScheduler.listEntries / getEntry (#30)', () => {
+  it('state が空のときは空配列 / null を返す', async () => {
+    const storage = makeMemoryStorage();
+    const scheduler = createRetryScheduler({ storage, maxAttempts: 3, maxBackoffMs: 600_000 });
+    expect(await scheduler.listEntries()).toEqual([]);
+    expect(await scheduler.getEntry(42)).toBeNull();
+  });
+
+  it('recordFailure 後の entry を listEntries / getEntry で取り出せる', async () => {
+    const storage = makeMemoryStorage();
+    const scheduler = createRetryScheduler({ storage, maxAttempts: 3, maxBackoffMs: 600_000 });
+    const now = new Date('2026-05-09T00:00:00Z');
+    await scheduler.recordFailure({ issueNumber: 7, reason: 'runner_error', now });
+    await scheduler.recordFailure({ issueNumber: 9, reason: 'timeout', now });
+
+    const entries = await scheduler.listEntries();
+    const sorted = [...entries].sort((a, b) => a.issueNumber - b.issueNumber);
+    expect(sorted).toEqual([
+      {
+        issueNumber: 7,
+        attempts: 1,
+        lastFailedAt: now.toISOString(),
+        nextAttemptAt: new Date(now.getTime() + 10_000).toISOString(),
+        lastReason: 'runner_error',
+      },
+      {
+        issueNumber: 9,
+        attempts: 1,
+        lastFailedAt: now.toISOString(),
+        nextAttemptAt: new Date(now.getTime() + 10_000).toISOString(),
+        lastReason: 'timeout',
+      },
+    ]);
+
+    expect(await scheduler.getEntry(7)).toEqual(sorted[0]);
+    expect(await scheduler.getEntry(999)).toBeNull();
+  });
+});

@@ -29,6 +29,8 @@ export const DEFAULT_AGENT_MAX_TURNS = 1;
 export const DEFAULT_AGENT_STALL_TIMEOUT_MS = 5 * 60 * 1_000;
 export const DEFAULT_HOOK_TIMEOUT_MS = 60 * 1_000;
 export const DEFAULT_HOOK_ON_FAILURE = 'fail' as const;
+export const SERVER_PORT_MIN = 1;
+export const SERVER_PORT_MAX = 65_535;
 
 const pollingSchema = z
   .object({
@@ -116,6 +118,17 @@ const hooksSchema = z
     before_remove: [],
   });
 
+const serverSchema = z
+  .object({
+    port: z
+      .number({ message: 'server.port は 1..65535 の整数で指定してください' })
+      .int('server.port は整数で指定してください')
+      .min(SERVER_PORT_MIN, `server.port は ${SERVER_PORT_MIN} 以上で指定してください`)
+      .max(SERVER_PORT_MAX, `server.port は ${SERVER_PORT_MAX} 以下で指定してください`),
+  })
+  .strict()
+  .optional();
+
 const rawConfigSchema = z
   .object({
     owner: z.string().min(1, 'owner は空文字以外の文字列で指定してください'),
@@ -147,6 +160,7 @@ const rawConfigSchema = z
     retry: retrySchema,
     agent: agentSchema,
     hooks: hooksSchema,
+    server: serverSchema,
   })
   .strict();
 
@@ -182,6 +196,7 @@ export const configSchema = rawConfigSchema.transform((raw) => ({
     afterRun: raw.hooks.after_run.map(toHookConfig),
     beforeRemove: raw.hooks.before_remove.map(toHookConfig),
   },
+  server: raw.server === undefined ? null : { port: raw.server.port },
 }));
 
 function toHookConfig(raw: z.infer<typeof hookEntrySchema>): {
