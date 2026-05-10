@@ -278,7 +278,9 @@ await deps.workspaceManager.cleanupWorkspace({
         "scheduled_at": "2026-05-09T00:00:30.000Z",
         "failure_reason": "runner_error",
         "last_run_id": "0190ce80-...",
-        "last_error_summary": "claude exited with code 1: ..."
+        "last_error_summary": "claude exited with code 1: ...",
+        "branch": "feature/42-foo",
+        "workspace_path": "/home/user/.philharmonic/worktrees/issue-42"
       },
       {
         "kind": "continuation",
@@ -288,7 +290,9 @@ await deps.workspaceManager.cleanupWorkspace({
         "scheduled_at": "2026-05-09T00:00:50.000Z",
         "failure_reason": null,
         "last_run_id": "0190ce80-...",
-        "last_error_summary": null
+        "last_error_summary": null,
+        "branch": "feature/43-bar",
+        "workspace_path": "/home/user/.philharmonic/worktrees/issue-43"
       }
     ]
   }
@@ -310,6 +314,8 @@ await deps.workspaceManager.cleanupWorkspace({
 | `entries[].failure_reason`     | string \| null                  | failure: `workspace_provisioning` / `runner_error` / `timeout` / `stalled` / `hook_failed`。continuation: 常に null |
 | `entries[].last_run_id`        | string                          | 直近の run id (failure: 失敗した run / continuation: success した run)                                              |
 | `entries[].last_error_summary` | string \| null                  | failure 時のエラー先頭 500 文字。continuation では常に null                                                         |
+| `entries[].branch`             | string                          | retry 対象 Issue の feature branch (#87)                                                                            |
+| `entries[].workspace_path`     | string                          | retry 対象 Issue の worktree path (#87)。retry drain 時に `cleanupWorkspace` する path                              |
 
 「古い (本フィールドを実装していない) serve」が response から `retry_queue` を完全に省略するパターンも client 側で考慮する (TypeScript 上 `retry_queue?: ...` の **optional** にする)。
 

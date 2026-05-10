@@ -10,12 +10,24 @@ import type { FailureReason } from '../orchestrator/errors.js';
  * spec: docs/specs/snapshot-api.md
  */
 
+export type RunningRetryAttempt = {
+  kind: 'failure' | 'continuation';
+  attempt: number;
+};
+
 export type RunningEntry = {
   runId: string;
   issueNumber: number;
   branch: string;
   startedAt: string;
   slot: number | null;
+  /**
+   * stdout から最後に chunk を受け取った時刻 (ISO 8601)。runner が一度も output を
+   * 出していなければ `startedAt` と同じ値を保持する (#87)。stalled 判定残時間の参照点。
+   */
+  lastActivityAt: string;
+  /** 直前 attempt が retry 起源 (failure / continuation) のとき非 null。fresh dispatch は null */
+  retryAttempt: RunningRetryAttempt | null;
 };
 
 export type Totals = {
@@ -31,6 +43,7 @@ export type RunStartedInput = {
   branch: string;
   startedAt: Date;
   slot?: number | null;
+  retryAttempt?: RunningRetryAttempt | null;
 };
 
 export type RunFinishedSuccess = {
@@ -53,6 +66,11 @@ export type RunFinishedInput = RunFinishedSuccess | RunFinishedFailed;
 export type RunTracker = {
   runStarted(input: RunStartedInput): void;
   runFinished(input: RunFinishedInput): void;
+  /**
+   * runner stdout に新しい chunk が届いた時刻を記録する。runner subprocess の onActivity
+   * callback から駆動する (#87)。runId が in-flight でなければ no-op。
+   */
+  recordActivity(runId: string, at: Date): void;
   listRunning(): RunningEntry[];
   getRunningByIssue(issueNumber: number): RunningEntry | null;
   getTotals(): Totals;
@@ -78,13 +96,21 @@ export function createRunTracker(options: CreateRunTrackerOptions = {}): RunTrac
 
   return {
     runStarted(input) {
+      const startedAtIso = input.startedAt.toISOString();
       running.set(input.runId, {
         runId: input.runId,
         issueNumber: input.issueNumber,
         branch: input.branch,
-        startedAt: input.startedAt.toISOString(),
+        startedAt: startedAtIso,
         slot: input.slot ?? null,
+        lastActivityAt: startedAtIso,
+        retryAttempt: input.retryAttempt ?? null,
       });
+    },
+    recordActivity(runId, at) {
+      const entry = running.get(runId);
+      if (entry === undefined) return;
+      running.set(runId, { ...entry, lastActivityAt: at.toISOString() });
     },
     runFinished(input) {
       if (!running.has(input.runId)) {
@@ -126,6 +152,7 @@ export function createRunTracker(options: CreateRunTrackerOptions = {}): RunTrac
 export const noopRunTracker: RunTracker = {
   runStarted: () => {},
   runFinished: () => {},
+  recordActivity: () => {},
   listRunning: () => [],
   getRunningByIssue: () => null,
   getTotals: () => ({

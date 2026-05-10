@@ -191,6 +191,7 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
       clock,
       generateRunId: deps.generateRunId,
       runTracker: tracker,
+      retryAttempt: dispatchTaskToRetryAttempt(task),
     });
     await processDispatchResultForRetry({
       task,
@@ -247,6 +248,7 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     clock,
     generateRunId: deps.generateRunId,
     runTracker: tracker,
+    retryAttempt: null,
   });
   await processDispatchResultForRetry({
     task: {
@@ -388,6 +390,7 @@ export async function runConcurrent(deps: RunConcurrentDeps): Promise<Concurrent
           generateRunId: deps.generateRunId,
           runTracker: tracker,
           slot,
+          retryAttempt: dispatchTaskToRetryAttempt(task),
         });
         return { slot, result, task };
       } catch (error) {
@@ -461,6 +464,11 @@ export type DispatchSelectedDeps = {
   runTracker?: RunTracker;
   /** 並列 dispatch 時の slot index。snapshot にそのまま載せる */
   slot?: number;
+  /**
+   * 直前 attempt が retry 起源 (failure / continuation) なら kind/attempt を渡す。
+   * snapshot の `running[].retry_attempt` に表示される (#87)。fresh dispatch では null。
+   */
+  retryAttempt?: { kind: RetryKind; attempt: number } | null;
 };
 
 /**
@@ -498,6 +506,7 @@ export async function dispatchSelected(
     branch,
     startedAt,
     slot: deps.slot ?? null,
+    retryAttempt: deps.retryAttempt ?? null,
   });
   const taskKey = `issue-${candidate.issueNumber}`;
   const baseRef = `${remote}/${deps.config.baseBranch}`;
@@ -605,6 +614,7 @@ export async function dispatchSelected(
         stallTimeoutMs: deps.config.agent.stallTimeoutMs,
         logDir: runLog.dir,
         logger,
+        onActivity: (at) => tracker.recordActivity(runId, at),
       });
     } catch (error) {
       await runAfterRunHooksSafely(deps.workspaceManager, hookContext, 'failed', logger);
@@ -965,6 +975,19 @@ export type DispatchTask = {
 };
 
 const RETRY_RESCHEDULE_DELAY_MS = 10_000;
+
+/**
+ * `DispatchTask` から `runStarted.retryAttempt` 用の値を組み立てる。
+ *
+ * fresh dispatch (retryFrom === null) は null を返す。retry 起源は `retryFrom.kind` と
+ * 「次に走る attempt 番号 = task.retryAttempt」を渡す (snapshot/UI で人間に分かりやすい単位)。
+ */
+function dispatchTaskToRetryAttempt(
+  task: DispatchTask,
+): { kind: RetryKind; attempt: number } | null {
+  if (task.retryFrom === null) return null;
+  return { kind: task.retryFrom.kind, attempt: task.retryAttempt };
+}
 
 /**
  * `dispatchSelected` の `failureReason` のうち、failure retry queue の対象とするものを判定する。

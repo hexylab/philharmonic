@@ -6,7 +6,7 @@
 
 ## 関連
 
-- 関連 Issue: #30 (Refs: #21, #28), #62 (`retrying` セクション撤廃), #31 (TUI dashboard が本 API を購読する), #84 (`retry_queue` セクション追加 / ADR-0008)
+- 関連 Issue: #30 (Refs: #21, #28), #62 (`retrying` セクション撤廃), #31 (TUI dashboard が本 API を購読する), #84 (`retry_queue` セクション追加 / ADR-0008), #87 (`running[].last_activity_at` / `running[].retry_attempt` / `agent.stall_timeout_ms` / retry entry の `branch` `workspace_path` 追加)
 - 設計判断: [ADR-0004 Snapshot HTTP API は Node 標準 http で loopback 固定で公開する](../adr/0004-snapshot-http-api.md), [ADR-0005 薄い orchestrator + agent 委譲型 hybrid](../adr/0005-thin-orchestrator-agent-delegation.md), [ADR-0006 TUI dashboard は Ink で実装する](../adr/0006-tui-dashboard.md), [ADR-0008 in-memory retry queue](../adr/0008-in-memory-retry-queue.md)
 - 関連 spec: [serve-daemon.md](./serve-daemon.md), [dashboard.md](./dashboard.md), [config-schema.md](./config-schema.md), [observability.md](./observability.md), [orchestration-mvp.md](./orchestration-mvp.md)
 
@@ -43,6 +43,10 @@ type RunningEntry = {
   branch: string;
   startedAt: string; // ISO 8601
   slot: number | null; // 並列 dispatch (#24) 時のみ非 null
+  /** stdout から最後に chunk を受け取った時刻 (ISO 8601) (#87)。runner が一度も output を出していなければ startedAt と同じ値 */
+  lastActivityAt: string;
+  /** 直前 attempt が retry 起源 (failure / continuation) のとき非 null。fresh dispatch は null (#87) */
+  retryAttempt: { kind: 'failure' | 'continuation'; attempt: number } | null;
 };
 
 type Totals = {
@@ -54,6 +58,8 @@ type Totals = {
 ```
 
 各 dispatch (`dispatchSelected`) は開始時に `tracker.runStarted(...)` を、終了時 (success / failure / 想定外 throw) に `tracker.runFinished(...)` を呼ぶ。`runFinished` は **runId が running set に居なければ no-op** (べき等)。
+
+runner subprocess の stdout に新しい chunk が来るたびに `tracker.recordActivity(runId, at)` を呼んで `lastActivityAt` を更新する (#87)。runner からは `onActivity` callback で配線する。`runId` が in-flight でない場合は no-op (べき等)。
 
 ### `RetryStateEntry` の撤廃 (ADR-0005) と `retry_queue` の追加 (ADR-0008)
 
@@ -114,13 +120,18 @@ type SchedulerSnapshot = {
     "interval_ms": 30000,
     "last_tick_at": "2026-05-09T00:00:30.000Z"
   },
+  "agent": {
+    "stall_timeout_ms": 300000
+  },
   "running": [
     {
       "run_id": "0190ce80-...",
       "issue_number": 42,
       "branch": "feature/42-foo",
       "started_at": "2026-05-09T00:00:10.000Z",
-      "slot": 0
+      "slot": 0,
+      "last_activity_at": "2026-05-09T00:00:25.000Z",
+      "retry_attempt": { "kind": "failure", "attempt": 2 }
     }
   ],
   "totals": {
@@ -151,37 +162,44 @@ type SchedulerSnapshot = {
     "max_backoff_ms": 300000,
     "entries": [
       {
+        "kind": "failure",
         "issue_number": 42,
         "attempt": 2,
         "due_at": "2026-05-09T00:00:50.000Z",
         "scheduled_at": "2026-05-09T00:00:30.000Z",
         "failure_reason": "runner_error",
         "last_run_id": "0190ce80-0000-7000-8000-000000000001",
-        "last_error_summary": "claude exited with code 1: ..."
+        "last_error_summary": "claude exited with code 1: ...",
+        "branch": "feature/42-foo",
+        "workspace_path": "/home/user/.philharmonic/worktrees/issue-42"
       }
     ]
   }
 }
 ```
 
-| フィールド               | 型               | 説明                                                                                           |
-| ------------------------ | ---------------- | ---------------------------------------------------------------------------------------------- |
-| `started_at`             | ISO 8601         | daemon の起動時刻 (= tracker 生成時刻)                                                         |
-| `uptime_ms`              | integer          | daemon が稼働している時間 (ms)                                                                 |
-| `polling.interval_ms`    | integer          | `config.polling.interval_ms`                                                                   |
-| `polling.last_tick_at`   | ISO 8601 \| null | 最終 poll tick の時刻。1 回も tick していなければ null                                         |
-| `running`                | array            | 現在進行中の dispatch (issue number 昇順)                                                      |
-| `running[].run_id`       | UUIDv7           | `dispatchSelected` で生成した run id                                                           |
-| `running[].issue_number` | integer          | Issue 番号                                                                                     |
-| `running[].branch`       | string           | feature ブランチ名                                                                             |
-| `running[].started_at`   | ISO 8601         | `dispatchSelected` の開始時刻                                                                  |
-| `running[].slot`         | integer \| null  | 並列 dispatch (#24) の slot index。`max_concurrent_agents == 1` の互換動作なら null            |
-| `totals.runs_completed`  | integer          | daemon プロセス起動以降に完了 (success+failed) した run 数                                     |
-| `totals.runs_succeeded`  | integer          | 成功した run 数                                                                                |
-| `totals.runs_failed`     | integer          | 失敗した run 数                                                                                |
-| `totals.total_cost_usd`  | number           | runner からの `total_cost_usd` の総和 (null は 0 として扱う)                                   |
-| `scheduler`              | object \| null   | DAG-aware scheduler の最新 evaluation (詳細は次節)。1 度も評価していなければ null              |
-| `retry_queue`            | object \| null   | In-memory retry queue (ADR-0008)。`agent.max_retry_attempts == 0` または queue 未注入なら null |
+| フィールド                   | 型                  | 説明                                                                                                                                              |
+| ---------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `started_at`                 | ISO 8601            | daemon の起動時刻 (= tracker 生成時刻)                                                                                                            |
+| `uptime_ms`                  | integer             | daemon が稼働している時間 (ms)                                                                                                                    |
+| `polling.interval_ms`        | integer             | `config.polling.interval_ms`                                                                                                                      |
+| `polling.last_tick_at`       | ISO 8601 \| null    | 最終 poll tick の時刻。1 回も tick していなければ null                                                                                            |
+| `agent`                      | object \| undefined | `agent.stall_timeout_ms` を含む運用パラメータ (#87)。古い (本フィールドを実装していない) serve に対しては undefined。現行 serve は常に key を返す |
+| `agent.stall_timeout_ms`     | integer             | `config.agent.stall_timeout_ms` の現値 (ms)。stalled 残時間算出の基準値。0 で stall 判定 off                                                      |
+| `running`                    | array               | 現在進行中の dispatch (issue number 昇順)                                                                                                         |
+| `running[].run_id`           | UUIDv7              | `dispatchSelected` で生成した run id                                                                                                              |
+| `running[].issue_number`     | integer             | Issue 番号                                                                                                                                        |
+| `running[].branch`           | string              | feature ブランチ名                                                                                                                                |
+| `running[].started_at`       | ISO 8601            | `dispatchSelected` の開始時刻                                                                                                                     |
+| `running[].slot`             | integer \| null     | 並列 dispatch (#24) の slot index。`max_concurrent_agents == 1` の互換動作なら null                                                               |
+| `running[].last_activity_at` | ISO 8601            | runner stdout に最後に chunk が来た時刻 (#87)。stalled 残時間 = `agent.stall_timeout_ms - (now - last_activity_at)` を client 側で算出する        |
+| `running[].retry_attempt`    | object \| null      | retry 起源の dispatch なら `{ kind, attempt }`。fresh dispatch は null (#87)                                                                      |
+| `totals.runs_completed`      | integer             | daemon プロセス起動以降に完了 (success+failed) した run 数                                                                                        |
+| `totals.runs_succeeded`      | integer             | 成功した run 数                                                                                                                                   |
+| `totals.runs_failed`         | integer             | 失敗した run 数                                                                                                                                   |
+| `totals.total_cost_usd`      | number              | runner からの `total_cost_usd` の総和 (null は 0 として扱う)                                                                                      |
+| `scheduler`                  | object \| null      | DAG-aware scheduler の最新 evaluation (詳細は次節)。1 度も評価していなければ null                                                                 |
+| `retry_queue`                | object \| null      | In-memory retry queue (ADR-0008)。`agent.max_retry_attempts == 0` または queue 未注入なら null                                                    |
 
 `retrying` 配列 (旧 #22) は ADR-0005 で撤廃。`retry_queue` (ADR-0008) は別機構として再導入された (永続化しない / Status 駆動でない)。
 
@@ -191,19 +209,22 @@ PR 番号 (`pr_number`) は orchestrator が知れなくなったため `running
 
 `philharmonic serve` daemon プロセス内の retry queue をスナップショットする。永続ファイルは読まない。`agent.max_retry_attempts == 0` で機能 off のときは `null` を返す。
 
-| フィールド                     | 型             | 説明                                                                                         |
-| ------------------------------ | -------------- | -------------------------------------------------------------------------------------------- |
-| `retry_queue.size`             | integer        | 現在 queue に積まれている entry 件数                                                         |
-| `retry_queue.max_attempts`     | integer        | `agent.max_retry_attempts` の現値                                                            |
-| `retry_queue.max_backoff_ms`   | integer        | `agent.max_retry_backoff_ms` の現値                                                          |
-| `retry_queue.entries[]`        | array          | dueAt 昇順、同時刻なら issue_number 昇順                                                     |
-| `entries[].issue_number`       | integer        | Issue 番号                                                                                   |
-| `entries[].attempt`            | integer        | 1-indexed retry 試行番号 (= 次に走る attempt)                                                |
-| `entries[].due_at`             | ISO 8601       | この entry が次に dispatch されうる予定時刻                                                  |
-| `entries[].scheduled_at`       | ISO 8601       | この entry が積まれた / 上書きされた時刻                                                     |
-| `entries[].failure_reason`     | string         | `workspace_provisioning` / `runner_error` / `timeout` / `stalled` / `hook_failed` のいずれか |
-| `entries[].last_run_id`        | string         | 直近失敗した run id                                                                          |
-| `entries[].last_error_summary` | string \| null | 失敗エラーメッセージ先頭最大 500 文字。詳細は run-log の `summary.md` 参照                   |
+| フィールド                     | 型                              | 説明                                                                                                                |
+| ------------------------------ | ------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `retry_queue.size`             | integer                         | 現在 queue に積まれている entry 件数                                                                                |
+| `retry_queue.max_attempts`     | integer                         | `agent.max_retry_attempts` の現値                                                                                   |
+| `retry_queue.max_backoff_ms`   | integer                         | `agent.max_retry_backoff_ms` の現値                                                                                 |
+| `retry_queue.entries[]`        | array                           | dueAt 昇順、同時刻なら issue_number 昇順                                                                            |
+| `entries[].kind`               | `"failure"` \| `"continuation"` | retry の種類。`failure` は ADR-0008、`continuation` は ADR-0009                                                     |
+| `entries[].issue_number`       | integer                         | Issue 番号                                                                                                          |
+| `entries[].attempt`            | integer                         | 1-indexed retry 試行番号 (= 次に走る attempt)                                                                       |
+| `entries[].due_at`             | ISO 8601                        | この entry が次に dispatch されうる予定時刻                                                                         |
+| `entries[].scheduled_at`       | ISO 8601                        | この entry が積まれた / 上書きされた時刻                                                                            |
+| `entries[].failure_reason`     | string \| null                  | failure: `workspace_provisioning` / `runner_error` / `timeout` / `stalled` / `hook_failed`。continuation: 常に null |
+| `entries[].last_run_id`        | string                          | 直近の run id (failure: 失敗した run / continuation: success した run)                                              |
+| `entries[].last_error_summary` | string \| null                  | failure のとき先頭最大 500 文字、continuation では常に null                                                         |
+| `entries[].branch`             | string                          | retry 対象 Issue の feature branch (#87)                                                                            |
+| `entries[].workspace_path`     | string                          | retry 対象 Issue の worktree path (#87)。retry drain 時に `cleanupWorkspace` する path                              |
 
 #### `scheduler` フィールド (ADR-0007)
 

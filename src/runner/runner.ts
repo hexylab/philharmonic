@@ -56,6 +56,11 @@ export type RunClaudeOptions = {
    * 既定は `process.kill(-pid, signal)`。失敗時は単体 kill にフォールバックする。
    */
   killProcessGroup?: KillProcessGroupFn;
+  /**
+   * subprocess の stdout に新しい chunk が来たタイミングで呼ばれる。stall 判定の基準点を
+   * tracker / snapshot に伝えるために使う (#87)。activity 1 回ごとに 1 度呼ばれる。
+   */
+  onActivity?: (at: Date) => void;
 };
 
 export type RunResult = {
@@ -155,6 +160,7 @@ export async function runClaude(options: RunClaudeOptions): Promise<RunResult> {
           stallTimeoutMs,
           streamLog,
           stderrLog,
+          onActivity: options.onActivity,
           // baseLogger は system event 受信時に sessionId 付きに差し替わる。
           // getLogger は呼び出しごとに最新の baseLogger を child するので、
           // sessionId 切替後の intra-turn ログにも sessionId が付与される (#25)。
@@ -256,6 +262,7 @@ type RunTurnInput = {
   stallTimeoutMs: number;
   streamLog: WriteStream | null;
   stderrLog: WriteStream | null;
+  onActivity?: (at: Date) => void;
   /**
    * 呼び出すたびに最新の logger (sessionId 反映済み) を返す getter。
    * runTurn の内部で `input.getLogger()?.info(...)` のように使う。
@@ -357,6 +364,7 @@ async function runTurn(input: RunTurnInput): Promise<TurnOutcome> {
 
     child.stdout?.on('data', (chunk: string) => {
       rescheduleStall();
+      input.onActivity?.(new Date());
       if (input.streamLog !== null) input.streamLog.write(chunk);
       const events = parser.push(chunk);
       for (const event of events) {

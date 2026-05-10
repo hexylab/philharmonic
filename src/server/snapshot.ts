@@ -19,12 +19,24 @@ export type StateSnapshot = {
     interval_ms: number;
     last_tick_at: string | null;
   };
+  /**
+   * stalled 残時間 (`stall_timeout_ms - (now - last_activity_at)`) を dashboard 等で
+   * 算出するための運用パラメータ (#87)。`agent.stall_timeout_ms` の現値。0 で stall 判定 off。
+   *
+   * `scheduler` / `retry_queue` と同じく optional。古い (本フィールドを実装していない)
+   * serve に対しても dashboard 側で安全に fall-back できるよう、現行 serve は常に key を返す。
+   */
+  agent?: {
+    stall_timeout_ms: number;
+  };
   running: Array<{
     run_id: string;
     issue_number: number;
     branch: string;
     started_at: string;
     slot: number | null;
+    last_activity_at: string;
+    retry_attempt: { kind: 'failure' | 'continuation'; attempt: number } | null;
   }>;
   totals: {
     runs_completed: number;
@@ -62,6 +74,8 @@ export type RetryQueueStateJson = {
     failure_reason: string | null;
     last_run_id: string;
     last_error_summary: string | null;
+    branch: string;
+    workspace_path: string;
   }>;
 };
 
@@ -94,6 +108,11 @@ export type IssueSnapshot = {
 export type BuildStateSnapshotDeps = {
   tracker: RunTracker;
   intervalMs: number;
+  /**
+   * `agent.stall_timeout_ms` の現値 (ms)。snapshot に乗せて dashboard 側で stalled 残時間を
+   * 算出させる (#87)。0 / 負値 / 未指定は stall 判定無効として 0 を返す。
+   */
+  stallTimeoutMs?: number;
   now?: Date;
   /** ADR-0007 の DependencyTracker。未指定なら `scheduler: null` を返す */
   dependencyTracker?: DependencyTracker;
@@ -118,12 +137,22 @@ export async function buildStateSnapshot(deps: BuildStateSnapshotDeps): Promise<
   const scheduler = schedulerToJson(dependencyTracker.getSnapshot());
   const retryQueue = retryQueueToJson(deps.retryQueue, deps.retryConfig);
 
+  const stallTimeoutMs =
+    deps.stallTimeoutMs !== undefined &&
+    Number.isFinite(deps.stallTimeoutMs) &&
+    deps.stallTimeoutMs > 0
+      ? deps.stallTimeoutMs
+      : 0;
+
   return {
     started_at: startedAt,
     uptime_ms: uptimeMs,
     polling: {
       interval_ms: deps.intervalMs,
       last_tick_at: deps.tracker.getLastPollTickAt(),
+    },
+    agent: {
+      stall_timeout_ms: stallTimeoutMs,
     },
     running,
     totals,
@@ -156,6 +185,8 @@ function toRetryEntryJson(entry: RetryEntry): RetryQueueStateJson['entries'][num
     failure_reason: entry.failureReason,
     last_run_id: entry.lastRunId,
     last_error_summary: entry.lastErrorSummary,
+    branch: entry.branch,
+    workspace_path: entry.workspacePath,
   };
 }
 
@@ -203,6 +234,8 @@ function toRunningJson(entry: RunningEntry): StateSnapshot['running'][number] {
     branch: entry.branch,
     started_at: entry.startedAt,
     slot: entry.slot,
+    last_activity_at: entry.lastActivityAt,
+    retry_attempt: entry.retryAttempt === null ? null : { ...entry.retryAttempt },
   };
 }
 

@@ -576,6 +576,40 @@ describe('runClaude — stall detection (#25)', () => {
     expect(result.status).toBe('stalled');
   });
 
+  it('onActivity が stdout chunk ごとに呼ばれる (#87)', async () => {
+    const { spawn, calls } = createSpawnFn();
+    const onActivity = vi.fn();
+    const promise = runClaude(
+      baseOptions({
+        spawn,
+        timeoutMs: 60_000,
+        stallTimeoutMs: 0,
+        onActivity,
+      }),
+    );
+    const call = await waitForSpawn(calls);
+    const child = call.child;
+
+    child.stdout.write(makeSystemLine(FIXED_SESSION_ID));
+    child.stdout.write(
+      makeResultLine({
+        sessionId: FIXED_SESSION_ID,
+        subtype: 'success',
+        isError: false,
+        numTurns: 1,
+        totalCostUsd: 0.01,
+        resultText: 'ok',
+      }),
+    );
+    child.stdout.end();
+    child.emit('close', 0, null);
+    const result = await promise;
+
+    expect(result.status).toBe('success');
+    expect(onActivity).toHaveBeenCalledTimes(2);
+    expect(onActivity.mock.calls[0]![0]).toBeInstanceOf(Date);
+  });
+
   it('stallTimeoutMs=0 で stall detection が無効化される', async () => {
     const { spawn, calls } = createSpawnFn();
     const promise = runClaude(

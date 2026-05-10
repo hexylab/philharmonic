@@ -20,10 +20,43 @@ describe('createRunTracker', () => {
         branch: 'feature/42-foo',
         startedAt: '2026-05-09T00:00:01.000Z',
         slot: 0,
+        lastActivityAt: '2026-05-09T00:00:01.000Z',
+        retryAttempt: null,
       },
     ]);
     expect(tracker.getRunningByIssue(42)).not.toBeNull();
     expect(tracker.getRunningByIssue(43)).toBeNull();
+  });
+
+  it('recordActivity で lastActivityAt が更新される (#87)', () => {
+    const tracker = createRunTracker();
+    tracker.runStarted({
+      runId: 'r',
+      issueNumber: 1,
+      branch: 'b',
+      startedAt: new Date('2026-05-09T00:00:00Z'),
+    });
+    tracker.recordActivity('r', new Date('2026-05-09T00:01:00Z'));
+
+    expect(tracker.getRunningByIssue(1)?.lastActivityAt).toBe('2026-05-09T00:01:00.000Z');
+  });
+
+  it('recordActivity は in-flight でない runId を no-op にする (#87)', () => {
+    const tracker = createRunTracker();
+    expect(() => tracker.recordActivity('unknown', new Date())).not.toThrow();
+  });
+
+  it('runStarted で retryAttempt を渡すと running entry に保持される (#87)', () => {
+    const tracker = createRunTracker();
+    tracker.runStarted({
+      runId: 'r',
+      issueNumber: 1,
+      branch: 'b',
+      startedAt: new Date('2026-05-09T00:00:00Z'),
+      retryAttempt: { kind: 'failure', attempt: 2 },
+    });
+
+    expect(tracker.getRunningByIssue(1)?.retryAttempt).toEqual({ kind: 'failure', attempt: 2 });
   });
 
   it('runFinished で running から消え、totals が更新される (success)', () => {
