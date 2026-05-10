@@ -49,12 +49,29 @@ export {
   computeRetryDelayMs,
   CONTINUATION_RETRY_DELAY_MS,
   createRetryQueue,
+  type CreateRetryQueueOptions,
   type RescheduleInput as RetryQueueRescheduleInput,
   type RetryEntry,
   type RetryKind,
   type RetryQueue,
   type ScheduleInput as RetryQueueScheduleInput,
 } from './retry-queue.js';
+export {
+  createRetryQueueFileStore,
+  loadRetryQueueEntries,
+  RETRY_QUEUE_STATE_FILE_RELATIVE,
+  RETRY_QUEUE_STATE_VERSION,
+  type InvalidEntryReport,
+  type LoadResult as RetryQueueLoadResult,
+  type RetryEntryJson,
+  type RetryQueueStateJson,
+  type RetryQueueStore,
+} from './retry-queue-store.js';
+export {
+  releaseRestoredRetries,
+  type ReleaseRestoredRetriesDeps,
+  type ReleaseRestoredRetriesSummary,
+} from './retry-queue-restore.js';
 export {
   abortableSleep,
   serveLoop,

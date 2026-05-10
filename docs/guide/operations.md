@@ -72,18 +72,18 @@ philharmonic serve --config ./path/to/.philharmonic/philharmonic.yaml
 
 主な違い (`philharmonic run` との比較):
 
-| 項目              | `run`           | `serve`                                                                                         |
-| ----------------- | --------------- | ----------------------------------------------------------------------------------------------- |
-| 実行回数          | 1 ターンで exit | ポーリング loop で繰り返す                                                                      |
-| 並列 dispatch     | 無し            | `agent.max_concurrent_agents` で 1 tick 内に複数 dispatch                                       |
-| Tracker recovery  | 無し            | 起動時に `In Progress` の Issue を引き取る                                                      |
-| 自動 retry queue  | 無し            | `agent.max_retry_attempts` で failure / continuation 両方を in-memory に再 dispatch (#84 / #85) |
-| Snapshot HTTP API | 起動しない      | `server.port` 指定時に `127.0.0.1` で起動                                                       |
-| 二重起動防止      | 無し            | `.philharmonic/serve.lock` で同一 repo の二重起動を弾く                                         |
+| 項目              | `run`           | `serve`                                                                                                                                                    |
+| ----------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 実行回数          | 1 ターンで exit | ポーリング loop で繰り返す                                                                                                                                 |
+| 並列 dispatch     | 無し            | `agent.max_concurrent_agents` で 1 tick 内に複数 dispatch                                                                                                  |
+| Tracker recovery  | 無し            | 起動時に `In Progress` の Issue を引き取る                                                                                                                 |
+| 自動 retry queue  | 無し            | `agent.max_retry_attempts` で failure / continuation 両方を再 dispatch。`.philharmonic/state/retry-queue.json` に永続化され再起動を跨ぐ (#84 / #85 / #104) |
+| Snapshot HTTP API | 起動しない      | `server.port` 指定時に `127.0.0.1` で起動                                                                                                                  |
+| 二重起動防止      | 無し            | `.philharmonic/serve.lock` で同一 repo の二重起動を弾く                                                                                                    |
 
 ### 自動 retry queue (`agent.max_retry_attempts`)
 
-`philharmonic serve` は daemon プロセス内に **in-memory な retry queue** を持ち、以下 2 種類の自動再 dispatch を 1 本の queue で扱います。最大 `agent.max_retry_attempts` 回 (default 5) まで再試行し、kind ごとに独立にカウントします (Issue #84 / [ADR-0008](../adr/0008-in-memory-retry-queue.md), Issue #85 / [ADR-0009](../adr/0009-continuation-retry-after-success.md))。
+`philharmonic serve` は daemon プロセス内に **retry queue** を持ち、以下 2 種類の自動再 dispatch を 1 本の queue で扱います。最大 `agent.max_retry_attempts` 回 (default 5) まで再試行し、kind ごとに独立にカウントします (Issue #84 / [ADR-0008](../adr/0008-in-memory-retry-queue.md), Issue #85 / [ADR-0009](../adr/0009-continuation-retry-after-success.md))。state は `<repoRoot>/.philharmonic/state/retry-queue.json` に永続化され、serve 再起動を跨いで attempt counter が維持されます (Issue #104 / [ADR-0011](../adr/0011-persist-retry-queue-across-restart.md))。
 
 #### kind=`failure` — 失敗の指数バックオフ retry
 
@@ -116,13 +116,13 @@ agent:
   max_retry_attempts: 0
 ```
 
-retry の進行は構造化ログ (`retry scheduled` / `retry due` / `retry skipped` / `retry exhausted` / `continuation released`、いずれも `kind` field 付き) と Snapshot HTTP API (`/api/v1/state` の `retry_queue.entries[].kind` field) で観測できます。retry queue は **永続化されません** (daemon 再起動で消える)。失われた retry は次回 `serve` 起動時の Tracker-driven recovery (`In Progress` 引き取り) が代替で拾います。
+retry の進行は構造化ログ (`retry scheduled` / `retry due` / `retry skipped` / `retry exhausted` / `continuation released`、いずれも `kind` field 付き) と Snapshot HTTP API (`/api/v1/state` の `retry_queue.entries[].kind` field) で観測できます。retry queue は `<repoRoot>/.philharmonic/state/retry-queue.json` に永続化され (ADR-0011 / Issue #104)、daemon 再起動を跨いで attempt counter / dueAt / failureReason が維持されます。state file が壊れた場合は `<state.json>.bak` に退避し empty queue で起動します。drain → dispatch 間の crash window で失われた 1 attempt は、次回 `serve` 起動時の Tracker-driven recovery (`In Progress` 引き取り) が代替で拾います。
 
 `kind=failure` で上限に到達した場合は `.philharmonic/runs/<run-id>/failure-summary.md` に運用者向け Markdown サマリ (issue / final attempt / failure reason / log path / 手動復旧手順) を残します。発生時の手順は [自動 retry が上限に到達した](#自動-retry-が上限に到達した-retry-exhausted-kindfailure) を参照してください。
 
 詳細仕様は [`docs/specs/retry-queue.md`](../specs/retry-queue.md) を参照。
 
-> 旧仕様の **永続 / Status 駆動な** retry-state (`retry.*`) は復活させていません。in-memory な retry queue (上記) で daemon プロセス内に閉じた retry を実装しています。`Failed` flip 後の再実行は引き続き人手 / agent の判断で `Todo` に戻すか別 Issue を起票します。
+> 旧仕様の **Status 駆動な** retry-state (`Failed → Todo` を orchestrator が書き戻す) は復活させていません。retry queue は `attempt` counter / `dueAt` だけを `.philharmonic/state/retry-queue.json` に永続化し (ADR-0011)、Status は引き続き agent が書きます。`Failed` flip 後の再実行は人手 / agent の判断で `Todo` に戻すか別 Issue を起票します。
 
 `permission_mode: bypass` を `serve` で使う場合は、長時間稼働で `--dangerously-skip-permissions` が連続発火することへの opt-in が必要です。`philharmonic.yaml` で `safety.allow_bypass_in_serve: true` を設定するか (推奨)、環境変数 `PHILHARMONIC_ALLOW_BYPASS_IN_SERVE=1` を明示してください。両方未設定だと起動を拒否します。
 
@@ -157,7 +157,7 @@ philharmonic retry 42 --force
 
 `--dry-run` は **副作用ゼロ** で plan を表示するだけです。`gh project item-edit` も `cleanupWorkspace` も呼ばないので、慣れないうちは `--dry-run` で確認してから本実行する運用を推奨します。
 
-> **自動 retry queue (in-memory) との関係**: `philharmonic serve` の retry queue は daemon プロセス内 in-memory で、`philharmonic retry` (別プロセス) からは触れません。同 Issue の retry entry が serve に残っていれば、`dueAt` 到来時の `drainRetryQueue` が新しい Status (= 本コマンドが書き戻した値) を見て普通に dispatch します。CLI から in-memory queue を即時 evict する手段は提供していません (queue は serve 停止 / 再起動で消えます)。
+> **自動 retry queue との関係**: `philharmonic serve` の retry queue は daemon プロセス内の in-memory state を `.philharmonic/state/retry-queue.json` に永続化したもので、`philharmonic retry` (別プロセス) からは直接書き換えできません。同 Issue の retry entry が serve に残っていれば、`dueAt` 到来時の `drainRetryQueue` が新しい Status (= 本コマンドが書き戻した値) を見て普通に dispatch します。serve 停止中に state file を手で削除したい場合は `rm <repoRoot>/.philharmonic/state/retry-queue.json` が安全 (serve 再起動で empty queue になる)。
 
 > **動作中の serve との race**: 対象 Issue が **まさに in-flight** な場合 (`philharmonic serve` の dispatch が runner 起動中) に `philharmonic retry` を実行すると、`cleanupWorkspace` が **動作中の runner の worktree を `--force` で吹き飛ばす** 可能性があります。spec 上 retry CLI は「自動 retry で復旧できなかった fallback」想定ですが、足元で in-flight な可能性を防ぐためには、実行前に `philharmonic dashboard` または `curl -s http://127.0.0.1:<port>/api/v1/<issue-number> | jq` で対象 Issue が `running[]` に居ないことを確認してから実行してください。`server.port` を未設定なら `philharmonic serve` の構造化ログの `dispatch success` / `run completed successfully` を grep する運用でも代替できます。
 

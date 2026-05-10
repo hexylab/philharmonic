@@ -26,12 +26,20 @@ import { createLogger, type Logger } from '../logger/index.js';
 import {
   cleanupStaleWorktreesAtStartup,
   createRetryQueue,
+  createRetryQueueFileStore,
+  loadRetryQueueEntries,
   recoverInProgress,
+  releaseRestoredRetries,
+  RETRY_QUEUE_STATE_FILE_RELATIVE,
+  RETRY_QUEUE_STATE_VERSION,
   runConcurrent,
   runOnce,
   serveLoop,
   type ConcurrentDispatchOutcome,
+  type CreateRetryQueueOptions,
   type RetryQueue,
+  type RetryQueueLoadResult,
+  type RetryQueueStore,
   type RunOnceResult,
 } from '../orchestrator/index.js';
 import {
@@ -128,7 +136,15 @@ export type ServeCommandDeps = {
   createRunTracker?: (options?: { startedAt?: Date }) => RunTracker;
   createWakeController?: () => WakeController;
   createDependencyTracker?: () => DependencyTracker;
-  createRetryQueue?: () => RetryQueue;
+  createRetryQueue?: (options?: CreateRetryQueueOptions) => RetryQueue;
+  /**
+   * retry queue の永続化先 path を解決する (ADR-0011 / #104)。default は
+   * `<repoRoot>/.philharmonic/state/retry-queue.json`。テストでは tmp dir を返す。
+   */
+  resolveRetryQueueStatePath?: (input: { repoRoot: string }) => string;
+  loadRetryQueueEntries?: (filePath: string) => Promise<RetryQueueLoadResult>;
+  createRetryQueueFileStore?: (input: { filePath: string; logger: Logger }) => RetryQueueStore;
+  releaseRestoredRetries?: typeof releaseRestoredRetries;
 };
 
 const DEFAULT_DEPS: Required<ServeCommandDeps> = {
@@ -160,7 +176,12 @@ const DEFAULT_DEPS: Required<ServeCommandDeps> = {
   createRunTracker: (options) => createRunTracker(options),
   createWakeController,
   createDependencyTracker,
-  createRetryQueue,
+  createRetryQueue: (options) => createRetryQueue(options),
+  resolveRetryQueueStatePath: ({ repoRoot }) =>
+    path.resolve(repoRoot, RETRY_QUEUE_STATE_FILE_RELATIVE),
+  loadRetryQueueEntries: (filePath) => loadRetryQueueEntries(filePath),
+  createRetryQueueFileStore: (input) => createRetryQueueFileStore(input),
+  releaseRestoredRetries: releaseRestoredRetries,
 };
 
 export function createServeCommand(deps: ServeCommandDeps = {}): Command {
@@ -335,7 +356,19 @@ async function runServeCommand(
   const runTracker = deps.createRunTracker({ startedAt: new Date() });
   const wakeController = deps.createWakeController();
   const dependencyTracker = deps.createDependencyTracker();
-  const retryQueue = deps.createRetryQueue();
+
+  // retry queue 永続化の bootstrap (ADR-0011 / #104):
+  // 1. state file から復元 (file 不在 / parse 失敗 / version mismatch は warn して empty 起動)
+  // 2. store を queue に注入し、以降の mutation で自動 persist する
+  // 3. release-on-restore 判定は acquireServeLock 後 (recoverInProgress の直前) に行う
+  const retryQueueStatePath = deps.resolveRetryQueueStatePath({ repoRoot });
+  const retryQueueLoad = await deps.loadRetryQueueEntries(retryQueueStatePath);
+  logRetryQueueLoadResult(logger, retryQueueStatePath, retryQueueLoad);
+  const retryQueueStore = deps.createRetryQueueFileStore({ filePath: retryQueueStatePath, logger });
+  const retryQueue = deps.createRetryQueue({
+    store: retryQueueStore,
+    initialEntries: retryQueueLoad.entries,
+  });
   let apiServer: SnapshotApiServer | null = null;
   if (config.server != null) {
     try {
@@ -460,6 +493,22 @@ async function runServeCommand(
   };
 
   try {
+    if (!controller.signal.aborted && retryQueueLoad.entries.length > 0) {
+      try {
+        const summary = await deps.releaseRestoredRetries({
+          queue: retryQueue,
+          githubClient,
+          logger,
+          signal: controller.signal,
+        });
+        logger.info('retry queue restore release pass completed', summary);
+      } catch (error) {
+        logger.warn('retry queue restore release pass failed', {
+          error: describeError(error),
+        });
+      }
+    }
+
     if (!controller.signal.aborted) {
       try {
         await deps.recoverInProgress({
@@ -476,6 +525,7 @@ async function runServeCommand(
           retryQueue,
           maxRetryAttempts: config.agent.maxRetryAttempts,
           maxRetryBackoffMs: config.agent.maxRetryBackoffMs,
+          runGh: deps.runGh,
         });
       } catch (error) {
         logger.warn('recovery aborted', { error: describeError(error) });
@@ -564,4 +614,46 @@ function logConcurrentDispatch(logger: Logger, outcome: ConcurrentDispatchOutcom
 function describeError(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+/**
+ * `loadRetryQueueEntries` の結果を構造化ログに 1 行 (+ invalid entry 件数分の warn) として出す。
+ *
+ * 外側関数は logging しないため (深い nest を避けるため) ここで一括に処理する。
+ */
+function logRetryQueueLoadResult(logger: Logger, path: string, load: RetryQueueLoadResult): void {
+  switch (load.outcome.kind) {
+    case 'empty':
+      logger.info('retry queue restore empty', { path });
+      break;
+    case 'restored':
+      logger.info('retry queue restored', {
+        path,
+        count: load.outcome.count,
+        version: RETRY_QUEUE_STATE_VERSION,
+      });
+      break;
+    case 'parse_failed':
+      logger.warn('retry queue restore parse failed', {
+        path,
+        backupPath: load.outcome.backupPath,
+        error: describeError(load.outcome.error),
+      });
+      break;
+    case 'version_mismatch':
+      logger.warn('retry queue restore version mismatch', {
+        path,
+        version: load.outcome.version,
+        expected: RETRY_QUEUE_STATE_VERSION,
+      });
+      break;
+  }
+  for (const entry of load.invalidEntries) {
+    logger.warn('retry queue restore entry invalid', {
+      index: entry.index,
+      issueNumber: entry.issueNumber,
+      reason: entry.reason,
+      ...(entry.field !== undefined ? { field: entry.field } : {}),
+    });
+  }
 }

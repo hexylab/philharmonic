@@ -554,6 +554,192 @@ describe('recoverInProgress (ADR-0005: agent 委譲)', () => {
     expect(entry.dueAt.toISOString()).toBe('2026-05-09T00:00:10.000Z');
   });
 
+  it('永続化された retry entry が残っているとき failed → attempt+1 で継続する (ADR-0011)', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue({
+      initialEntries: [
+        {
+          kind: 'failure',
+          issueNumber: 23,
+          repository: { owner: 'hexylab', name: 'philharmonic' },
+          branch: 'feature/23-prev',
+          workspacePath: '/abs/issue-23',
+          attempt: 3,
+          dueAt: new Date('2026-05-09T00:00:00Z'),
+          scheduledAt: new Date('2026-05-09T00:00:00Z'),
+          failureReason: 'runner_error',
+          lastRunId: 'run-old',
+          lastErrorSummary: null,
+        },
+      ],
+    });
+
+    const candidate = makeCandidate();
+    const projects = makeProjectsMock([candidate]);
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt-recovery'));
+    const runClaudeMock = vi.fn(async () => makeRunResult({ status: 'stalled' }));
+    const logger = makeLogger();
+
+    await recoverInProgress({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      signal: new AbortController().signal,
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      logger,
+      pathExists: async () => false,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+    });
+
+    expect(queue.size()).toBe(1);
+    const entry = queue.list()[0]!;
+    // 既存 attempt=3 → +1 で 4 として継続
+    expect(entry.attempt).toBe(4);
+    expect(entry.kind).toBe('failure');
+    expect(entry.failureReason).toBe('stalled');
+  });
+
+  it('既存 entry の attempt が max を超えそうな場合は exhausted warn を残し queue から落とす (ADR-0011)', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue({
+      initialEntries: [
+        {
+          kind: 'failure',
+          issueNumber: 23,
+          repository: { owner: 'hexylab', name: 'philharmonic' },
+          branch: 'feature/23-prev',
+          workspacePath: '/abs/issue-23',
+          attempt: 5, // max_retry_attempts と同値 → +1 で超える
+          dueAt: new Date('2026-05-09T00:00:00Z'),
+          scheduledAt: new Date('2026-05-09T00:00:00Z'),
+          failureReason: 'runner_error',
+          lastRunId: 'run-old',
+          lastErrorSummary: null,
+        },
+      ],
+    });
+
+    const candidate = makeCandidate();
+    const projects = makeProjectsMock([candidate]);
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt-recovery'));
+    const runClaudeMock = vi.fn(async () => makeRunResult({ status: 'stalled' }));
+    const logger = makeLogger();
+
+    await recoverInProgress({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      signal: new AbortController().signal,
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      logger,
+      pathExists: async () => false,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+    });
+
+    expect(queue.size()).toBe(0);
+    const exhausted = logger.warn.mock.calls.find((c) => c[0] === 'retry exhausted');
+    expect(exhausted?.[1]).toMatchObject({
+      kind: 'failure',
+      issueNumber: 23,
+      attempt: 5,
+      via: 'recovery',
+      // ADR-0010 safety-net 用の path fields も乗っている
+      summaryPath: expect.stringContaining(FIXED_RUN_ID),
+      streamPath: expect.stringContaining(FIXED_RUN_ID),
+      stderrPath: expect.stringContaining(FIXED_RUN_ID),
+    });
+  });
+
+  it('recovery 経路の exhaustion でも notifyFailureExhausted が呼ばれる (ADR-0011 §復元後の release / #103 safety-net 同等)', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue({
+      initialEntries: [
+        {
+          kind: 'failure',
+          issueNumber: 23,
+          repository: { owner: 'hexylab', name: 'philharmonic' },
+          branch: 'feature/23-prev',
+          workspacePath: '/abs/issue-23',
+          attempt: 5,
+          dueAt: new Date('2026-05-09T00:00:00Z'),
+          scheduledAt: new Date('2026-05-09T00:00:00Z'),
+          failureReason: 'runner_error',
+          lastRunId: 'run-old',
+          lastErrorSummary: null,
+        },
+      ],
+    });
+
+    const candidate = makeCandidate();
+    const projects = makeProjectsMock([candidate]);
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt-recovery'));
+    const runClaudeMock = vi.fn(async () => makeRunResult({ status: 'stalled' }));
+    const logger = makeLogger();
+    const notify = vi.fn(async () => ({
+      statusUpdated: true,
+      commentPosted: true,
+      dedupSkipped: false,
+    }));
+
+    await recoverInProgress({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      signal: new AbortController().signal,
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      logger,
+      pathExists: async () => false,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+      notifyFailureExhausted: notify as never,
+    });
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    const notifyArg = notify.mock.calls[0]?.[0] as {
+      issueNumber: number;
+      itemId: string;
+      attempt: number;
+      maxAttempts: number;
+      failureReason: string;
+    };
+    expect(notifyArg).toMatchObject({
+      issueNumber: 23,
+      itemId: candidate.itemId,
+      attempt: 5,
+      maxAttempts: 5,
+      failureReason: 'stalled',
+    });
+  });
+
   it('dispatchSelected が success を返し Status が In Review (terminal) なら release する (#85 / ADR-0009)', async () => {
     const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
     const queue = createRetryQueue();

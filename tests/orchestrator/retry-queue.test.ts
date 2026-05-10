@@ -1,10 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   computeRetryDelayMs,
   CONTINUATION_RETRY_DELAY_MS,
   createRetryQueue,
+  type RetryEntry,
   type RetryQueueScheduleInput,
+  type RetryQueueStore,
 } from '../../src/orchestrator/index.js';
 
 const REPO = { owner: 'hexylab', name: 'philharmonic' };
@@ -222,5 +224,74 @@ describe('createRetryQueue', () => {
     expect(queue.size()).toBe(1);
     expect(queue.list()[0]!.kind).toBe('continuation');
     expect(queue.list()[0]!.attempt).toBe(1);
+  });
+});
+
+describe('createRetryQueue with store', () => {
+  function makeFakeStore(): RetryQueueStore & {
+    saveCalls: ReadonlyArray<readonly RetryEntry[]>;
+  } {
+    const calls: Array<readonly RetryEntry[]> = [];
+    return {
+      saveCalls: calls,
+      save: vi.fn(async (entries: readonly RetryEntry[]) => {
+        calls.push(entries.map((e) => ({ ...e })));
+      }),
+      flush: vi.fn(async () => {}),
+    };
+  }
+
+  it('schedule / reschedule / remove / drainDue (実 drain) のたびに store.save が呼ばれる', () => {
+    const store = makeFakeStore();
+    const queue = createRetryQueue({ store });
+
+    queue.schedule(baseInput({ attempt: 1 }));
+    queue.schedule(baseInput({ issueNumber: 43, attempt: 1 }));
+    queue.reschedule({
+      issueNumber: 43,
+      delayMs: 60_000,
+      now: new Date('2026-05-09T00:00:30Z'),
+    });
+    queue.remove(43);
+    queue.drainDue(new Date('2026-05-09T01:00:00Z'));
+
+    expect(store.save).toHaveBeenCalledTimes(5);
+  });
+
+  it('remove(存在しない issue) / drainDue(空) は store.save を呼ばない', () => {
+    const store = makeFakeStore();
+    const queue = createRetryQueue({ store });
+    queue.remove(999);
+    queue.drainDue(new Date('2026-05-09T00:00:00Z'));
+    expect(store.save).not.toHaveBeenCalled();
+
+    queue.schedule(baseInput({ attempt: 5, now: new Date('2026-05-09T00:00:00Z') }));
+    expect(store.save).toHaveBeenCalledTimes(1);
+    // attempt=5 → 160s 後 due。10s 時点で drain しても 0 件
+    queue.drainDue(new Date('2026-05-09T00:00:10Z'));
+    expect(store.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('initialEntries は queue の初期状態としてのみ採用され、store.save は呼ばれない', () => {
+    const store = makeFakeStore();
+    createRetryQueue({
+      store,
+      initialEntries: [
+        {
+          kind: 'failure',
+          issueNumber: 1,
+          repository: REPO,
+          branch: 'feature/1',
+          workspacePath: '/abs/1',
+          attempt: 1,
+          dueAt: new Date('2026-05-09T00:00:30Z'),
+          scheduledAt: new Date('2026-05-09T00:00:00Z'),
+          failureReason: 'runner_error',
+          lastRunId: 'r1',
+          lastErrorSummary: null,
+        },
+      ],
+    });
+    expect(store.save).not.toHaveBeenCalled();
   });
 });
