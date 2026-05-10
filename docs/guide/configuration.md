@@ -14,7 +14,7 @@ Philharmonic の挙動は次の 3 つを通じてカスタマイズします。
 - `--config <path>` で別パスを指定できます
 - `~` 展開などは行いません (絶対パスか cwd 相対で渡す)
 
-最小構成:
+最小構成は次の 2 行だけです:
 
 ```yaml
 owner: your-github-login
@@ -22,6 +22,19 @@ project_number: 1
 ```
 
 これ以外のキーはすべて省略可で、内側のデフォルト値が補完されます。
+
+### `philharmonic init` で scaffold する (推奨)
+
+最小構成 + コメント化された default サンプルを 1 コマンドで生成できます (詳細手順: [getting-started.md#4-対象リポジトリで-philharmonic-init-を実行する](./getting-started.md#4-対象リポジトリで-philharmonic-init-を実行する))。
+
+```sh
+# 対象リポジトリのルートで
+philharmonic init                                           # 対話モード
+philharmonic init --yes --owner foo --project 1             # 非対話 (CI 等)
+philharmonic init --dry-run --owner foo --project 1         # 書かずに内容だけ確認
+```
+
+生成 yaml は冒頭が `owner` / `project_number` のみ active で、`permission_mode` / `base_branch` / `polling` / `server` / `hooks` 等はコメントで default が同梱されます。`#` を外すと有効化できます。
 
 ## よく触るキーと使いどころ
 

@@ -40,9 +40,50 @@ Philharmonic は `GITHUB_TOKEN` / `GH_TOKEN` を Orchestrator + Runner の env a
 
 > ホストで `gh auth login` 済みなら env 未設定でも動作します (`~/.config/gh` を runner subprocess が読みます)。daemon 用途や CI 用途では env 経由が確実です。
 
-## 4. 対象リポジトリに `philharmonic.yaml` を置く
+## 4. 対象リポジトリで `philharmonic init` を実行する
 
-Philharmonic を **動かしたい先のリポジトリのルート** に最小構成で置きます。
+Philharmonic を **動かしたい先のリポジトリのルート** で `philharmonic init` を実行すると、最小構成の `philharmonic.yaml` が scaffold されます。対話的に主要項目だけを訊き、残りは default で埋めた yaml にコメント化されたサンプルが同梱されるので「どこをいじれば何が変わるか」が yaml 内から発見できます。
+
+```sh
+cd /path/to/target-repo
+philharmonic init
+```
+
+対話モードで訊かれる項目は最小限です:
+
+| 項目                                           | default                                                  |
+| ---------------------------------------------- | -------------------------------------------------------- |
+| `owner`                                        | `git remote get-url origin` から auto-detect             |
+| `project_number`                               | (必須・default なし)                                     |
+| `permission_mode: bypass` を採用するか?        | Y/n。ADR-0005 により agent 委譲には実用上必須            |
+| `WORKFLOW.md` を scaffold するか?              | y/N。後から `WORKFLOW.md` をリポジトリ直下に書いてもよい |
+| `.philharmonic/` を `.gitignore` に追記するか? | Y/n。`.gitignore` が既に存在する場合のみ訊く             |
+
+完全に非対話的に scaffold したい場合は flag だけで完走させられます。
+
+```sh
+# 非対話 (CI 等で使う)
+philharmonic init --yes --owner your-github-login --project 1
+```
+
+| Flag              | 効果                                                           |
+| ----------------- | -------------------------------------------------------------- |
+| `--owner <login>` | owner を flag で指定 (省略時は origin remote から auto-detect) |
+| `--project <n>`   | project_number を flag で指定                                  |
+| `--yes`           | 対話プロンプトをすべてスキップ (非対話モード)                  |
+| `--force`         | 既存の `philharmonic.yaml` を上書きする                        |
+| `--dry-run`       | 実ファイルを書かず、生成予定の内容を stdout に出すだけ         |
+| `--no-workflow`   | `WORKFLOW.md` の scaffold をスキップ (対話プロンプトを抑止)    |
+
+非 TTY 環境 (`process.stdout.isTTY === false`) では自動的に `--yes` 相当に降格します。必須項目 (`owner` / `project_number`) が flag 経由でも揃わない場合は exit code 非ゼロで失敗します。
+
+> **注意**: `philharmonic.yaml` は **対象リポジトリ側に置きます** (Philharmonic 自身の clone ではありません)。`philharmonic` コマンドは原則として対象リポジトリのルートで実行します。
+
+> 生成される yaml は `owner` / `project_number` のみ active で、それ以外のキー (`base_branch` / `status_field` / `dispatch_statuses` / `polling` / `server` / `hooks` 等) はコメントで default が同梱されます。`#` を外すと有効化できます。詳細は [configuration.md](./configuration.md) を参照してください。
+
+### コピペで書きたい場合 (副次的手順)
+
+`philharmonic init` を使わず、`philharmonic.yaml` を手で書いても OK です。最小構成は次の 2 行だけです。
 
 ```yaml
 # philharmonic.yaml (最小構成)
@@ -55,9 +96,7 @@ project_number: 1
 | `owner`          | Project owner の GitHub login (user または org)                                  |
 | `project_number` | Project URL 末尾の整数。例: `https://github.com/users/<owner>/projects/1` の `1` |
 
-これだけで動きます。ベースブランチを `main` 以外にする、`Status` 以外の field 名にする、`Todo` 以外の Status を dispatch 対象にする、常駐デーモンや lifecycle hooks をカスタマイズする、といった設定は [configuration.md](./configuration.md) を参照してください。
-
-> **注意**: `philharmonic.yaml` は **対象リポジトリ側に置きます** (Philharmonic 自身の clone ではありません)。`philharmonic` コマンドは原則として対象リポジトリのルートで実行します。
+ベースブランチを `main` 以外にする、`Status` 以外の field 名にする、`Todo` 以外の Status を dispatch 対象にする、常駐デーモンや lifecycle hooks をカスタマイズする、といった設定は [configuration.md](./configuration.md) を参照してください。
 
 ## 5. Project の Status を整える
 
