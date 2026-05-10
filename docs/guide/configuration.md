@@ -11,7 +11,7 @@ Philharmonic の挙動は次の 3 つを通じてカスタマイズします。
 ## `.philharmonic/philharmonic.yaml` の場所と最小構成
 
 - 既定では Philharmonic を実行した cwd の `.philharmonic/philharmonic.yaml` を読みます (`philharmonic run` / `philharmonic serve` / `philharmonic clean` 共通)
-- 旧来の repo root 直下 `philharmonic.yaml` のみ存在する場合は当面 fallback で読み込み、warning を 1 行出します。`mv philharmonic.yaml .philharmonic/philharmonic.yaml` で移行してください (#67)
+- 旧来の repo root 直下 `philharmonic.yaml` のみ存在する場合は当面 fallback で読み込み、warning を 1 行出します。`mv philharmonic.yaml .philharmonic/philharmonic.yaml` で移行してください
 - `--config <path>` で別パスを指定できます (legacy fallback の探索は行いません)
 - `~` 展開などは行いません (絶対パスか cwd 相対で渡す)
 
@@ -27,7 +27,7 @@ project_number: 1
 
 ### `philharmonic init` で scaffold する (推奨)
 
-最小構成 + コメント化された default サンプルを 1 コマンドで生成できます (詳細手順: [getting-started.md#4-対象リポジトリで-philharmonic-init-を実行する](./getting-started.md#4-対象リポジトリで-philharmonic-init-を実行する))。生成先は `.philharmonic/philharmonic.yaml` (および任意で `.philharmonic/WORKFLOW.md`) です (#67)。
+最小構成 + コメント化された default サンプルを 1 コマンドで生成できます (詳細手順: [getting-started.md#4-対象リポジトリで-philharmonic-init-を実行する](./getting-started.md#4-対象リポジトリで-philharmonic-init-を実行する))。生成先は `.philharmonic/philharmonic.yaml` (および任意で `.philharmonic/WORKFLOW.md`) です。
 
 ```sh
 # 対象リポジトリのルートで
@@ -38,7 +38,7 @@ philharmonic init --dry-run --owner foo --project 1         # 書かずに内容
 
 生成 yaml は冒頭が `owner` / `project_number` のみ active で、`permission_mode` / `base_branch` / `polling` / `server` / `hooks` 等はコメントで default が同梱されます。`#` を外すと有効化できます。
 
-> Philharmonic 関連ファイルは原則 `.philharmonic/` 配下に集約されます (config / workflow テンプレート / worktree / run ログ / serve.lock)。`.gitignore` には `.philharmonic/worktrees/` / `.philharmonic/runs/` / `.philharmonic/serve.lock` のみを登録し、`.philharmonic/philharmonic.yaml` と `.philharmonic/WORKFLOW.md` は commit 可能にしておくと、チーム間で設定を共有しやすくなります (#67)。
+> Philharmonic 関連ファイルは原則 `.philharmonic/` 配下に集約されます (config / workflow テンプレート / worktree / run ログ / serve.lock)。`.gitignore` には `.philharmonic/worktrees/` / `.philharmonic/runs/` / `.philharmonic/serve.lock` のみを登録し、`.philharmonic/philharmonic.yaml` と `.philharmonic/WORKFLOW.md` は commit 可能にしておくと、チーム間で設定を共有しやすくなります。
 
 ## よく触るキーと使いどころ
 
@@ -50,7 +50,7 @@ philharmonic init --dry-run --owner foo --project 1         # 書かずに内容
 | `project_number`                 | (必須)        | Project URL 末尾の整数                                                                                                                  |
 | `status_field`                   | `Status`      | Project 上の単一選択フィールド名。Status を別フィールド名で運用しているならここを変える                                                 |
 | `dispatch_statuses`              | `[Todo]`      | dispatch 候補とする Status option 名の配列。`[Ready for Agent, Todo]` のように複数指定可。`status_field` のどの option を拾うか直交設定 |
-| `status_transitions.in_progress` | `In Progress` | agent が dispatch 直後に flip する遷移先 Status 名。Project の Status options に合わせて差し替える (#62)                                |
+| `status_transitions.in_progress` | `In Progress` | agent が dispatch 直後に flip する遷移先 Status 名。Project の Status options に合わせて差し替える                                      |
 | `status_transitions.in_review`   | `In Review`   | PR 作成成功後に agent が flip する遷移先 Status 名                                                                                      |
 | `status_transitions.failed`      | `Failed`      | 失敗時に agent が flip する遷移先 Status 名                                                                                             |
 | `agent_user_login`               | `null`        | `null` のとき unassigned のみ拾う。bot login (例: `philharmonic-bot`) を指定するとその assignee の Issue だけ拾う                       |
@@ -58,14 +58,14 @@ philharmonic init --dry-run --owner foo --project 1         # 書かずに内容
 
 ### Runner (Claude Code) の挙動
 
-| キー                     | 既定                        | 何が変わるか                                                                                                                                                                                                                                                                                                                                            |
-| ------------------------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `permission_mode`        | `auto`                      | `auto` = `--permission-mode acceptEdits` (worktree 内編集のみ自動承認)。`bypass` = `--dangerously-skip-permissions` (**worktree 外、ホスト全体への副作用が起き得る**)。**ADR-0005 で agent 委譲型に切り替えたため、`auto` では Bash tool (`gh` / `git push`) を agent が呼べず、Status 遷移 / PR 作成が失敗します。実用上は `bypass` を選んでください** |
-| `timeout_ms`             | `1800000` (30 分)           | Runner subprocess の timeout                                                                                                                                                                                                                                                                                                                            |
-| `kill_grace_period_ms`   | `5000` (5 秒)               | timeout 後 SIGTERM → SIGKILL までの猶予                                                                                                                                                                                                                                                                                                                 |
-| `agent.max_turns`        | `1`                         | `1` で 1 セッション完結 (従来動作)。`>= 2` で `error_max_turns` で打ち切られたとき `--resume` で次ターンへ進む                                                                                                                                                                                                                                          |
-| `agent.stall_timeout_ms` | `300000` (5 分)             | Runner stdout の無音許容時間。`0` で stall 検知を無効化                                                                                                                                                                                                                                                                                                 |
-| `workflow_file`          | `.philharmonic/WORKFLOW.md` | prompt テンプレートファイルへのパス (Liquid、relative は repo root 基準)。default のときに不在で legacy `WORKFLOW.md` (repo root 直下) があれば warning 付きで採用 (#67)。後述                                                                                                                                                                          |
+| キー                     | 既定                        | 何が変わるか                                                                                                                                                                                                                                                                                                                    |
+| ------------------------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `permission_mode`        | `auto`                      | `auto` = `--permission-mode acceptEdits` (worktree 内編集のみ自動承認)。`bypass` = `--dangerously-skip-permissions` (**worktree 外、ホスト全体への副作用が起き得る**)。**`auto` では agent が `gh` / `git push` を実行できないため、Status 遷移 / PR 作成に失敗します。自動 PR 作成まで任せる場合は `bypass` を選んでください** |
+| `timeout_ms`             | `1800000` (30 分)           | Runner subprocess の timeout                                                                                                                                                                                                                                                                                                    |
+| `kill_grace_period_ms`   | `5000` (5 秒)               | timeout 後 SIGTERM → SIGKILL までの猶予                                                                                                                                                                                                                                                                                         |
+| `agent.max_turns`        | `1`                         | `1` で 1 セッション完結 (従来動作)。`>= 2` で `error_max_turns` で打ち切られたとき `--resume` で次ターンへ進む                                                                                                                                                                                                                  |
+| `agent.stall_timeout_ms` | `300000` (5 分)             | Runner stdout の無音許容時間。`0` で stall 検知を無効化                                                                                                                                                                                                                                                                         |
+| `workflow_file`          | `.philharmonic/WORKFLOW.md` | prompt テンプレートファイルへのパス (Liquid、relative は repo root 基準)。default のときに不在で legacy `WORKFLOW.md` (repo root 直下) があれば warning 付きで採用。後述                                                                                                                                                        |
 
 ### Workspace / クリーンアップ
 
@@ -76,15 +76,15 @@ philharmonic init --dry-run --owner foo --project 1         # 書かずに内容
 
 ### `philharmonic serve` (常駐デーモン)
 
-| キー                          | 既定            | 何が変わるか                                                                                                  |
-| ----------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------- |
-| `polling.interval_ms`         | `30000` (30 秒) | 1 tick 終了後の sleep 時間。**下限 1000ms**。1000〜4999ms は起動時に warning が出る                           |
-| `agent.max_concurrent_agents` | `1`             | 1 tick で並列 dispatch する Issue 件数。`1` で逐次 (MVP 互換)                                                 |
-| `server.port`                 | -               | Snapshot HTTP API (#30) の listen port。**未指定なら API 自体を起動しない**。指定時は `127.0.0.1` 固定で bind |
+| キー                          | 既定            | 何が変わるか                                                                                            |
+| ----------------------------- | --------------- | ------------------------------------------------------------------------------------------------------- |
+| `polling.interval_ms`         | `30000` (30 秒) | 1 tick 終了後の sleep 時間。**下限 1000ms**。1000〜4999ms は起動時に warning が出る                     |
+| `agent.max_concurrent_agents` | `1`             | 1 tick で並列 dispatch する Issue 件数。`1` で逐次 (MVP 互換)                                           |
+| `server.port`                 | -               | Snapshot HTTP API の listen port。**未指定なら API 自体を起動しない**。指定時は `127.0.0.1` 固定で bind |
 
-> 自動 retry (`retry.max_attempts` / `retry.max_backoff_ms`) は ADR-0005 で撤廃されました。Failed を再実行する場合は人手で `Todo` に戻すか、別 Issue で起票しなおします。
+> 自動 retry はサポートしていません。Failed を再実行する場合は人手で `Todo` に戻すか、別 Issue で起票しなおします。
 
-### GitHub 認証 (#68)
+### GitHub 認証
 
 | キー                  | 既定   | 何が変わるか                                                                                                                                                                                                                         |
 | --------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -92,7 +92,7 @@ philharmonic init --dry-run --owner foo --project 1         # 書かずに内容
 
 `gh` を使う場合は `gh auth login` 済みであることが必要です。`gh` 未インストール / 未ログインのときは起動時にエラーで exit 1 します。CI / systemd / cron などで env だけを使いたい場合は `github.token_source: env` を明示してください。
 
-### Safety (#68)
+### Safety
 
 | キー                           | 既定    | 何が変わるか                                                                                                                                                                                                                        |
 | ------------------------------ | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -127,7 +127,7 @@ agent_user_login: philharmonic-bot
 base_branch: main
 
 workflow_file: .philharmonic/WORKFLOW.md
-permission_mode: bypass # ADR-0005: agent 委譲型では bypass が実用上必須
+permission_mode: bypass # agent が gh / git push を実行して PR を作るために必要
 timeout_ms: 1800000
 
 workspace_root: .philharmonic/worktrees
@@ -170,9 +170,9 @@ safety:
 
 ## `WORKFLOW.md` で prompt をカスタマイズする
 
-`.philharmonic/WORKFLOW.md` を置くと、Claude Code に渡す prompt の **本体構造** をリポジトリごとに変えられます。テンプレートが無いリポジトリでは Issue body をそのまま埋めたデフォルト prompt が組み立てられます (構造化セクション必須は ADR-0005 で撤廃)。
+`.philharmonic/WORKFLOW.md` を置くと、Claude Code に渡す prompt の **本体構造** をリポジトリごとに変えられます。テンプレートが無いリポジトリでは Issue body をそのまま埋めたデフォルト prompt が組み立てられます (Issue body は構造化セクション無しの自由フォーマットで構いません)。
 
-> 旧来の `WORKFLOW.md` (repo root 直下) も当面 fallback として読まれますが、警告ログが出ます。`mv WORKFLOW.md .philharmonic/WORKFLOW.md` で移行してください (#67)。
+> 旧来の `WORKFLOW.md` (repo root 直下) も当面 fallback として読まれますが、警告ログが出ます。`mv WORKFLOW.md .philharmonic/WORKFLOW.md` で移行してください。
 
 ### 仕組み
 
@@ -200,7 +200,7 @@ safety:
 | `workspace_path`                 | worktree の絶対パス                                 |
 | `run_id`                         | UUIDv7                                              |
 
-> ADR-0005 で `issue.goal` / `issue.constraints` / `issue.acceptance_criteria` / `attempt` 変数は撤廃されました。本文を部分抽出したい場合はテンプレート側で `{{ issue.body | split: '## Goal' | last | split: '##' | first }}` のように加工してください。
+> Issue 本文を構造化抽出した変数 (`issue.goal` / `issue.constraints` / `issue.acceptance_criteria`) や `attempt` 変数はサポートしていません。本文を部分抽出したい場合はテンプレート側で `{{ issue.body | split: '## Goal' | last | split: '##' | first }}` のように加工してください。
 
 ### サンプル
 

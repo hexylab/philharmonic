@@ -51,7 +51,7 @@ stdout / stderr の出力は次のとおり。
 
 並列実行 / 自動 retry / 自動 merge は **行いません**。常駐させたい場合は `philharmonic serve` を、cron 駆動にしたい場合は systemd timer / GitHub Actions の `schedule` から `philharmonic run` を呼んでください。
 
-> ADR-0005 で Status 遷移 / PR 作成 / Issue コメントは agent が `gh` 経由で行います。`success` の stdout に PR 番号は含まれません (PR 番号は agent が `gh pr create` で発行し、Issue / PR コメントから後追いするか `gh pr list` で確認してください)。
+> Status 遷移 / PR 作成 / Issue コメントは agent が `gh` 経由で行います。`success` の stdout に PR 番号は含まれません (PR 番号は agent が `gh pr create` で発行するため、Issue / PR コメントから後追いするか `gh pr list` で確認してください)。
 
 詳細仕様 (state machine / Failure ハンドリング) は [`docs/specs/orchestration-mvp.md`](../specs/orchestration-mvp.md)。
 
@@ -73,13 +73,13 @@ philharmonic serve --config ./path/to/.philharmonic/philharmonic.yaml
 | ----------------- | --------------- | --------------------------------------------------------- |
 | 実行回数          | 1 ターンで exit | ポーリング loop で繰り返す                                |
 | 並列 dispatch     | 無し            | `agent.max_concurrent_agents` で 1 tick 内に複数 dispatch |
-| Tracker recovery  | 無し            | 起動時に `In Progress` の Issue を引き取る (#23)          |
+| Tracker recovery  | 無し            | 起動時に `In Progress` の Issue を引き取る                |
 | Snapshot HTTP API | 起動しない      | `server.port` 指定時に `127.0.0.1` で起動                 |
 | 二重起動防止      | 無し            | `.philharmonic/serve.lock` で同一 repo の二重起動を弾く   |
 
-> 自動 retry (`retry.*`) は ADR-0005 で撤廃されました。Failed の再実行は人手で `Todo` に戻すか別 Issue で起票します。
+> 自動 retry (`retry.*`) はサポートしていません。Failed の再実行は人手で `Todo` に戻すか別 Issue で起票します。
 
-`permission_mode: bypass` を `serve` で使う場合は、長時間稼働で `--dangerously-skip-permissions` が連続発火することへの opt-in が必要です。`philharmonic.yaml` で `safety.allow_bypass_in_serve: true` を設定するか (#68 推奨)、環境変数 `PHILHARMONIC_ALLOW_BYPASS_IN_SERVE=1` を明示してください。両方未設定だと起動を拒否します。
+`permission_mode: bypass` を `serve` で使う場合は、長時間稼働で `--dangerously-skip-permissions` が連続発火することへの opt-in が必要です。`philharmonic.yaml` で `safety.allow_bypass_in_serve: true` を設定するか (推奨)、環境変数 `PHILHARMONIC_ALLOW_BYPASS_IN_SERVE=1` を明示してください。両方未設定だと起動を拒否します。
 
 詳細仕様 (lock file / signal handling / 並列 dispatch / Tracker recovery) は [`docs/specs/serve-daemon.md`](../specs/serve-daemon.md)。
 
@@ -195,7 +195,7 @@ ClaudeNotInstalledError: claude command not found
 - `export GITHUB_TOKEN=...` を設定する (CI / systemd / cron など非対話環境向け)
 - `philharmonic.yaml` で `github.token_source: env` または `: gh` に固定する
 
-ADR-0005 で `GITHUB_TOKEN` / `GH_TOKEN` は Runner subprocess にも allowlist 経由で渡され、agent が `gh` / `git push` で利用します。`gh` 経由で取得した token も orchestrator が `process.env.GITHUB_TOKEN` に書き戻すため、runner には透過的に届きます。
+`GITHUB_TOKEN` / `GH_TOKEN` は Runner subprocess にも allowlist 経由で渡され、agent が `gh` / `git push` で利用します。`gh` 経由で取得した token も orchestrator が `process.env.GITHUB_TOKEN` に書き戻すため、runner には透過的に届きます。
 
 ### `gh` コマンドが見つからない / `gh auth login` していない
 
@@ -213,7 +213,7 @@ gh コマンドが見つかりません ... / gh auth token から GitHub token 
 ConfigFileNotFoundError: ... / ConfigValidationError: ... / ConfigParseError: ...
 ```
 
-→ ファイルパス・YAML 文法・型違反のいずれか。エラーメッセージにファイルパス・該当フィールド・期待値が出ます。`docs/specs/config-schema.md` のフィールド定義と突き合わせてください。既定の探索先は `.philharmonic/philharmonic.yaml` です (#67)。旧来の repo root 直下 `philharmonic.yaml` のみ存在する場合は当面 fallback で読み込みつつ warning が出ます。`mkdir -p .philharmonic && git mv philharmonic.yaml .philharmonic/philharmonic.yaml` で移行してください。
+→ ファイルパス・YAML 文法・型違反のいずれか。エラーメッセージにファイルパス・該当フィールド・期待値が出ます。フィールドの正確な型 / 下限などのフル仕様は [`docs/specs/config-schema.md`](../specs/config-schema.md) を参照してください。既定の探索先は `.philharmonic/philharmonic.yaml` です。旧来の repo root 直下 `philharmonic.yaml` のみ存在する場合は当面 fallback で読み込みつつ warning が出ます。`mkdir -p .philharmonic && git mv philharmonic.yaml .philharmonic/philharmonic.yaml` で移行してください。
 
 ### 候補 Issue が拾われない (`no candidate` ばかり)
 

@@ -70,6 +70,10 @@ describe('resolveWorkflowPath (#67)', () => {
         expectedPath: path.join(workdir, DEFAULT_WORKFLOW_FILE),
       }),
     );
+    // ユーザ向け warning には内部 Issue 番号 / ADR 番号を含めない
+    const warnMessage = (logger.warn as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string;
+    expect(warnMessage).not.toMatch(/\(#\d+\)/);
+    expect(warnMessage).not.toMatch(/ADR-\d+/);
   });
 
   it('default も legacy も無いときは default パスを返し (fallbackOnMissing=true) warn は出ない', async () => {

@@ -36,7 +36,7 @@ Philharmonic の基本の使いかたは `philharmonic serve` の常駐デーモ
    [Project: Done]
 ```
 
-ADR-0005 で Status 遷移 / PR 作成 / Issue コメントは **agent (Claude Code + `gh` CLI)** が runner subprocess 内で行います。Orchestrator は worktree を作って Claude を起動し、runner exit 0 のときだけ worktree を片付ける薄い役割に縮小されました。
+Status 遷移 / PR 作成 / Issue コメントは **agent (Claude Code + `gh` CLI)** が runner subprocess 内で行います。Orchestrator は worktree を作って Claude を起動し、runner exit 0 のときだけ worktree を片付ける薄い役割に縮小されています。
 
 `philharmonic serve` は SIGTERM / SIGINT を受信すると in-flight run の完了を待って graceful に exit します。並列 dispatch / Snapshot HTTP API は serve daemon のみが提供します (詳細: [operations.md](./operations.md))。`philharmonic run` は同じ 1 ターン分を 1 回だけ走らせて exit する単発モードで、cron / GitHub Actions の `schedule` 統合や動作検証用に使います。
 
@@ -44,7 +44,7 @@ ADR-0005 で Status 遷移 / PR 作成 / Issue コメントは **agent (Claude C
 
 | コンポーネント                      | 役割                                                                                                                                            |
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Orchestrator** (Node.js)          | Project poll / 候補選定 / git worktree 作成 / Runner 起動までを担う薄いレイヤ (ADR-0005 で書き込み系 API は撤廃)                                |
+| **Orchestrator** (Node.js)          | Project poll / 候補選定 / git worktree 作成 / Runner 起動までを担う薄いレイヤ (GitHub への書き込みは行わない)                                   |
 | **Runner** (Claude Code 子プロセス) | `claude -p ... --output-format stream-json` で起動。worktree を `cwd` として作業し、env allowlist 経由で `GITHUB_TOKEN` / `GH_TOKEN` を渡される |
 | **Agent** (Claude Code in worktree) | `gh` / `git` で Status 遷移 / commit / push / PR 作成 / Issue コメント投稿を行う                                                                |
 | **Workspace** (git worktree)        | `<repo>/.philharmonic/worktrees/issue-<番号>/`。1 タスク = 1 worktree = 1 ブランチ。失敗時は `philharmonic clean` で掃除                        |

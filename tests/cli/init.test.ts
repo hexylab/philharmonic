@@ -123,6 +123,19 @@ describe('renderConfigYaml', () => {
     expect(out).toMatch(/^permission_mode: bypass\b/m);
     expect(out).not.toMatch(/^# permission_mode:/m);
   });
+
+  it('生成 YAML には ADR / Issue 番号 / docs/specs といった内部参照が混じらない', () => {
+    for (const permissionModeBypass of [true, false]) {
+      const out = renderConfigYaml({
+        owner: 'hexylab',
+        projectNumber: 1,
+        permissionModeBypass,
+      });
+      expect(out).not.toMatch(/ADR-\d+/);
+      expect(out).not.toMatch(/\(#\d+\)/);
+      expect(out).not.toMatch(/docs\/specs/);
+    }
+  });
 });
 
 describe('philharmonic init CLI コマンド', () => {
@@ -491,6 +504,9 @@ describe('philharmonic init CLI コマンド', () => {
     const stderr = joinWrites(streams.stderr);
     expect(stderr).toMatch(/legacy philharmonic\.yaml/);
     expect(stderr).toMatch(/\.philharmonic\/philharmonic\.yaml/);
+    // ユーザ向け warning には内部 Issue 番号 / ADR 番号などの内部参照を含めない
+    expect(stderr).not.toMatch(/\(#\d+\)/);
+    expect(stderr).not.toMatch(/ADR-\d+/);
     // 新規 yaml は `.philharmonic/` 配下に書かれており、legacy は触らない
     expect(fsMocks.files.has(yamlPath(REPO_ROOT))).toBe(true);
     expect(fsMocks.files.get(legacyYamlPath(REPO_ROOT))).toBe(
