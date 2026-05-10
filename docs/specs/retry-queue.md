@@ -14,7 +14,8 @@
 - Issue #84 — 失敗・stalled run を指数バックオフで自動リトライする
 - Issue #85 — 正常終了後も Issue が active なら continuation retry で再確認する
 - Issue #86 — 自動リトライ上限到達時に失敗情報と手動復旧手順を残す ([Failure summary on exhaustion](#failure-summary-on-exhaustion-issue-86))
-- ADR: [ADR-0008 失敗 / stalled run を指数バックオフで再 dispatch する in-memory retry queue を導入する](../adr/0008-in-memory-retry-queue.md), [ADR-0009 agent run の正常終了後に Issue が active のままなら continuation retry で再確認する](../adr/0009-continuation-retry-after-success.md)
+- Issue #103 — retry exhausted 時に Project Status を `Failed` へ遷移し Issue に失敗情報を残す ([Exhaustion notify](#exhaustion-notify-issue-103))
+- ADR: [ADR-0008 失敗 / stalled run を指数バックオフで再 dispatch する in-memory retry queue を導入する](../adr/0008-in-memory-retry-queue.md), [ADR-0009 agent run の正常終了後に Issue が active のままなら continuation retry で再確認する](../adr/0009-continuation-retry-after-success.md), [ADR-0010 retry exhausted (kind=failure) 時に orchestrator が safety-net として GitHub Projects Status を Failed へ遷移し Issue にコメントする](../adr/0010-retry-exhaustion-github-safety-net.md)
 - 関連 spec: [serve-daemon.md](./serve-daemon.md), [orchestration-mvp.md](./orchestration-mvp.md), [snapshot-api.md](./snapshot-api.md), [config-schema.md](./config-schema.md)
 - 関連 ADR: [ADR-0005 §7 worktree cleanup の trigger 簡素化](../adr/0005-thin-orchestrator-agent-delegation.md), [ADR-0005 §8 retry-state は撤廃](../adr/0005-thin-orchestrator-agent-delegation.md)
 
@@ -344,7 +345,48 @@ retry queue 上の entry は **`/api/v1/<issue_number>` には載せない** (= 
 - `kind=continuation` の exhaustion では failure summary は **書かない** (失敗ではなく「Status flip 漏れの上限到達」のため)。既存 `retry exhausted` warn ログだけが残る
 - 書き込みに失敗した場合は `failure summary write failed` warn を 1 行残し、後続の `retry exhausted` warn の `failureSummaryPath` を `null` にして処理継続する (Issue #86 完了条件「comment / log 投稿に失敗しても orchestrator 本体の failure handling は壊れない」を満たす)
 
-ADR-0005「orchestrator は GitHub に書き込まない」方針との関係上、Issue comment 投稿 / `Failed` Status 遷移は本 spec の範囲では **行わない**。Issue #86 の Acceptance Criteria は「Issue comment を使う場合は ...」「`Failed` state 遷移を行う/行わない方針が実装または文書化される」と条件付き / 文書化要件で書かれており、本 spec で「現状は file + 構造化ログのみ」と明文化することで満たす。
+~~ADR-0005「orchestrator は GitHub に書き込まない」方針との関係上、Issue comment 投稿 / `Failed` Status 遷移は本 spec の範囲では **行わない**。~~ Issue #103 / ADR-0010 で方針を更新し、`kind=failure` の exhaustion に限定して orchestrator が Project Status 更新 + Issue コメント投稿を行うようにした (詳細: [Exhaustion notify](#exhaustion-notify-issue-103))。`kind=continuation` の exhaustion では引き続き file + 構造化ログのみで、Status / コメントは触らない。
+
+## Exhaustion notify (Issue #103)
+
+`kind=failure` の retry が上限に到達した瞬間、orchestrator は safety-net として **GitHub Projects の Status を `status_transitions.failed` に遷移し、Issue に運用者向けコメントを 1 件投稿する** (ADR-0010)。
+
+- 通常の Status 遷移 / PR 作成 / Issue コメントは ADR-0005 通り agent 委譲を維持する。**retry exhausted (`kind=failure`) の 1 点のみ** の例外
+- `kind=continuation` の exhaustion では notify を **行わない** ([Failure summary on exhaustion](#failure-summary-on-exhaustion-issue-86) と同じ理由: 失敗ではなく Status flip 漏れの上限到達のため)
+
+### 動作
+
+1. 既存コメント取得 (`gh issue view <num> --json comments`) で `<!-- philharmonic-run-failed:run_id=<lastRunId> -->` marker の有無を確認する
+   - marker が既に存在: comment 投稿を **skip** (`exhaustion notify skipped (already commented)` info ログ)
+   - 取得自体が失敗: 安全側に倒し comment 投稿を skip + `exhaustion comment dedup check failed` warn ログ
+2. `gh project field-list` + `gh project item-edit` で Project Item の Status field を `status_transitions.failed` に倒す
+3. `gh issue comment <num> --body-file <path>` で marker 付きのコメントを投稿する。body は `<runnerLogsRoot>/<runId>/issue-comment.md` に書き出してから渡す (改行 / markdown を CLI 引数で渡さない)
+4. Status 更新 / Comment 投稿は **それぞれ独立に try/catch**。片方が失敗してももう一方は試みる。両方とも失敗時はそれぞれ warn ログを 1 行残して return する (orchestrator は throw しない)
+
+### コメント本文に含める情報
+
+- 先頭: `<!-- philharmonic-run-failed:run_id=<lastRunId> -->` HTML コメントマーカ
+- Issue 番号 / final attempt / max attempts / failure reason / last run id / branch / workspace path / exhausted at
+- failure-summary.md / summary.md / stream.jsonl / stderr.log / metadata.json への相対 path
+- 手動復旧手順 (`philharmonic retry <num>` ほか)
+
+### 構造化ログ
+
+| level | msg                                             | 出力タイミング                                                  |
+| ----- | ----------------------------------------------- | --------------------------------------------------------------- |
+| info  | `exhaustion notify skipped (already commented)` | 既存コメントに同じ run_id の marker が見つかり skip した        |
+| info  | `exhaustion status updated`                     | Status 更新が成功                                               |
+| info  | `exhaustion comment posted`                     | Issue コメント投稿が成功                                        |
+| warn  | `exhaustion comment dedup check failed`         | `gh issue view --json comments` が throw した (comment を skip) |
+| warn  | `exhaustion status update failed`               | Status 更新が throw した (comment 投稿は続行)                   |
+| warn  | `exhaustion comment post failed`                | Comment 投稿が throw した                                       |
+| warn  | `exhaustion notify threw`                       | 上記 3 系統以外の想定外 throw (run.ts 側で catch した)          |
+
+### DI / 配線
+
+- 新規 module `src/orchestrator/exhaustion-notify.ts` が `notifyFailureExhausted(input, deps)` を export する
+- `runOnce` / `runConcurrent` の `RunOnceDeps` に `runGh?: GhRunner` / `notifyFailureExhausted?` を追加。`runGh` 未注入なら no-op (= `philharmonic run` 互換)
+- serve では `defaultGhRunner` を渡し、推奨経路として `GITHUB_TOKEN` / `GH_TOKEN` を env で透過させる (ADR-0005 §3 と同じ token を共用)
 
 ### 構造化ログとの対応
 
@@ -397,8 +439,9 @@ ADR-0005「orchestrator は GitHub に書き込まない」方針との関係上
 - multi-host 跨ぎの retry queue 共有 — multi-host orchestration ADR で扱う (MVP out-of-scope)
 - attempt counter を runlog に記録する — 個別 retry の root cause を後追いするため。`<run-id>/metadata.json` に `retryAttempt` を追加する案あり (本 spec では未採用)
 - continuation drain 時に DAG (ADR-0007) を再評価して blocked なら release する — 短い delay の間に依存先が増えるケースは稀だが、別 PR で追加する余地あり
-- failure exhaustion の Issue comment 投稿 (hidden marker `<!-- philharmonic-run-failed:issue=...;run_id=... -->` で重複防止) — ADR-0005 「orchestrator は GitHub に書き込まない」方針を覆すため、新 ADR で別途検討する (Issue #86 では comment / Status は **行わない** 方針で MVP を確定)
-- failure exhaustion 時の Project Status `Failed` 自動遷移 (opt-in 設定) — 同上の理由で新 ADR で別途検討
+- ~~failure exhaustion の Issue comment 投稿 (hidden marker `<!-- philharmonic-run-failed:issue=...;run_id=... -->` で重複防止)~~ — ADR-0010 / Issue #103 で実装済み ([Exhaustion notify](#exhaustion-notify-issue-103))
+- ~~failure exhaustion 時の Project Status `Failed` 自動遷移 (opt-in 設定)~~ — ADR-0010 / Issue #103 で実装済み (opt-in ではなく `runGh` 注入時の default 挙動)
+- exhaustion notify の dedup チェックを `gh api ... --paginate` 経由に切り替える — 現状は `gh issue view --json comments` の 1 ページ取得で marker を探している。コメント数が大量にあって marker が古いページに埋もれた Issue で dedup miss → 二重コメントが起きうるが、同一 run_id の notify は構造的に 1 回しか呼ばれないため MVP では許容する
 
 ## MVP でやらないこと
 
@@ -407,5 +450,5 @@ ADR-0005「orchestrator は GitHub に書き込まない」方針との関係上
 - failure reason 別の retry on/off 切り替え
 - jitter の追加 (固定 backoff のみ)
 - multi-host 同期
-- failure exhaustion 時の Issue comment 投稿 (Issue #86 — ADR-0005 方針維持のため、本 spec では file + 構造化ログのみ)
-- failure exhaustion 時の Project Status `Failed` 自動遷移 (Issue #86 — 同上)
+- ~~failure exhaustion 時の Issue comment 投稿~~ — ADR-0010 / Issue #103 で実装済み
+- ~~failure exhaustion 時の Project Status `Failed` 自動遷移~~ — ADR-0010 / Issue #103 で実装済み

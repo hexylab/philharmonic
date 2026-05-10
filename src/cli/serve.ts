@@ -34,7 +34,12 @@ import {
   type RetryQueue,
   type RunOnceResult,
 } from '../orchestrator/index.js';
-import { createProjectsClient, type ProjectsClient } from '../projects/index.js';
+import {
+  createProjectsClient,
+  defaultGhRunner,
+  type GhRunner,
+  type ProjectsClient,
+} from '../projects/index.js';
 import {
   acquireServeLock,
   ServeLockHeldError,
@@ -99,6 +104,7 @@ export type ServeCommandDeps = {
   setEnv?: (key: string, value: string) => void;
   createGitHubClient?: (token: string) => GitHubClient;
   createProjectsClient?: (token: string) => ProjectsClient;
+  runGh?: GhRunner;
   createWorkspaceManager?: (input: {
     repoRoot: string;
     workspaceRoot: string;
@@ -135,6 +141,7 @@ const DEFAULT_DEPS: Required<ServeCommandDeps> = {
   },
   createGitHubClient: (token) => createGitHubClient({ token }),
   createProjectsClient: (token) => createProjectsClient({ token }),
+  runGh: defaultGhRunner,
   createWorkspaceManager: (input) => createWorkspaceManager(input),
   createWorkflowSource: (options) => createWorkflowSource(options),
   acquireServeLock,
@@ -420,6 +427,7 @@ async function runServeCommand(
         retryQueue,
         maxRetryAttempts: config.agent.maxRetryAttempts,
         maxRetryBackoffMs: config.agent.maxRetryBackoffMs,
+        runGh: deps.runGh,
       });
     }
 
@@ -439,6 +447,7 @@ async function runServeCommand(
       retryQueue,
       maxRetryAttempts: config.agent.maxRetryAttempts,
       maxRetryBackoffMs: config.agent.maxRetryBackoffMs,
+      runGh: deps.runGh,
     });
     if (outcomes.length === 0) {
       logger.info('no candidate');

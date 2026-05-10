@@ -1550,4 +1550,240 @@ describe('runOnce + continuation retry (#85 / ADR-0009)', () => {
     expect(entry.attempt).toBe(2); // 1 → 2
     expect(entry.lastRunId).toBe('0190ce80-0000-7000-8000-000000000099');
   });
+
+  // ─── ADR-0010 / Issue #103: retry exhaustion 時の GitHub safety-net ───
+
+  it('kind=failure の exhaustion で notifyFailureExhausted が config 値とともに呼ばれる', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue();
+    const workspacePath = path.join(tempDir, 'wt-retry');
+    queue.schedule({
+      kind: 'failure',
+      issueNumber: 19,
+      repository: { owner: 'hexylab', name: 'philharmonic' },
+      branch: 'feature/19-x',
+      workspacePath,
+      attempt: 5,
+      failureReason: 'runner_error',
+      lastRunId: 'prev-run',
+      lastErrorSummary: null,
+      now: new Date('2026-05-09T00:00:00Z'),
+      maxBackoffMs: 0,
+    });
+
+    const projects = makeProjectsMock();
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(workspacePath);
+    const runClaudeMock = vi.fn(async () => makeRunResult({ status: 'stalled' }));
+    const notify = vi.fn(async () => ({
+      statusUpdated: true,
+      commentPosted: true,
+      duplicateSkipped: false,
+    }));
+
+    await runOnce({
+      config: makeConfig({
+        statusTransitions: {
+          inProgress: 'In Progress',
+          inReview: 'In Review',
+          failed: 'Aborted',
+        },
+      }),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:01:00Z'),
+      pathExists: async () => false,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+      notifyFailureExhausted: notify,
+    });
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    const input = notify.mock.calls[0]![0];
+    expect(input).toMatchObject({
+      owner: 'hexylab',
+      projectNumber: 1,
+      statusFieldName: 'Status',
+      failedStatus: 'Aborted',
+      issueNumber: 19,
+      itemId: SAMPLE_CANDIDATE.itemId,
+      attempt: 5,
+      maxAttempts: 5,
+      failureReason: 'stalled',
+      runId: FIXED_RUN_ID,
+      repository: { owner: 'hexylab', name: 'philharmonic' },
+    });
+    expect(typeof input.failureSummaryPath).toBe('string');
+  });
+
+  it('runGh 未注入 (philharmonic run) では notify は呼ばれない', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue();
+    const workspacePath = path.join(tempDir, 'wt-noop');
+    queue.schedule({
+      kind: 'failure',
+      issueNumber: 19,
+      repository: { owner: 'hexylab', name: 'philharmonic' },
+      branch: 'feature/19-x',
+      workspacePath,
+      attempt: 5,
+      failureReason: 'runner_error',
+      lastRunId: 'prev-run',
+      lastErrorSummary: null,
+      now: new Date('2026-05-09T00:00:00Z'),
+      maxBackoffMs: 0,
+    });
+
+    const projects = makeProjectsMock();
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(workspacePath);
+    const runClaudeMock = vi.fn(async () => makeRunResult({ status: 'stalled' }));
+    const logger = makeFakeLogger();
+
+    await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:01:00Z'),
+      pathExists: async () => false,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+      logger,
+      // runGh / notifyFailureExhausted いずれも未指定
+    });
+
+    expect(queue.size()).toBe(0);
+    // retry exhausted warn だけは出る (Status / Comment は触らない)
+    expect(logger.warn.mock.calls.some((c) => c[0] === 'retry exhausted')).toBe(true);
+  });
+
+  it('notifyFailureExhausted が throw しても orchestrator は落ちず warn を残す', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue();
+    const workspacePath = path.join(tempDir, 'wt-throw');
+    queue.schedule({
+      kind: 'failure',
+      issueNumber: 19,
+      repository: { owner: 'hexylab', name: 'philharmonic' },
+      branch: 'feature/19-x',
+      workspacePath,
+      attempt: 5,
+      failureReason: 'runner_error',
+      lastRunId: 'prev-run',
+      lastErrorSummary: null,
+      now: new Date('2026-05-09T00:00:00Z'),
+      maxBackoffMs: 0,
+    });
+
+    const projects = makeProjectsMock();
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(workspacePath);
+    const runClaudeMock = vi.fn(async () => makeRunResult({ status: 'stalled' }));
+    const logger = makeFakeLogger();
+    const notify = vi.fn(async () => {
+      throw new Error('gh: unexpected');
+    });
+
+    const result = (await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:01:00Z'),
+      pathExists: async () => false,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+      logger,
+      notifyFailureExhausted: notify,
+    })) as Extract<RunOnceResult, { kind: 'failed' }>;
+
+    expect(result.kind).toBe('failed');
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(logger.warn.mock.calls.some((c) => c[0] === 'exhaustion notify threw')).toBe(true);
+    // retry exhausted warn は notify より先に出ているはず (= ログ順は orchestrator 優先)
+    const warnMessages = logger.warn.mock.calls.map((c) => c[0]);
+    expect(warnMessages.indexOf('retry exhausted')).toBeLessThan(
+      warnMessages.indexOf('exhaustion notify threw'),
+    );
+  });
+
+  it('kind=continuation の exhaustion では notify は呼ばれない', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue();
+    const workspacePath = path.join(tempDir, 'wt-cont');
+
+    // attempt=5 の continuation entry を仕込む。retry 中 dispatch が再 success →
+    // next attempt が 6 で exhausted (continuation) になる。
+    queue.schedule({
+      kind: 'continuation',
+      issueNumber: 19,
+      repository: { owner: 'hexylab', name: 'philharmonic' },
+      branch: 'feature/19-x',
+      workspacePath,
+      attempt: 5,
+      failureReason: null,
+      lastRunId: 'prev-cont',
+      lastErrorSummary: null,
+      now: new Date('2026-05-09T00:00:00Z'),
+      maxBackoffMs: 0,
+    });
+
+    const projects = makeProjectsMock();
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(workspacePath);
+    const runClaudeMock = vi.fn(async () => makeRunResult()); // success
+    const logger = makeFakeLogger();
+    const notify = vi.fn(async () => ({
+      statusUpdated: true,
+      commentPosted: true,
+      duplicateSkipped: false,
+    }));
+
+    await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:30Z'),
+      pathExists: async () => false,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+      logger,
+      notifyFailureExhausted: notify,
+    });
+
+    const exhaustedWarn = logger.warn.mock.calls.find((c) => c[0] === 'retry exhausted');
+    expect(exhaustedWarn?.[1]).toMatchObject({ kind: 'continuation' });
+    expect(notify).not.toHaveBeenCalled();
+  });
 });

@@ -69,3 +69,4 @@
 - [ADR-0007: Issue 依存関係を `Depends-On:` 行で表現する DAG-aware scheduler を導入する](./0007-dependency-dag-aware-scheduler.md) (Accepted)
 - [ADR-0008: 失敗 / stalled run を指数バックオフで再 dispatch する in-memory retry queue を導入する](./0008-in-memory-retry-queue.md) (Accepted)
 - [ADR-0009: agent run の正常終了後に Issue が active のままなら continuation retry で再確認する](./0009-continuation-retry-after-success.md) (Accepted)
+- [ADR-0010: retry exhausted (kind=failure) 時に orchestrator が safety-net として GitHub Projects Status を Failed へ遷移し Issue にコメントする](./0010-retry-exhaustion-github-safety-net.md) (Accepted)
