@@ -59,6 +59,11 @@ export type RecoverySummary = {
  * ADR-0005 で Status 遷移は agent 側に移ったため、recovery 経路でも orchestrator は
  * Status を書き換えない。同 Item は agent が再度 prompt 受領時に flip 判断する。
  *
+ * ADR-0007 の dependency filter は **recovery では適用しない**。
+ * recovery は既に着手済み (mid-execution) の Issue を救済するフェーズであり、依存先が後から open に
+ * 戻ったケースまで含めて元の作業状態を維持する。フィルタを掛けると、依存先が再度 open になった
+ * Issue の worktree が永遠に dispatch されなくなるため。
+ *
  * spec: docs/specs/orchestration-mvp.md#tracker-driven-recovery-serve-起動時
  */
 export async function recoverInProgress(deps: RecoveryDeps): Promise<RecoverySummary> {

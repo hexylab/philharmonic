@@ -82,17 +82,20 @@ ADR-0005 で `retry.*` (`retry.max_attempts` / `retry.max_backoff_ms`) は confi
 
 ### structured log
 
-| level | msg                                               | fields                             | 説明                                   |
-| ----- | ------------------------------------------------- | ---------------------------------- | -------------------------------------- |
-| info  | `serve started`                                   | `interval_ms`                      | loop 開始時 1 回                       |
-| info  | `poll tick`                                       | `interval_ms`                      | tick ごと                              |
-| info  | `no candidate`                                    | (`runOnce` 内ですでに出している)   | runOnce が `no_candidate` を返したとき |
-| info  | `dispatch success`                                | `run_id`, `issue_number`, `branch` | runOnce が `success` を返したとき      |
-| warn  | `dispatch failed`                                 | `run_id`, `issue_number`, `reason` | runOnce が `failed` を返したとき       |
-| warn  | `dispatch error`                                  | `error`                            | runOnce が throw したとき              |
-| info  | `shutdown signal`                                 | `signal` (`SIGTERM` / `SIGINT`)    | 1 回目のシグナル受信                   |
-| warn  | `shutdown signal ignored (already shutting down)` | `signal`                           | 2 回目以降のシグナル受信               |
-| info  | `serve stopped`                                   | -                                  | loop 終了経路を問わず必ず 1 行         |
+| level | msg                                               | fields                                   | 説明                                                                                    |
+| ----- | ------------------------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------- |
+| info  | `serve started`                                   | `interval_ms`                            | loop 開始時 1 回                                                                        |
+| info  | `poll tick`                                       | `interval_ms`                            | tick ごと                                                                               |
+| info  | `no candidate`                                    | (`runOnce` 内ですでに出している)         | runOnce が `no_candidate` を返したとき                                                  |
+| info  | `dispatch success`                                | `run_id`, `issue_number`, `branch`       | runOnce が `success` を返したとき                                                       |
+| warn  | `dispatch failed`                                 | `run_id`, `issue_number`, `reason`       | runOnce が `failed` を返したとき                                                        |
+| warn  | `dispatch error`                                  | `error`                                  | runOnce が throw したとき                                                               |
+| info  | `dependency blocked`                              | `issue_number`, `blocking_issue_numbers` | candidate の依存先に open Issue があり dispatch 対象外になったとき (ADR-0007)           |
+| warn  | `dependency invalid`                              | `issue_number`, `invalid_entries`        | candidate の `Depends-On:` が parse-invalid / 404 / 403 / fetch error のとき (ADR-0007) |
+| warn  | `dependency cycle`                                | `issue_number`, `cycle_issue_numbers`    | candidate が循環依存に属しているとき (self-loop を含む。ADR-0007)                       |
+| info  | `shutdown signal`                                 | `signal` (`SIGTERM` / `SIGINT`)          | 1 回目のシグナル受信                                                                    |
+| warn  | `shutdown signal ignored (already shutting down)` | `signal`                                 | 2 回目以降のシグナル受信                                                                |
+| info  | `serve stopped`                                   | -                                        | loop 終了経路を問わず必ず 1 行                                                          |
 
 `pr_number` は orchestrator が知れなくなったため `dispatch success` のフィールドから外れた。PR 番号を運用で追いたい場合は agent が Issue / PR コメントに書いた内容や `gh pr list` で取得する。
 
