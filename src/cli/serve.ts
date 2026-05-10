@@ -19,7 +19,6 @@ import {
 } from '../github/index.js';
 import { createLogger, type Logger } from '../logger/index.js';
 import {
-  promoteRetryReady,
   recoverInProgress,
   runConcurrent,
   runOnce,
@@ -30,14 +29,9 @@ import {
 import { createProjectsClient, type ProjectsClient } from '../projects/index.js';
 import {
   acquireServeLock,
-  createFileRetryStorage,
-  createRetryScheduler,
-  DEFAULT_RETRY_STATE_RELATIVE,
   ServeLockHeldError,
   ServeLockHeldOnDifferentHostError,
   type AcquireServeLockOptions,
-  type RetryDecision,
-  type RetryScheduler,
   type ServeLockHandle,
 } from '../serve/index.js';
 import {
@@ -69,10 +63,6 @@ export type ServeSignal = 'SIGTERM' | 'SIGINT';
 export type ServeSignalListener = (signal: ServeSignal) => void;
 
 export type ServeSignalSubscription = {
-  /**
-   * Process が指定 signal を受け取ったら listener を呼ぶ subscription を作る。
-   * 戻り値の `dispose()` は loop 終了後に listener を外すために必ず呼ぶ。
-   */
   on: (signal: ServeSignal, listener: ServeSignalListener) => void;
   dispose: () => void;
 };
@@ -104,18 +94,13 @@ export type ServeCommandDeps = {
   runConcurrent?: typeof runConcurrent;
   serveLoop?: typeof serveLoop;
   recoverInProgress?: typeof recoverInProgress;
-  promoteRetryReady?: typeof promoteRetryReady;
-  createRetryScheduler?: (repoRoot: string, config: Config, logger: Logger) => RetryScheduler;
   createSignalSubscription?: CreateServeSignalSubscription;
   stdout?: NodeJS.WritableStream;
   stderr?: NodeJS.WritableStream;
   createLogger?: typeof createLogger;
   exit?: (code: number) => never;
-  /** Snapshot HTTP API (#30) サーバ起動 (test 用に差し替え可能) */
   startSnapshotApiServer?: (options: SnapshotApiServerOptions) => Promise<SnapshotApiServer>;
-  /** Snapshot HTTP API (#30) の in-memory tracker 生成 (test 用) */
   createRunTracker?: (options?: { startedAt?: Date }) => RunTracker;
-  /** Snapshot HTTP API (#30) の wake controller 生成 (test 用) */
   createWakeController?: () => WakeController;
 };
 
@@ -133,16 +118,6 @@ const DEFAULT_DEPS: Required<ServeCommandDeps> = {
   runConcurrent,
   serveLoop,
   recoverInProgress,
-  promoteRetryReady,
-  createRetryScheduler: (repoRoot, config, logger) =>
-    createRetryScheduler({
-      storage: createFileRetryStorage({
-        filePath: path.resolve(repoRoot, DEFAULT_RETRY_STATE_RELATIVE),
-        logger,
-      }),
-      maxAttempts: config.retry.maxAttempts,
-      maxBackoffMs: config.retry.maxBackoffMs,
-    }),
   createSignalSubscription: createProcessSignalSubscription,
   stdout: process.stdout,
   stderr: process.stderr,
@@ -206,8 +181,6 @@ async function runServeCommand(
     return;
   }
 
-  // bypass guard: serve で permission_mode=bypass を使うときは明示 opt-in を要求する。
-  // run コマンドはこの制約を持たない (一過的実行なので)。
   if (config.permissionMode === 'bypass') {
     if (deps.getEnv(BYPASS_OPT_IN_ENV) !== '1') {
       deps.stderr.write(
@@ -222,7 +195,6 @@ async function runServeCommand(
 
   const repoRoot = cwd;
 
-  // lock 取得は config / token / bypass guard を全て通った後に行う (失敗時に lock を残さないため)。
   let lock: ServeLockHandle;
   try {
     lock = await deps.acquireServeLock({ repoRoot });
@@ -258,6 +230,12 @@ async function runServeCommand(
       'permission_mode=bypass で serve を起動します。--dangerously-skip-permissions が tick ごとに発火するため、隔離環境であることを必ず確認してください',
       { optInEnv: BYPASS_OPT_IN_ENV },
     );
+  } else {
+    // ADR-0005: agent 委譲型では bypass が実用上必須。auto では agent が gh / git push を呼べず
+    // Status 遷移 / PR 作成が失敗する。起動は許容するが、最初に 1 回だけ警告する。
+    logger.warn(
+      'permission_mode=auto では agent が Bash tool (gh / git push) を呼べず、Status 遷移 / PR 作成が失敗します (ADR-0005)。philharmonic.yaml の permission_mode を bypass に変更してください',
+    );
   }
 
   if (config.polling.intervalMs < LOW_POLLING_INTERVAL_WARN_THRESHOLD_MS) {
@@ -285,10 +263,6 @@ async function runServeCommand(
   subscription.on('SIGTERM', onSignal);
   subscription.on('SIGINT', onSignal);
 
-  const retryScheduler = deps.createRetryScheduler(repoRoot, config, logger);
-
-  // Snapshot HTTP API (#30) — daemon プロセスの起動以降のみを保持する in-memory tracker。
-  // server.port が未設定なら API は起動しない (config validation で port>=1 が保証されている)。
   const runTracker = deps.createRunTracker({ startedAt: new Date() });
   const wakeController = deps.createWakeController();
   let apiServer: SnapshotApiServer | null = null;
@@ -301,16 +275,14 @@ async function runServeCommand(
           getState: () =>
             buildStateSnapshot({
               tracker: runTracker,
-              scheduler: retryScheduler,
               intervalMs: config.polling.intervalMs,
             }),
           getIssue: async (issueNumber) => {
             const snapshot = await buildIssueSnapshot({
               issueNumber,
               tracker: runTracker,
-              scheduler: retryScheduler,
             });
-            if (snapshot.running === null && snapshot.retrying === null) return null;
+            if (snapshot.running === null) return null;
             return snapshot;
           },
           refresh: async () => ({ woken: wakeController.wake() }),
@@ -332,9 +304,6 @@ async function runServeCommand(
     }
   }
 
-  // WORKFLOW.md (Liquid テンプレート) を上位レイヤとして読む。serve daemon は長期稼働のため
-  // watch=true で hot-reload のログを出すが、各 dispatch も都度 mtime を確認するので
-  // watcher が platform 都合で動かなくても render の鮮度は保たれる。
   let workflowSource: WorkflowSource;
   try {
     workflowSource = await deps.createWorkflowSource({
@@ -354,42 +323,11 @@ async function runServeCommand(
     return;
   }
 
-  // attempt は retry-state から「過去 Failed 試行回数 + 1」で解決する (#27)。
-  // 履歴が無い Issue は 1。state が壊れて読めなくても warn の上で 1 にフォールバックする。
-  const resolveAttempt = async (issueNumber: number): Promise<number> => {
-    try {
-      return (await retryScheduler.getAttempts(issueNumber)) + 1;
-    } catch (error) {
-      logger.warn('attempt 解決に失敗 (1 にフォールバック)', {
-        issueNumber,
-        error: describeError(error),
-      });
-      return 1;
-    }
-  };
-
   const maxConcurrent = config.agent.maxConcurrentAgents;
 
   const wrappedRunOnce = async (): Promise<RunOnceResult | undefined> => {
-    // 1) retry-state にあって nextAttemptAt 到達済みの Item を Failed → Todo に戻す
-    //    state が空なら fetch を行わずに early return される (#22)
-    try {
-      await deps.promoteRetryReady({
-        config,
-        scheduler: retryScheduler,
-        projectsClient,
-        githubClient,
-        logger,
-      });
-    } catch (error) {
-      logger.warn('retry promote エラー (次 tick で再試行します)', {
-        error: describeError(error),
-      });
-    }
-
     if (maxConcurrent === 1) {
-      // 互換挙動: 1 件処理して RunOnceResult を返却 (serveLoop が dispatch success/failed をログに出す)
-      const result = await deps.runOnce({
+      return await deps.runOnce({
         config,
         repoRoot,
         githubClient,
@@ -398,15 +336,11 @@ async function runServeCommand(
         workflowSource,
         runnerLogsRoot,
         dispatchStatuses: config.dispatchStatuses,
-        resolveAttempt,
         logger,
         runTracker,
       });
-      await applyRetryDecision(retryScheduler, logger, result, null);
-      return result;
     }
 
-    // 並列 dispatch (#24): 1 tick で最大 N 件並列処理。各結果は slot 付きでログを出す
     const outcomes = await deps.runConcurrent({
       config,
       repoRoot,
@@ -416,7 +350,6 @@ async function runServeCommand(
       workflowSource,
       runnerLogsRoot,
       dispatchStatuses: config.dispatchStatuses,
-      resolveAttempt,
       logger,
       maxConcurrent,
       runTracker,
@@ -427,17 +360,11 @@ async function runServeCommand(
       for (const outcome of outcomes) {
         logConcurrentDispatch(logger, outcome);
       }
-      // retry-state はファイル I/O が「最後勝ち」のため逐次に更新する (race-free)
-      for (const outcome of outcomes) {
-        await applyRetryDecision(retryScheduler, logger, outcome.result, outcome.slot);
-      }
     }
     return undefined;
   };
 
   try {
-    // Recovery フェーズ: 前回プロセスのクラッシュ等で In Progress のまま残った Item を引き取る
-    // (詳細: docs/specs/orchestration-mvp.md#tracker-driven-recovery-serve-起動時)
     if (!controller.signal.aborted) {
       try {
         await deps.recoverInProgress({
@@ -449,7 +376,6 @@ async function runServeCommand(
           workflowSource,
           runnerLogsRoot,
           signal: controller.signal,
-          resolveAttempt,
           logger,
           runTracker,
         });
@@ -505,31 +431,6 @@ function createProcessSignalSubscription(): ServeSignalSubscription {
   };
 }
 
-async function applyRetryDecision(
-  scheduler: RetryScheduler,
-  logger: Logger,
-  result: RunOnceResult,
-  slot: number | null,
-): Promise<void> {
-  try {
-    if (result.kind === 'success') {
-      await scheduler.recordSuccess(result.issueNumber);
-    } else if (result.kind === 'failed') {
-      const decision = await scheduler.recordFailure({
-        issueNumber: result.issueNumber,
-        reason: result.reason,
-        now: new Date(),
-      });
-      logRetryDecision(logger, result.runId, result.issueNumber, result.reason, decision, slot);
-    }
-  } catch (error) {
-    logger.warn('retry scheduler の更新に失敗 (state ファイル I/O エラー)', {
-      error: describeError(error),
-      ...(slot !== null && { slot }),
-    });
-  }
-}
-
 function logConcurrentDispatch(logger: Logger, outcome: ConcurrentDispatchOutcome): void {
   const { slot, result } = outcome;
   if (result.kind === 'success') {
@@ -537,7 +438,6 @@ function logConcurrentDispatch(logger: Logger, outcome: ConcurrentDispatchOutcom
       slot,
       runId: result.runId,
       issueNumber: result.issueNumber,
-      prNumber: result.prNumber,
       branch: result.branch,
     });
     return;
@@ -548,42 +448,6 @@ function logConcurrentDispatch(logger: Logger, outcome: ConcurrentDispatchOutcom
     issueNumber: result.issueNumber,
     reason: result.reason,
   });
-}
-
-function logRetryDecision(
-  logger: Logger,
-  runId: string,
-  issueNumber: number,
-  reason: string,
-  decision: RetryDecision,
-  slot: number | null = null,
-): void {
-  const slotField = slot !== null ? { slot } : {};
-  switch (decision.kind) {
-    case 'scheduled':
-      logger.info('retry scheduled', {
-        ...slotField,
-        runId,
-        issueNumber,
-        attempts: decision.attempts,
-        backoffMs: decision.backoffMs,
-        nextAttemptAt: decision.nextAttemptAt.toISOString(),
-        reason,
-      });
-      return;
-    case 'gave_up':
-      logger.info('retry gave up (max attempts reached)', {
-        ...slotField,
-        runId,
-        issueNumber,
-        attempts: decision.attempts,
-        reason,
-      });
-      return;
-    case 'disabled':
-      // retry 機能無効化時はログを出さない (Failed のまま放置するという既存挙動と等価)
-      return;
-  }
 }
 
 function describeError(error: unknown): string {

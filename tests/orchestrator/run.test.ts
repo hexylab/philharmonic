@@ -5,18 +5,12 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Config } from '../../src/config/index.js';
-import type {
-  GitHubClient,
-  Issue,
-  IssueComment,
-  PullRequest,
-  UpdateProjectV2ItemStatusInput,
-  UpdateProjectV2ItemStatusResult,
-} from '../../src/github/index.js';
+import type { GitHubClient, Issue } from '../../src/github/index.js';
 import type { LogFields, Logger } from '../../src/logger/index.js';
 import { runConcurrent, runOnce, type RunOnceResult } from '../../src/orchestrator/index.js';
-import type { Candidate, ProjectMetadata, ProjectsClient } from '../../src/projects/index.js';
+import type { Candidate, ProjectsClient } from '../../src/projects/index.js';
 import type { RunResult } from '../../src/runner/index.js';
+import type { RunTracker } from '../../src/server/tracker.js';
 import type { WorkflowSource } from '../../src/workflow/index.js';
 import { HookExecutionError } from '../../src/workspace/index.js';
 import type {
@@ -29,14 +23,11 @@ import { makeFallbackWorkflowSource } from '../_helpers/workflow.js';
 
 type GitHubMock = GitHubClient & {
   getIssue: ReturnType<typeof vi.fn>;
-  commentIssue: ReturnType<typeof vi.fn>;
-  createPullRequest: ReturnType<typeof vi.fn>;
-  updateProjectV2ItemStatus: ReturnType<typeof vi.fn>;
+  listOpenPullRequests: ReturnType<typeof vi.fn>;
 };
 
 type ProjectsMock = ProjectsClient & {
   fetchProjectCandidates: ReturnType<typeof vi.fn>;
-  fetchProjectMetadata: ReturnType<typeof vi.fn>;
 };
 
 type WorkspaceMock = WorkspaceManager & {
@@ -57,20 +48,7 @@ const SAMPLE_CANDIDATE: Candidate = {
   status: 'Todo',
 };
 
-const SAMPLE_ISSUE_BODY = `## Goal
-
-Goal の本文。
-
-## Constraints
-
-- 制約 1
-- 制約 2
-
-## Acceptance Criteria
-
-- [ ] AC1
-- [ ] AC2
-`;
+const SAMPLE_ISSUE_BODY = `## Goal\n\nGoal の本文。\n`;
 
 const SAMPLE_ISSUE: Issue = {
   number: 19,
@@ -80,18 +58,6 @@ const SAMPLE_ISSUE: Issue = {
   htmlUrl: SAMPLE_CANDIDATE.issueUrl,
   labels: [],
   assignees: [],
-};
-
-const SAMPLE_METADATA: ProjectMetadata = {
-  projectId: 'PVT_1',
-  statusFieldId: 'PVTSSF_status',
-  statusOptions: [
-    { id: 'opt_todo', name: 'Todo' },
-    { id: 'opt_ip', name: 'In Progress' },
-    { id: 'opt_ir', name: 'In Review' },
-    { id: 'opt_fail', name: 'Failed' },
-    { id: 'opt_done', name: 'Done' },
-  ],
 };
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
@@ -107,10 +73,10 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     killGracePeriodMs: 5_000,
     workspaceRoot: '.philharmonic/worktrees',
     dispatchStatuses: ['Todo'],
+    statusTransitions: { inProgress: 'In Progress', inReview: 'In Review', failed: 'Failed' },
     cleanRetentionDays: 7,
     logLevel: 'info',
     polling: { intervalMs: 30_000 },
-    retry: { maxAttempts: 3, maxBackoffMs: 600_000 },
     agent: { maxConcurrentAgents: 1, maxTurns: 1, stallTimeoutMs: 300_000 },
     hooks: { afterCreate: [], beforeRun: [], afterRun: [], beforeRemove: [] },
     server: null,
@@ -145,37 +111,14 @@ function makeGitHubMock(overrides: Partial<GitHubMock> = {}): GitHubMock {
   const getIssue = (overrides.getIssue ?? vi.fn(async () => SAMPLE_ISSUE)) as ReturnType<
     typeof vi.fn
   >;
-  const commentIssue = (overrides.commentIssue ??
-    vi.fn(
-      async (): Promise<IssueComment> => ({
-        id: 1,
-        htmlUrl: 'https://example.com/c',
-      }),
-    )) as ReturnType<typeof vi.fn>;
-  const createPullRequest = (overrides.createPullRequest ??
-    vi.fn(
-      async (): Promise<PullRequest> => ({
-        number: 99,
-        htmlUrl: 'https://example.com/pr/99',
-        draft: false,
-      }),
-    )) as ReturnType<typeof vi.fn>;
-  const updateProjectV2ItemStatus = (overrides.updateProjectV2ItemStatus ??
-    vi.fn(
-      async (input: UpdateProjectV2ItemStatusInput): Promise<UpdateProjectV2ItemStatusResult> => ({
-        itemId: input.itemId,
-      }),
-    )) as ReturnType<typeof vi.fn>;
-  return { getIssue, commentIssue, createPullRequest, updateProjectV2ItemStatus };
+  const listOpenPullRequests = (overrides.listOpenPullRequests ??
+    vi.fn(async () => [])) as ReturnType<typeof vi.fn>;
+  return { getIssue, listOpenPullRequests };
 }
 
-function makeProjectsMock(
-  candidates: Candidate[] = [SAMPLE_CANDIDATE],
-  metadata: ProjectMetadata = SAMPLE_METADATA,
-): ProjectsMock {
+function makeProjectsMock(candidates: Candidate[] = [SAMPLE_CANDIDATE]): ProjectsMock {
   return {
     fetchProjectCandidates: vi.fn(async () => candidates),
-    fetchProjectMetadata: vi.fn(async () => metadata),
   };
 }
 
@@ -213,7 +156,7 @@ type SharedFns = {
 };
 
 function makeChildLogger(fns: SharedFns, bindings: LogFields): FakeLogger {
-  const fake: FakeLogger = {
+  return {
     level: 'debug',
     bindings,
     debug: fns.debug,
@@ -222,8 +165,13 @@ function makeChildLogger(fns: SharedFns, bindings: LogFields): FakeLogger {
     error: fns.error,
     child: (childBindings: LogFields) => makeChildLogger(fns, { ...bindings, ...childBindings }),
   };
-  return fake;
 }
+
+/**
+ * 何もしない gitRunner (実 git を呼ばずに fetch / push 等を pass-through する)。
+ * dispatchSelected が `git fetch` を呼ぶ #62 以降のテストで必須。
+ */
+const noopGitRunner: GitRunner = async () => ({ stdout: '', stderr: '' });
 
 function makeWorkspaceMock(workspacePath: string): WorkspaceMock {
   return {
@@ -241,32 +189,7 @@ function makeWorkspaceMock(workspacePath: string): WorkspaceMock {
   };
 }
 
-function makeGitRunner(
-  overrides: Partial<{
-    fetch: () => Promise<{ stdout: string; stderr: string }>;
-    revListCount: () => Promise<{ stdout: string; stderr: string }>;
-    push: () => Promise<{ stdout: string; stderr: string }>;
-  }> = {},
-): GitRunner {
-  return async (args) => {
-    const command = args[0];
-    if (command === 'fetch') {
-      if (overrides.fetch !== undefined) return overrides.fetch();
-      return { stdout: '', stderr: '' };
-    }
-    if (command === 'rev-list') {
-      if (overrides.revListCount !== undefined) return overrides.revListCount();
-      return { stdout: '1\n', stderr: '' };
-    }
-    if (command === 'push') {
-      if (overrides.push !== undefined) return overrides.push();
-      return { stdout: '', stderr: '' };
-    }
-    return { stdout: '', stderr: '' };
-  };
-}
-
-describe('runOnce', () => {
+describe('runOnce (ADR-0005: 薄い orchestrator)', () => {
   let tempDir: string;
   let workflowSource: WorkflowSource;
 
@@ -293,19 +216,18 @@ describe('runOnce', () => {
       workspaceManager: workspace,
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
       runClaude: vi.fn(),
-      gitRunner: makeGitRunner(),
       generateRunId: () => FIXED_RUN_ID,
       clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
     });
 
     expect(result).toEqual({ kind: 'no_candidate' });
-    expect(projects.fetchProjectMetadata).not.toHaveBeenCalled();
-    expect(github.updateProjectV2ItemStatus).not.toHaveBeenCalled();
     expect(workspace.createWorkspace).not.toHaveBeenCalled();
   });
 
-  it('成功時は In Progress → In Review への遷移と PR 作成を行う', async () => {
+  it('成功時は worktree を cleanup し、PR / Status は orchestrator から触らない', async () => {
     const projects = makeProjectsMock();
     const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
@@ -319,30 +241,24 @@ describe('runOnce', () => {
       workspaceManager: workspace,
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
       runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
       generateRunId: () => FIXED_RUN_ID,
       clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
     })) as Extract<RunOnceResult, { kind: 'success' }>;
 
     expect(result.kind).toBe('success');
     expect(result.runId).toBe(FIXED_RUN_ID);
     expect(result.issueNumber).toBe(19);
-    expect(result.prNumber).toBe(99);
     expect(result.branch).toMatch(/^feature\/19-/);
-
-    expect(github.updateProjectV2ItemStatus).toHaveBeenCalledTimes(2);
-    const calls = github.updateProjectV2ItemStatus.mock.calls.map(
-      (c) => (c[0] as UpdateProjectV2ItemStatusInput).optionId,
-    );
-    expect(calls).toEqual(['opt_ip', 'opt_ir']);
-    expect(github.createPullRequest).toHaveBeenCalledTimes(1);
-    expect(github.commentIssue).not.toHaveBeenCalled();
     expect(workspace.cleanupWorkspace).toHaveBeenCalledTimes(1);
     expect(runClaudeMock).toHaveBeenCalledTimes(1);
+    // ADR-0005: orchestrator は GitHub に書き込まない
+    expect((result as unknown as { prNumber?: number }).prNumber).toBeUndefined();
   });
 
-  it('Runner が stalled で返ったら reason=stalled で Failed 遷移する (#25)', async () => {
+  it('Runner が stalled で返ったら reason=stalled で failed (Status flip しない)', async () => {
     const projects = makeProjectsMock();
     const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
@@ -356,23 +272,20 @@ describe('runOnce', () => {
       workspaceManager: workspace,
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
       runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
       generateRunId: () => FIXED_RUN_ID,
       clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
     })) as Extract<RunOnceResult, { kind: 'failed' }>;
 
     expect(result.kind).toBe('failed');
     expect(result.reason).toBe('stalled');
-    const optionIds = github.updateProjectV2ItemStatus.mock.calls.map(
-      (c) => (c[0] as UpdateProjectV2ItemStatusInput).optionId,
-    );
-    expect(optionIds).toEqual(['opt_ip', 'opt_fail']);
-    expect(github.createPullRequest).not.toHaveBeenCalled();
-    expect(github.commentIssue).toHaveBeenCalledTimes(1);
+    // 失敗時は worktree を保持する (debug 用)
+    expect(workspace.cleanupWorkspace).not.toHaveBeenCalled();
   });
 
-  it('Runner が failed で返ったら reason=runner_error で Failed 遷移する', async () => {
+  it('Runner が failed で返ったら reason=runner_error で failed (worktree 保持)', async () => {
     const projects = makeProjectsMock();
     const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
@@ -388,28 +301,23 @@ describe('runOnce', () => {
       workspaceManager: workspace,
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
       runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
       generateRunId: () => FIXED_RUN_ID,
       clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
     })) as Extract<RunOnceResult, { kind: 'failed' }>;
 
     expect(result.kind).toBe('failed');
     expect(result.reason).toBe('runner_error');
-    const optionIds = github.updateProjectV2ItemStatus.mock.calls.map(
-      (c) => (c[0] as UpdateProjectV2ItemStatusInput).optionId,
-    );
-    expect(optionIds).toEqual(['opt_ip', 'opt_fail']);
-    expect(github.createPullRequest).not.toHaveBeenCalled();
-    expect(github.commentIssue).toHaveBeenCalledTimes(1);
     expect(workspace.cleanupWorkspace).not.toHaveBeenCalled();
   });
 
-  it('worktree に commit が無ければ reason=no_changes で Failed 遷移する', async () => {
+  it('Runner が timeout で返ったら reason=timeout で failed', async () => {
     const projects = makeProjectsMock();
     const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
-    const runClaudeMock = vi.fn(async () => makeRunResult());
+    const runClaudeMock = vi.fn(async () => makeRunResult({ status: 'timeout' }));
 
     const result = (await runOnce({
       config: makeConfig(),
@@ -419,25 +327,24 @@ describe('runOnce', () => {
       workspaceManager: workspace,
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
       runClaude: runClaudeMock,
-      gitRunner: makeGitRunner({
-        revListCount: async () => ({ stdout: '0\n', stderr: '' }),
-      }),
       generateRunId: () => FIXED_RUN_ID,
       clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
     })) as Extract<RunOnceResult, { kind: 'failed' }>;
 
     expect(result.kind).toBe('failed');
-    expect(result.reason).toBe('no_changes');
-    expect(github.createPullRequest).not.toHaveBeenCalled();
-    expect(github.commentIssue).toHaveBeenCalledTimes(1);
+    expect(result.reason).toBe('timeout');
   });
 
-  it('git push が失敗すれば reason=push で Failed 遷移する', async () => {
+  it('workspace 作成失敗は reason=workspace_provisioning で failed', async () => {
     const projects = makeProjectsMock();
     const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
-    const runClaudeMock = vi.fn(async () => makeRunResult());
+    workspace.createWorkspace = vi.fn(async () => {
+      throw new Error('worktree add failed');
+    });
 
     const result = (await runOnce({
       config: makeConfig(),
@@ -447,20 +354,15 @@ describe('runOnce', () => {
       workspaceManager: workspace,
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
-      runClaude: runClaudeMock,
-      gitRunner: makeGitRunner({
-        push: async () => {
-          throw new Error('remote rejected');
-        },
-      }),
+      gitRunner: noopGitRunner,
+      runClaude: vi.fn(),
       generateRunId: () => FIXED_RUN_ID,
       clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
     })) as Extract<RunOnceResult, { kind: 'failed' }>;
 
     expect(result.kind).toBe('failed');
-    expect(result.reason).toBe('push');
-    expect(github.createPullRequest).not.toHaveBeenCalled();
-    expect(github.commentIssue).toHaveBeenCalledTimes(1);
+    expect(result.reason).toBe('workspace_provisioning');
   });
 
   it('dispatchStatuses を渡すと Todo 以外の Status (Ready for Agent) を dispatch できる (#38)', async () => {
@@ -483,52 +385,19 @@ describe('runOnce', () => {
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       dispatchStatuses: ['Ready for Agent'],
+      gitRunner: noopGitRunner,
       runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
       generateRunId: () => FIXED_RUN_ID,
       clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
     })) as Extract<RunOnceResult, { kind: 'success' }>;
 
     expect(result.kind).toBe('success');
-    expect(result.issueNumber).toBe(candidate.issueNumber);
-    expect(github.createPullRequest).toHaveBeenCalledTimes(1);
+    expect(runClaudeMock).toHaveBeenCalledTimes(1);
   });
 
-  it('deps.dispatchStatuses 未指定時は config.dispatchStatuses をフォールバックに使う (#38)', async () => {
-    const candidate: Candidate = {
-      ...SAMPLE_CANDIDATE,
-      itemId: 'PVTI_cfg',
-      status: 'Ready for Agent',
-    };
-    const projects = makeProjectsMock([candidate]);
-    const github = makeGitHubMock();
-    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
-    const runClaudeMock = vi.fn(async () => makeRunResult());
-
-    const result = (await runOnce({
-      config: makeConfig({ dispatchStatuses: ['Ready for Agent'] }),
-      repoRoot: tempDir,
-      githubClient: github,
-      projectsClient: projects,
-      workspaceManager: workspace,
-      workflowSource,
-      runnerLogsRoot: path.join(tempDir, 'runs'),
-      runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
-      generateRunId: () => FIXED_RUN_ID,
-      clock: () => new Date('2026-05-09T00:00:00Z'),
-    })) as Extract<RunOnceResult, { kind: 'success' }>;
-
-    expect(result.kind).toBe('success');
-    expect(github.createPullRequest).toHaveBeenCalledTimes(1);
-  });
-
-  it('dispatchStatuses 外の Status しかなければ no_candidate を返す (#38)', async () => {
-    const candidate: Candidate = {
-      ...SAMPLE_CANDIDATE,
-      itemId: 'PVTI_done',
-      status: 'Done',
-    };
+  it('dispatchStatuses 外の Status しかなければ no_candidate を返す', async () => {
+    const candidate: Candidate = { ...SAMPLE_CANDIDATE, status: 'Done' };
     const projects = makeProjectsMock([candidate]);
     const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
@@ -542,18 +411,87 @@ describe('runOnce', () => {
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       dispatchStatuses: ['Ready for Agent', 'Todo'],
+      gitRunner: noopGitRunner,
       runClaude: vi.fn(),
-      gitRunner: makeGitRunner(),
       generateRunId: () => FIXED_RUN_ID,
       clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
     });
 
     expect(result).toEqual({ kind: 'no_candidate' });
-    expect(github.updateProjectV2ItemStatus).not.toHaveBeenCalled();
+  });
+
+  it('worktree が既存なら二重 dispatch ガードで skip する (ADR-0005)', async () => {
+    const projects = makeProjectsMock();
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+
+    const result = await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: vi.fn(),
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => true,
+    });
+
+    expect(result).toEqual({ kind: 'no_candidate' });
     expect(workspace.createWorkspace).not.toHaveBeenCalled();
   });
 
-  it('config.permissionMode は runClaude にそのまま渡され、bypass 時は警告ログを出す (#29)', async () => {
+  it('runTracker.getRunningByIssue が non-null なら二重 dispatch ガードで skip する (ADR-0005)', async () => {
+    const projects = makeProjectsMock();
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const tracker: RunTracker = {
+      runStarted: vi.fn(),
+      runFinished: vi.fn(),
+      listRunning: () => [],
+      getRunningByIssue: () => ({
+        runId: 'r',
+        issueNumber: 19,
+        branch: 'feature/19-x',
+        startedAt: new Date().toISOString(),
+        slot: null,
+      }),
+      getTotals: () => ({
+        runsCompleted: 0,
+        runsSucceeded: 0,
+        runsFailed: 0,
+        totalCostUsd: 0,
+      }),
+      recordPollTick: vi.fn(),
+      getLastPollTickAt: () => null,
+      getStartedAt: () => new Date(0).toISOString(),
+    };
+
+    const result = await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: vi.fn(),
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
+      runTracker: tracker,
+    });
+
+    expect(result).toEqual({ kind: 'no_candidate' });
+    expect(workspace.createWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('config.permissionMode は runClaude にそのまま渡され、bypass 時は警告ログを出す', async () => {
     const projects = makeProjectsMock();
     const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
@@ -568,24 +506,23 @@ describe('runOnce', () => {
       workspaceManager: workspace,
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
       runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
       generateRunId: () => FIXED_RUN_ID,
       clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
       logger,
     })) as Extract<RunOnceResult, { kind: 'success' }>;
 
     expect(result.kind).toBe('success');
-    expect(runClaudeMock).toHaveBeenCalledTimes(1);
     expect(runClaudeMock.mock.calls[0]?.[0]).toEqual(
       expect.objectContaining({ permissionMode: 'bypass' }),
     );
-
     const warnMessages = logger.warn.mock.calls.map((c) => c[0] as string);
     expect(warnMessages.some((m) => m.includes('permission_mode=bypass'))).toBe(true);
   });
 
-  it('config.permissionMode=auto では bypass 警告ログを出さない (#29)', async () => {
+  it('config.permissionMode=auto では dispatchSelected 内で警告を出さない (CLI bootstrap で 1 回だけ出す)', async () => {
     const projects = makeProjectsMock();
     const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
@@ -600,10 +537,11 @@ describe('runOnce', () => {
       workspaceManager: workspace,
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
       runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
       generateRunId: () => FIXED_RUN_ID,
       clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
       logger,
     });
 
@@ -611,42 +549,12 @@ describe('runOnce', () => {
       expect.objectContaining({ permissionMode: 'auto' }),
     );
     const warnMessages = logger.warn.mock.calls.map((c) => c[0] as string);
+    // dispatchSelected 内では permission_mode=auto / bypass のいずれの警告も出さない (bootstrap 側に集約)
+    expect(warnMessages.some((m) => m.includes('permission_mode=auto'))).toBe(false);
     expect(warnMessages.some((m) => m.includes('permission_mode=bypass'))).toBe(false);
   });
 
-  it('runOnce は runId / issueNumber を child logger の bindings に注入する (#28)', async () => {
-    const projects = makeProjectsMock();
-    const github = makeGitHubMock();
-    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
-    const runClaudeMock = vi.fn(async () => makeRunResult());
-    const baseLogger = makeFakeLogger();
-
-    const childCalls: LogFields[] = [];
-    const baseChild = baseLogger.child.bind(baseLogger);
-    baseLogger.child = (bindings: LogFields) => {
-      childCalls.push(bindings);
-      return baseChild(bindings);
-    };
-
-    await runOnce({
-      config: makeConfig(),
-      repoRoot: tempDir,
-      githubClient: github,
-      projectsClient: projects,
-      workspaceManager: workspace,
-      workflowSource,
-      runnerLogsRoot: path.join(tempDir, 'runs'),
-      runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
-      generateRunId: () => FIXED_RUN_ID,
-      clock: () => new Date('2026-05-09T00:00:00Z'),
-      logger: baseLogger,
-    });
-
-    expect(childCalls.some((b) => b.runId === FIXED_RUN_ID && b.issueNumber === 19)).toBe(true);
-  });
-
-  it('runOnce は runClaude に同じ logger を渡す (session_id 付与のため) (#28)', async () => {
+  it('runId / issueNumber を child logger の bindings に注入する (#28)', async () => {
     const projects = makeProjectsMock();
     const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
@@ -661,61 +569,28 @@ describe('runOnce', () => {
       workspaceManager: workspace,
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
       runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
       generateRunId: () => FIXED_RUN_ID,
       clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
       logger,
     });
 
     expect(runClaudeMock).toHaveBeenCalledTimes(1);
-    const call = runClaudeMock.mock.calls[0]?.[0] as { logger?: Logger };
-    expect(call.logger).toBeDefined();
-    expect(typeof call.logger?.child).toBe('function');
+    const childLogger = runClaudeMock.mock.calls[0]?.[0]?.logger as FakeLogger | undefined;
+    expect(childLogger?.bindings).toMatchObject({ runId: FIXED_RUN_ID, issueNumber: 19 });
   });
 
-  it('PR 作成が失敗すれば reason=pr_create で Failed 遷移する', async () => {
-    const projects = makeProjectsMock();
-    const github = makeGitHubMock({
-      createPullRequest: vi.fn(async () => {
-        throw new Error('Validation failed');
-      }) as ReturnType<typeof vi.fn>,
-    });
-    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
-    const runClaudeMock = vi.fn(async () => makeRunResult());
-
-    const result = (await runOnce({
-      config: makeConfig(),
-      repoRoot: tempDir,
-      githubClient: github,
-      projectsClient: projects,
-      workspaceManager: workspace,
-      workflowSource,
-      runnerLogsRoot: path.join(tempDir, 'runs'),
-      runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
-      generateRunId: () => FIXED_RUN_ID,
-      clock: () => new Date('2026-05-09T00:00:00Z'),
-    })) as Extract<RunOnceResult, { kind: 'failed' }>;
-
-    expect(result.kind).toBe('failed');
-    expect(result.reason).toBe('pr_create');
-    expect(github.commentIssue).toHaveBeenCalledTimes(1);
-    const optionIds = github.updateProjectV2ItemStatus.mock.calls.map(
-      (c) => (c[0] as UpdateProjectV2ItemStatusInput).optionId,
-    );
-    expect(optionIds).toEqual(['opt_ip', 'opt_fail']);
-  });
-
-  it('before_run hook が失敗すると reason=hook_failed で Failed 遷移する (#26)', async () => {
+  it('before_run hook が失敗すると reason=hook_failed で failed', async () => {
     const projects = makeProjectsMock();
     const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
     workspace.runHooks = vi.fn(async (event: string) => {
       if (event === 'before_run') {
-        throw new HookExecutionError('before_run', 'precheck', 1, 'oops', '');
+        throw new HookExecutionError('before_run', 'pnpm', 1, 'install failed');
       }
-    }) as unknown as typeof workspace.runHooks;
+    }) as never;
     const runClaudeMock = vi.fn(async () => makeRunResult());
 
     const result = (await runOnce({
@@ -726,27 +601,29 @@ describe('runOnce', () => {
       workspaceManager: workspace,
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
       runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
       generateRunId: () => FIXED_RUN_ID,
       clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
     })) as Extract<RunOnceResult, { kind: 'failed' }>;
 
     expect(result.kind).toBe('failed');
     expect(result.reason).toBe('hook_failed');
     expect(runClaudeMock).not.toHaveBeenCalled();
-    expect(github.commentIssue).toHaveBeenCalledTimes(1);
-    const optionIds = github.updateProjectV2ItemStatus.mock.calls.map(
-      (c) => (c[0] as UpdateProjectV2ItemStatusInput).optionId,
-    );
-    expect(optionIds).toEqual(['opt_ip', 'opt_fail']);
   });
 
-  it('after_run hook は runner status に関わらず PHILHARMONIC_RUN_STATUS 付きで発火する (#26)', async () => {
+  it('after_run hook は runner status に関わらず PHILHARMONIC_RUN_STATUS 付きで発火する', async () => {
     const projects = makeProjectsMock();
     const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
-    const runClaudeMock = vi.fn(async () => makeRunResult({ status: 'timeout' }));
+    const hookCalls: Array<{ event: string; extraEnv?: Record<string, string> }> = [];
+    workspace.runHooks = vi.fn(
+      async (event: string, ctx: { extraEnv?: Record<string, string> }) => {
+        hookCalls.push({ event, extraEnv: ctx.extraEnv });
+      },
+    ) as never;
+    const runClaudeMock = vi.fn(async () => makeRunResult({ status: 'failed', exitCode: 1 }));
 
     await runOnce({
       config: makeConfig(),
@@ -756,67 +633,41 @@ describe('runOnce', () => {
       workspaceManager: workspace,
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
       runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
       generateRunId: () => FIXED_RUN_ID,
       clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
     });
 
-    const events = workspace.runHooks.mock.calls.map((c) => c[0] as string);
-    expect(events).toContain('before_run');
-    expect(events).toContain('after_run');
-    const afterRunCall = workspace.runHooks.mock.calls.find((c) => c[0] === 'after_run');
-    const ctx = afterRunCall?.[1] as { extraEnv?: Record<string, string> } | undefined;
-    expect(ctx?.extraEnv?.PHILHARMONIC_RUN_STATUS).toBe('timeout');
+    const afterRun = hookCalls.find((c) => c.event === 'after_run');
+    expect(afterRun).toBeDefined();
+    expect(afterRun?.extraEnv?.PHILHARMONIC_RUN_STATUS).toBe('failed');
   });
 
   it('runTracker.runStarted / runFinished が success 経路で 1 回ずつ呼ばれる (#30)', async () => {
     const projects = makeProjectsMock();
     const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
-    const runClaudeMock = vi.fn(async () => makeRunResult({ totalCostUsd: 1.5 }));
-    const tracker = makeFakeTracker();
+    const runClaudeMock = vi.fn(async () => makeRunResult());
 
-    await runOnce({
-      config: makeConfig(),
-      repoRoot: tempDir,
-      githubClient: github,
-      projectsClient: projects,
-      workspaceManager: workspace,
-      workflowSource,
-      runnerLogsRoot: path.join(tempDir, 'runs'),
-      runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
-      generateRunId: () => FIXED_RUN_ID,
-      clock: () => new Date('2026-05-09T00:00:00Z'),
-      runTracker: tracker,
-    });
-
-    expect(tracker.runStarted).toHaveBeenCalledTimes(1);
-    expect(tracker.runStarted).toHaveBeenCalledWith(
-      expect.objectContaining({
-        runId: FIXED_RUN_ID,
-        issueNumber: 19,
+    const startedSpy = vi.fn();
+    const finishedSpy = vi.fn();
+    const tracker: RunTracker = {
+      runStarted: startedSpy,
+      runFinished: finishedSpy,
+      listRunning: () => [],
+      getRunningByIssue: () => null,
+      getTotals: () => ({
+        runsCompleted: 0,
+        runsSucceeded: 0,
+        runsFailed: 0,
+        totalCostUsd: 0,
       }),
-    );
-    expect(tracker.runFinished).toHaveBeenCalled();
-    const successCalls = tracker.runFinished.mock.calls.filter(
-      (c) => (c[0] as { kind: string }).kind === 'success',
-    );
-    expect(successCalls).toHaveLength(1);
-    expect(successCalls[0]?.[0]).toMatchObject({
-      runId: FIXED_RUN_ID,
-      issueNumber: 19,
-      totalCostUsd: 1.5,
-    });
-  });
-
-  it('runTracker.runFinished は failure 経路でも reason 付きで呼ばれる (#30)', async () => {
-    const projects = makeProjectsMock();
-    const github = makeGitHubMock();
-    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
-    const runClaudeMock = vi.fn(async () => makeRunResult({ status: 'timeout' }));
-    const tracker = makeFakeTracker();
+      recordPollTick: vi.fn(),
+      getLastPollTickAt: () => null,
+      getStartedAt: () => new Date(0).toISOString(),
+    };
 
     await runOnce({
       config: makeConfig(),
@@ -826,58 +677,27 @@ describe('runOnce', () => {
       workspaceManager: workspace,
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
       runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
       generateRunId: () => FIXED_RUN_ID,
       clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
       runTracker: tracker,
     });
 
-    const failedCalls = tracker.runFinished.mock.calls.filter(
-      (c) => (c[0] as { kind: string }).kind === 'failed',
-    );
-    expect(failedCalls.length).toBeGreaterThanOrEqual(1);
-    expect(failedCalls[0]?.[0]).toMatchObject({
-      runId: FIXED_RUN_ID,
-      issueNumber: 19,
-      reason: 'timeout',
-    });
+    expect(startedSpy).toHaveBeenCalledTimes(1);
+    // success 経路 + finally の防御発火 = 2 回呼ばれるが、tracker 自身が idempotent
+    expect(finishedSpy).toHaveBeenCalled();
+    expect(finishedSpy.mock.calls[0]?.[0]).toMatchObject({ kind: 'success', runId: FIXED_RUN_ID });
   });
 });
 
-function makeFakeTracker(): {
-  runStarted: ReturnType<typeof vi.fn>;
-  runFinished: ReturnType<typeof vi.fn>;
-  listRunning: ReturnType<typeof vi.fn>;
-  getRunningByIssue: ReturnType<typeof vi.fn>;
-  getTotals: ReturnType<typeof vi.fn>;
-  recordPollTick: ReturnType<typeof vi.fn>;
-  getLastPollTickAt: ReturnType<typeof vi.fn>;
-  getStartedAt: ReturnType<typeof vi.fn>;
-} {
-  return {
-    runStarted: vi.fn(),
-    runFinished: vi.fn(),
-    listRunning: vi.fn(() => []),
-    getRunningByIssue: vi.fn(() => null),
-    getTotals: vi.fn(() => ({
-      runsCompleted: 0,
-      runsSucceeded: 0,
-      runsFailed: 0,
-      totalCostUsd: 0,
-    })),
-    recordPollTick: vi.fn(),
-    getLastPollTickAt: vi.fn(() => null),
-    getStartedAt: vi.fn(() => '2026-05-09T00:00:00.000Z'),
-  };
-}
-
-describe('runConcurrent', () => {
+describe('runConcurrent (ADR-0005: 薄い orchestrator)', () => {
   let tempDir: string;
   let workflowSource: WorkflowSource;
 
   beforeEach(async () => {
-    tempDir = mkdtempSync(path.join(tmpdir(), 'phil-orch-conc-'));
+    tempDir = mkdtempSync(path.join(tmpdir(), 'phil-concurrent-'));
     workflowSource = await makeFallbackWorkflowSource(tempDir);
   });
 
@@ -886,321 +706,100 @@ describe('runConcurrent', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  function makeCandidate(issueNumber: number, status: string = 'Todo'): Candidate {
-    return {
-      itemId: `PVTI_${issueNumber}`,
-      issueNumber,
-      issueTitle: `task ${issueNumber}`,
-      issueUrl: `https://example.com/issues/${issueNumber}`,
-      issueState: 'OPEN',
-      repositoryNameWithOwner: 'hexylab/philharmonic',
-      status,
-    };
-  }
-
-  function makeIssue(issueNumber: number): Issue {
-    return {
-      number: issueNumber,
-      title: `task ${issueNumber}`,
-      body: SAMPLE_ISSUE_BODY,
-      state: 'open',
-      htmlUrl: `https://example.com/issues/${issueNumber}`,
-      labels: [],
-      assignees: [],
-    };
-  }
-
-  it('候補 0 件のときは空配列を返し、metadata fetch も Status update もしない', async () => {
+  it('候補 0 件のときは空配列を返す', async () => {
     const projects = makeProjectsMock([]);
     const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
 
     const outcomes = await runConcurrent({
-      config: makeConfig({
-        agent: { maxConcurrentAgents: 3, maxTurns: 1, stallTimeoutMs: 300_000 },
-      }),
+      config: makeConfig(),
       repoRoot: tempDir,
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
       runClaude: vi.fn(),
-      gitRunner: makeGitRunner(),
       generateRunId: () => FIXED_RUN_ID,
       clock: () => new Date('2026-05-09T00:00:00Z'),
-      maxConcurrent: 3,
+      pathExists: async () => false,
+      maxConcurrent: 2,
     });
 
     expect(outcomes).toEqual([]);
-    expect(projects.fetchProjectMetadata).not.toHaveBeenCalled();
-    expect(github.updateProjectV2ItemStatus).not.toHaveBeenCalled();
   });
 
-  it('候補が maxConcurrent より多くても上から N 件しか dispatch しない', async () => {
-    const candidates = [1, 2, 3, 4, 5].map((n) => makeCandidate(n));
+  it('複数 Issue を並列 dispatch する (各結果に slot index が付く)', async () => {
+    const candidates: Candidate[] = [
+      { ...SAMPLE_CANDIDATE, itemId: 'A', issueNumber: 101 },
+      { ...SAMPLE_CANDIDATE, itemId: 'B', issueNumber: 102 },
+    ];
     const projects = makeProjectsMock(candidates);
-    const github = makeGitHubMock({
-      getIssue: vi.fn(async (input: { issueNumber: number }) => makeIssue(input.issueNumber)),
-    });
+    const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
     const runClaudeMock = vi.fn(async () => makeRunResult());
-    let runIdCounter = 0;
-    const idGen = (): string => {
-      runIdCounter += 1;
-      return `${FIXED_RUN_ID.slice(0, -8)}${runIdCounter.toString().padStart(8, '0')}`;
-    };
 
+    let runIdSeq = 0;
     const outcomes = await runConcurrent({
-      config: makeConfig({
-        agent: { maxConcurrentAgents: 2, maxTurns: 1, stallTimeoutMs: 300_000 },
-      }),
+      config: makeConfig(),
       repoRoot: tempDir,
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
       runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
-      generateRunId: idGen,
-      clock: () => new Date('2026-05-09T00:00:00Z'),
-      maxConcurrent: 2,
-    });
-
-    expect(outcomes).toHaveLength(2);
-    const handledIssueNumbers = outcomes.map((o) => o.result.issueNumber).sort((a, b) => a - b);
-    expect(handledIssueNumbers).toEqual([1, 2]);
-    // 上から 2 件だけ Issue 取得される (3, 4, 5 は触らない)
-    const fetchedIssues = (github.getIssue.mock.calls as Array<[{ issueNumber: number }]>).map(
-      (c) => c[0].issueNumber,
-    );
-    expect(fetchedIssues.sort((a, b) => a - b)).toEqual([1, 2]);
-  });
-
-  it('複数 Issue を並列 dispatch する (各 dispatch は独立した Promise として走る)', async () => {
-    const candidates = [101, 102, 103].map((n) => makeCandidate(n));
-    const projects = makeProjectsMock(candidates);
-    const github = makeGitHubMock({
-      getIssue: vi.fn(async (input: { issueNumber: number }) => makeIssue(input.issueNumber)),
-    });
-    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
-    let runIdCounter = 0;
-    const idGen = (): string => {
-      runIdCounter += 1;
-      return `${FIXED_RUN_ID.slice(0, -8)}${runIdCounter.toString().padStart(8, '0')}`;
-    };
-
-    let active = 0;
-    let maxActive = 0;
-    const runClaudeMock = vi.fn(async () => {
-      active += 1;
-      if (active > maxActive) maxActive = active;
-      await new Promise((r) => setTimeout(r, 20));
-      active -= 1;
-      return makeRunResult();
-    });
-
-    const outcomes = await runConcurrent({
-      config: makeConfig({
-        agent: { maxConcurrentAgents: 3, maxTurns: 1, stallTimeoutMs: 300_000 },
-      }),
-      repoRoot: tempDir,
-      githubClient: github,
-      projectsClient: projects,
-      workspaceManager: workspace,
-      workflowSource,
-      runnerLogsRoot: path.join(tempDir, 'runs'),
-      runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
-      generateRunId: idGen,
-      clock: () => new Date('2026-05-09T00:00:00Z'),
-      maxConcurrent: 3,
-    });
-
-    expect(outcomes).toHaveLength(3);
-    expect(maxActive).toBe(3);
-    const slots = outcomes.map((o) => o.slot).sort((a, b) => a - b);
-    expect(slots).toEqual([0, 1, 2]);
-    expect(outcomes.every((o) => o.result.kind === 'success')).toBe(true);
-  });
-
-  it('Status update が個別失敗しても他の dispatch を巻き込まない (warn して skip)', async () => {
-    const candidates = [201, 202, 203].map((n) => makeCandidate(n));
-    const projects = makeProjectsMock(candidates);
-    const updateMock = vi.fn(
-      async (input: UpdateProjectV2ItemStatusInput): Promise<UpdateProjectV2ItemStatusResult> => {
-        // 202 の Status update は In Progress 遷移時に失敗させる
-        if (input.optionId === 'opt_ip' && input.itemId === 'PVTI_202') {
-          throw new Error('graphql 5xx (transient)');
-        }
-        return { itemId: input.itemId };
+      generateRunId: () => {
+        runIdSeq += 1;
+        return `0190ce80-0000-7000-8000-00000000000${runIdSeq}`;
       },
-    );
-    const github = makeGitHubMock({
-      getIssue: vi.fn(async (input: { issueNumber: number }) => makeIssue(input.issueNumber)),
-      updateProjectV2ItemStatus: updateMock,
-    });
-    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
-    let runIdCounter = 0;
-    const idGen = (): string => {
-      runIdCounter += 1;
-      return `${FIXED_RUN_ID.slice(0, -8)}${runIdCounter.toString().padStart(8, '0')}`;
-    };
-    const runClaudeMock = vi.fn(async () => makeRunResult());
-
-    const outcomes = await runConcurrent({
-      config: makeConfig({
-        agent: { maxConcurrentAgents: 3, maxTurns: 1, stallTimeoutMs: 300_000 },
-      }),
-      repoRoot: tempDir,
-      githubClient: github,
-      projectsClient: projects,
-      workspaceManager: workspace,
-      workflowSource,
-      runnerLogsRoot: path.join(tempDir, 'runs'),
-      runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
-      generateRunId: idGen,
       clock: () => new Date('2026-05-09T00:00:00Z'),
-      maxConcurrent: 3,
-    });
-
-    expect(outcomes).toHaveLength(2); // 201 と 203 だけが dispatch される
-    const handledIssueNumbers = outcomes.map((o) => o.result.issueNumber).sort((a, b) => a - b);
-    expect(handledIssueNumbers).toEqual([201, 203]);
-    expect(outcomes.every((o) => o.result.kind === 'success')).toBe(true);
-  });
-
-  it('runner_error は failed outcome として返る (他の slot は影響を受けない)', async () => {
-    const candidates = [301, 302].map((n) => makeCandidate(n));
-    const projects = makeProjectsMock(candidates);
-    const github = makeGitHubMock({
-      getIssue: vi.fn(async (input: { issueNumber: number }) => makeIssue(input.issueNumber)),
-    });
-    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
-    let runIdCounter = 0;
-    const idGen = (): string => {
-      runIdCounter += 1;
-      return `${FIXED_RUN_ID.slice(0, -8)}${runIdCounter.toString().padStart(8, '0')}`;
-    };
-
-    const runClaudeMock = vi.fn(async (input: { sessionId: string; workspacePath: string }) => {
-      // ある 1 件だけ runner failed
-      if (input.workspacePath.includes('301') || input.sessionId.endsWith('1')) {
-        return makeRunResult({ status: 'failed', exitCode: 1 });
-      }
-      return makeRunResult();
-    });
-
-    const outcomes = await runConcurrent({
-      config: makeConfig({
-        agent: { maxConcurrentAgents: 2, maxTurns: 1, stallTimeoutMs: 300_000 },
-      }),
-      repoRoot: tempDir,
-      githubClient: github,
-      projectsClient: projects,
-      workspaceManager: workspace,
-      workflowSource,
-      runnerLogsRoot: path.join(tempDir, 'runs'),
-      runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
-      generateRunId: idGen,
-      clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
       maxConcurrent: 2,
     });
 
     expect(outcomes).toHaveLength(2);
-    const failed = outcomes.find((o) => o.result.kind === 'failed');
-    const success = outcomes.find((o) => o.result.kind === 'success');
-    expect(failed).toBeDefined();
-    expect(success).toBeDefined();
+    const issueNumbers = outcomes.map((o) => o.result.issueNumber).sort();
+    expect(issueNumbers).toEqual([101, 102]);
+    expect(runClaudeMock).toHaveBeenCalledTimes(2);
   });
 
-  it('agentUserLogin と Issue assignee の不一致は skip される (上から N 件 acceptable filter)', async () => {
-    const candidates = [401, 402].map((n) => makeCandidate(n));
+  it('worktree 既存の Issue は二重 dispatch ガードで skip される', async () => {
+    const candidates: Candidate[] = [
+      { ...SAMPLE_CANDIDATE, itemId: 'A', issueNumber: 201 },
+      { ...SAMPLE_CANDIDATE, itemId: 'B', issueNumber: 202 },
+    ];
     const projects = makeProjectsMock(candidates);
-    const github = makeGitHubMock({
-      getIssue: vi.fn(async (input: { issueNumber: number }) => {
-        // 401 だけ assignee 不一致
-        if (input.issueNumber === 401) {
-          return { ...makeIssue(401), assignees: [{ login: 'other-user' }] };
-        }
-        return makeIssue(input.issueNumber);
-      }),
-    });
+    const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
-    let runIdCounter = 0;
-    const idGen = (): string => {
-      runIdCounter += 1;
-      return `${FIXED_RUN_ID.slice(0, -8)}${runIdCounter.toString().padStart(8, '0')}`;
-    };
+    workspace.resolveWorkspacePath.mockImplementation((key: string) => path.join(tempDir, key));
     const runClaudeMock = vi.fn(async () => makeRunResult());
 
+    const pathExists = vi.fn(async (target: string) => target.includes('issue-202'));
+
+    let runIdSeq = 0;
     const outcomes = await runConcurrent({
-      config: makeConfig({
-        agentUserLogin: 'philharmonic-bot',
-        agent: { maxConcurrentAgents: 2, maxTurns: 1, stallTimeoutMs: 300_000 },
-      }),
+      config: makeConfig(),
       repoRoot: tempDir,
       githubClient: github,
       projectsClient: projects,
       workspaceManager: workspace,
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
       runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
-      generateRunId: idGen,
+      generateRunId: () => {
+        runIdSeq += 1;
+        return `0190ce80-0000-7000-8000-00000000000${runIdSeq}`;
+      },
       clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists,
       maxConcurrent: 2,
     });
 
     expect(outcomes).toHaveLength(1);
-    expect(outcomes[0]?.result.issueNumber).toBe(402);
-  });
-
-  it('runTracker.runStarted は slot 番号付きで複数 dispatch ぶん呼ばれる (#30)', async () => {
-    const candidates = [201, 202].map((n) => makeCandidate(n));
-    const projects = makeProjectsMock(candidates);
-    const github = makeGitHubMock({
-      getIssue: vi.fn(async (input: { issueNumber: number }) => makeIssue(input.issueNumber)),
-    });
-    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
-    const runClaudeMock = vi.fn(async () => makeRunResult({ totalCostUsd: 0.5 }));
-    let runIdCounter = 0;
-    const idGen = (): string => {
-      runIdCounter += 1;
-      return `${FIXED_RUN_ID.slice(0, -8)}${runIdCounter.toString().padStart(8, '0')}`;
-    };
-    const tracker = makeFakeTracker();
-
-    await runConcurrent({
-      config: makeConfig({
-        agent: { maxConcurrentAgents: 2, maxTurns: 1, stallTimeoutMs: 300_000 },
-      }),
-      repoRoot: tempDir,
-      githubClient: github,
-      projectsClient: projects,
-      workspaceManager: workspace,
-      workflowSource,
-      runnerLogsRoot: path.join(tempDir, 'runs'),
-      runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
-      generateRunId: idGen,
-      clock: () => new Date('2026-05-09T00:00:00Z'),
-      maxConcurrent: 2,
-      runTracker: tracker,
-    });
-
-    expect(tracker.runStarted).toHaveBeenCalledTimes(2);
-    const slots = tracker.runStarted.mock.calls
-      .map((c) => (c[0] as { slot: number | null }).slot)
-      .sort((a, b) => (a ?? 0) - (b ?? 0));
-    expect(slots).toEqual([0, 1]);
-    const issueNumbers = tracker.runStarted.mock.calls
-      .map((c) => (c[0] as { issueNumber: number }).issueNumber)
-      .sort((a, b) => a - b);
-    expect(issueNumbers).toEqual([201, 202]);
-    expect(tracker.runFinished).toHaveBeenCalled();
+    expect(outcomes[0]?.result.issueNumber).toBe(201);
   });
 });

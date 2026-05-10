@@ -6,7 +6,7 @@ import { Liquid } from 'liquidjs';
 import type { Logger } from '../logger/index.js';
 
 import { WorkflowFileNotFoundError, WorkflowReadError, WorkflowRenderError } from './errors.js';
-import { appendOrchestratorFooter } from './footer.js';
+import { appendOrchestratorFooter, type StatusTransitions } from './footer.js';
 import {
   buildWorkflowVariables,
   renderFallbackPrompt,
@@ -116,6 +116,7 @@ export async function createWorkflowSource(
           templateText: cache.templateText,
           workflowPath,
           variables,
+          statusTransitions: input.statusTransitions,
         });
       }
 
@@ -169,6 +170,7 @@ async function renderTemplate(args: {
   templateText: string;
   workflowPath: string;
   variables: WorkflowVariables;
+  statusTransitions: StatusTransitions;
 }): Promise<string> {
   const { liquid, templateText, workflowPath, variables } = args;
   let parsed;
@@ -183,7 +185,7 @@ async function renderTemplate(args: {
   } catch (err) {
     throw new WorkflowRenderError(workflowPath, err);
   }
-  return appendOrchestratorFooter(rendered);
+  return appendOrchestratorFooter(rendered, args.statusTransitions);
 }
 
 function isNodeENOENT(err: unknown): boolean {

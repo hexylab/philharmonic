@@ -12,9 +12,10 @@ import {
   DEFAULT_LOG_LEVEL,
   DEFAULT_PERMISSION_MODE,
   DEFAULT_POLLING_INTERVAL_MS,
-  DEFAULT_RETRY_MAX_ATTEMPTS,
-  DEFAULT_RETRY_MAX_BACKOFF_MS,
   DEFAULT_STATUS_FIELD,
+  DEFAULT_STATUS_TRANSITION_FAILED,
+  DEFAULT_STATUS_TRANSITION_IN_PROGRESS,
+  DEFAULT_STATUS_TRANSITION_IN_REVIEW,
   DEFAULT_TIMEOUT_MS,
   DEFAULT_WORKFLOW_FILE,
   DEFAULT_WORKSPACE_ROOT,
@@ -36,13 +37,14 @@ describe('configSchema', () => {
       killGracePeriodMs: DEFAULT_KILL_GRACE_PERIOD_MS,
       workspaceRoot: DEFAULT_WORKSPACE_ROOT,
       dispatchStatuses: [...DEFAULT_DISPATCH_STATUSES],
+      statusTransitions: {
+        inProgress: DEFAULT_STATUS_TRANSITION_IN_PROGRESS,
+        inReview: DEFAULT_STATUS_TRANSITION_IN_REVIEW,
+        failed: DEFAULT_STATUS_TRANSITION_FAILED,
+      },
       cleanRetentionDays: DEFAULT_CLEAN_RETENTION_DAYS,
       logLevel: DEFAULT_LOG_LEVEL,
       polling: { intervalMs: DEFAULT_POLLING_INTERVAL_MS },
-      retry: {
-        maxAttempts: DEFAULT_RETRY_MAX_ATTEMPTS,
-        maxBackoffMs: DEFAULT_RETRY_MAX_BACKOFF_MS,
-      },
       agent: {
         maxConcurrentAgents: DEFAULT_AGENT_MAX_CONCURRENT_AGENTS,
         maxTurns: DEFAULT_AGENT_MAX_TURNS,
@@ -335,79 +337,51 @@ describe('configSchema', () => {
     expect(result.success).toBe(false);
   });
 
-  it('retry キーが完全に未指定でもデフォルト値が補完される', () => {
+  it('retry キー (撤廃済) を渡すと strict で拒否する (ADR-0005)', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      retry: { max_attempts: 3 },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('status_transitions が未指定なら default (In Progress / In Review / Failed) が補完される', () => {
     const parsed = configSchema.parse({ owner: 'hexylab', project_number: 1 });
-    expect(parsed.retry).toEqual({
-      maxAttempts: DEFAULT_RETRY_MAX_ATTEMPTS,
-      maxBackoffMs: DEFAULT_RETRY_MAX_BACKOFF_MS,
+    expect(parsed.statusTransitions).toEqual({
+      inProgress: DEFAULT_STATUS_TRANSITION_IN_PROGRESS,
+      inReview: DEFAULT_STATUS_TRANSITION_IN_REVIEW,
+      failed: DEFAULT_STATUS_TRANSITION_FAILED,
     });
   });
 
-  it('retry: {} だけ指定でもデフォルト値が補完される', () => {
+  it('status_transitions の一部だけ指定しても残りはデフォルトで埋まる', () => {
     const parsed = configSchema.parse({
       owner: 'hexylab',
       project_number: 1,
-      retry: {},
+      status_transitions: { in_progress: 'Working' },
     });
-    expect(parsed.retry).toEqual({
-      maxAttempts: DEFAULT_RETRY_MAX_ATTEMPTS,
-      maxBackoffMs: DEFAULT_RETRY_MAX_BACKOFF_MS,
+    expect(parsed.statusTransitions).toEqual({
+      inProgress: 'Working',
+      inReview: DEFAULT_STATUS_TRANSITION_IN_REVIEW,
+      failed: DEFAULT_STATUS_TRANSITION_FAILED,
     });
   });
 
-  it('retry.max_attempts と retry.max_backoff_ms を camelCase で取り出せる', () => {
-    const parsed = configSchema.parse({
-      owner: 'hexylab',
-      project_number: 1,
-      retry: { max_attempts: 5, max_backoff_ms: 60_000 },
-    });
-    expect(parsed.retry).toEqual({ maxAttempts: 5, maxBackoffMs: 60_000 });
-  });
-
-  it('retry.max_attempts は 0 を許可する (自動 retry 無効)', () => {
-    const parsed = configSchema.parse({
-      owner: 'hexylab',
-      project_number: 1,
-      retry: { max_attempts: 0 },
-    });
-    expect(parsed.retry.maxAttempts).toBe(0);
-  });
-
-  it('retry.max_attempts が負数だと検証エラーになる', () => {
+  it('status_transitions の値が空文字なら拒否する', () => {
     const result = configSchema.safeParse({
       owner: 'hexylab',
       project_number: 1,
-      retry: { max_attempts: -1 },
-    });
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(result.error.issues[0]?.path).toEqual(['retry', 'max_attempts']);
-    }
-  });
-
-  it('retry.max_attempts が小数だと検証エラーになる', () => {
-    const result = configSchema.safeParse({
-      owner: 'hexylab',
-      project_number: 1,
-      retry: { max_attempts: 1.5 },
+      status_transitions: { in_progress: '' },
     });
     expect(result.success).toBe(false);
   });
 
-  it('retry.max_backoff_ms が 0 以下だと検証エラーになる', () => {
+  it('status_transitions の未知キーは strict で拒否する', () => {
     const result = configSchema.safeParse({
       owner: 'hexylab',
       project_number: 1,
-      retry: { max_backoff_ms: 0 },
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it('retry 配下の未知キーは strict で拒否する', () => {
-    const result = configSchema.safeParse({
-      owner: 'hexylab',
-      project_number: 1,
-      retry: { max_attempts: 3, jitter_ms: 1000 },
+      status_transitions: { in_progress: 'Working', done: 'Done' },
     });
     expect(result.success).toBe(false);
   });

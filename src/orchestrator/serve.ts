@@ -79,7 +79,6 @@ function logRunResult(logger: Logger, result: RunOnceResult): void {
       logger.info('dispatch success', {
         runId: result.runId,
         issueNumber: result.issueNumber,
-        prNumber: result.prNumber,
         branch: result.branch,
       });
       return;

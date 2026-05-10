@@ -5,18 +5,10 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Config } from '../../src/config/index.js';
-import type {
-  GitHubClient,
-  Issue,
-  IssueComment,
-  OpenPullRequest,
-  PullRequest,
-  UpdateProjectV2ItemStatusInput,
-  UpdateProjectV2ItemStatusResult,
-} from '../../src/github/index.js';
+import type { GitHubClient, Issue, OpenPullRequest } from '../../src/github/index.js';
 import type { Logger } from '../../src/logger/index.js';
 import { recoverInProgress } from '../../src/orchestrator/index.js';
-import type { Candidate, ProjectMetadata, ProjectsClient } from '../../src/projects/index.js';
+import type { Candidate, ProjectsClient } from '../../src/projects/index.js';
 import type { RunResult } from '../../src/runner/index.js';
 import type { WorkflowSource } from '../../src/workflow/index.js';
 import type {
@@ -30,15 +22,11 @@ import { makeFallbackWorkflowSource } from '../_helpers/workflow.js';
 
 type GitHubMock = GitHubClient & {
   getIssue: ReturnType<typeof vi.fn>;
-  commentIssue: ReturnType<typeof vi.fn>;
-  createPullRequest: ReturnType<typeof vi.fn>;
   listOpenPullRequests: ReturnType<typeof vi.fn>;
-  updateProjectV2ItemStatus: ReturnType<typeof vi.fn>;
 };
 
 type ProjectsMock = ProjectsClient & {
   fetchProjectCandidates: ReturnType<typeof vi.fn>;
-  fetchProjectMetadata: ReturnType<typeof vi.fn>;
 };
 
 type WorkspaceMock = WorkspaceManager & {
@@ -50,19 +38,7 @@ type WorkspaceMock = WorkspaceManager & {
 
 const FIXED_RUN_ID = '0190ce80-0000-7000-8000-000000000023';
 
-const SAMPLE_METADATA: ProjectMetadata = {
-  projectId: 'PVT_1',
-  statusFieldId: 'PVTSSF_status',
-  statusOptions: [
-    { id: 'opt_todo', name: 'Todo' },
-    { id: 'opt_ip', name: 'In Progress' },
-    { id: 'opt_ir', name: 'In Review' },
-    { id: 'opt_fail', name: 'Failed' },
-    { id: 'opt_done', name: 'Done' },
-  ],
-};
-
-const SAMPLE_ISSUE_BODY = `## Goal\n\nGoal\n\n## Constraints\n\n- c1\n\n## Acceptance Criteria\n\n- [ ] AC1\n`;
+const SAMPLE_ISSUE_BODY = '## Description\n\nSome content.\n';
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -70,17 +46,20 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     projectNumber: 1,
     baseBranch: 'main',
     statusField: 'Status',
+    workflowFile: 'WORKFLOW.md',
     agentUserLogin: null,
     permissionMode: 'auto',
     timeoutMs: 30 * 60 * 1000,
     killGracePeriodMs: 5_000,
     workspaceRoot: '.philharmonic/worktrees',
     dispatchStatuses: ['Todo'],
+    statusTransitions: { inProgress: 'In Progress', inReview: 'In Review', failed: 'Failed' },
     cleanRetentionDays: 7,
     logLevel: 'info',
     polling: { intervalMs: 30_000 },
-    retry: { maxAttempts: 3, maxBackoffMs: 600_000 },
     agent: { maxConcurrentAgents: 1, maxTurns: 1, stallTimeoutMs: 300_000 },
+    hooks: { afterCreate: [], beforeRun: [], afterRun: [], beforeRemove: [] },
+    server: null,
     ...overrides,
   };
 }
@@ -119,6 +98,7 @@ function makeRunResult(overrides: Partial<RunResult> = {}): RunResult {
     durationMs: 1_234,
     durationApiMs: 567,
     numTurns: 3,
+    turns: 1,
     sessionId: FIXED_RUN_ID,
     resultSubtype: 'success',
     stopReason: 'end_turn',
@@ -136,40 +116,22 @@ function makeRunResult(overrides: Partial<RunResult> = {}): RunResult {
 function makeGitHubMock(overrides: Partial<GitHubMock> = {}): GitHubMock {
   return {
     getIssue: (overrides.getIssue ?? vi.fn(async () => makeIssue())) as ReturnType<typeof vi.fn>,
-    commentIssue: (overrides.commentIssue ??
-      vi.fn(async (): Promise<IssueComment> => ({ id: 1, htmlUrl: 'u' }))) as ReturnType<
-      typeof vi.fn
-    >,
-    createPullRequest: (overrides.createPullRequest ??
-      vi.fn(
-        async (): Promise<PullRequest> => ({
-          number: 99,
-          htmlUrl: 'https://example.com/pr/99',
-          draft: false,
-        }),
-      )) as ReturnType<typeof vi.fn>,
     listOpenPullRequests: (overrides.listOpenPullRequests ??
       vi.fn(async (): Promise<OpenPullRequest[]> => [])) as ReturnType<typeof vi.fn>,
-    updateProjectV2ItemStatus: (overrides.updateProjectV2ItemStatus ??
-      vi.fn(
-        async (
-          input: UpdateProjectV2ItemStatusInput,
-        ): Promise<UpdateProjectV2ItemStatusResult> => ({
-          itemId: input.itemId,
-        }),
-      )) as ReturnType<typeof vi.fn>,
   };
 }
 
-function makeProjectsMock(
-  candidates: Candidate[],
-  metadata: ProjectMetadata = SAMPLE_METADATA,
-): ProjectsMock {
+function makeProjectsMock(candidates: Candidate[]): ProjectsMock {
   return {
     fetchProjectCandidates: vi.fn(async () => candidates),
-    fetchProjectMetadata: vi.fn(async () => metadata),
   };
 }
+
+/**
+ * 何もしない gitRunner (実 git を呼ばずに fetch / push 等を pass-through する)。
+ * dispatchSelected が `git fetch` を呼ぶ #62 以降のテストで必須。
+ */
+const noopGitRunner: GitRunner = async () => ({ stdout: '', stderr: '' });
 
 function makeWorkspaceMock(workspacePath: string): WorkspaceMock {
   return {
@@ -184,14 +146,6 @@ function makeWorkspaceMock(workspacePath: string): WorkspaceMock {
     ),
     cleanupWorkspace: vi.fn(async (): Promise<void> => undefined),
     runHooks: vi.fn(async (): Promise<void> => undefined),
-  };
-}
-
-function makeGitRunner(): GitRunner {
-  return async (args) => {
-    const command = args[0];
-    if (command === 'rev-list') return { stdout: '1\n', stderr: '' };
-    return { stdout: '', stderr: '' };
   };
 }
 
@@ -217,7 +171,7 @@ function makeLogger(): FakeLogger {
   return fake;
 }
 
-describe('recoverInProgress', () => {
+describe('recoverInProgress (ADR-0005: agent 委譲)', () => {
   let tempDir: string;
   let workflowSource: WorkflowSource;
 
@@ -231,7 +185,7 @@ describe('recoverInProgress', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('In Progress 0 件のときは fetchProjectMetadata を呼ばずに完了する', async () => {
+  it('In Progress 0 件のときは早期に完了する', async () => {
     const projects = makeProjectsMock([]);
     const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
@@ -246,14 +200,13 @@ describe('recoverInProgress', () => {
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       signal: new AbortController().signal,
+      gitRunner: noopGitRunner,
       runClaude: vi.fn(),
-      gitRunner: makeGitRunner(),
       logger,
     });
 
     expect(summary.inProgressCount).toBe(0);
     expect(summary.processed).toBe(0);
-    expect(projects.fetchProjectMetadata).not.toHaveBeenCalled();
     expect(workspace.createWorkspace).not.toHaveBeenCalled();
     expect(logger.info).toHaveBeenCalledWith('recovery started', { inProgressCount: 0 });
   });
@@ -279,8 +232,8 @@ describe('recoverInProgress', () => {
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       signal: new AbortController().signal,
+      gitRunner: noopGitRunner,
       runClaude: vi.fn(),
-      gitRunner: makeGitRunner(),
       logger,
       pathExists: async () => false,
     });
@@ -335,18 +288,14 @@ describe('recoverInProgress', () => {
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       signal: new AbortController().signal,
+      gitRunner: noopGitRunner,
       runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
       logger,
       pathExists: async () => true,
       generateRunId: () => FIXED_RUN_ID,
       clock: () => new Date('2026-05-09T00:00:00Z'),
     });
 
-    // force reset: cleanup → create の順
-    // cleanup には deleteBranch=true と branch=feature/23-<slug> が渡される
-    // (branch を消さないと後段の createWorkspace({ reuse: false }) が branch_already_exists で
-    //  失敗するため、recovery 自体が破綻する。spec: orchestration-mvp.md 参照)
     expect(cleanupOrder[0]).toBe('cleanup:issue-23:true');
     expect(cleanupCalls[0]).toMatchObject({
       taskKey: 'issue-23',
@@ -354,12 +303,6 @@ describe('recoverInProgress', () => {
       branch: expect.stringMatching(/^feature\/23-/),
     });
     expect(cleanupOrder.slice(1)).toContain('create:issue-23');
-    expect(github.createPullRequest).toHaveBeenCalledTimes(1);
-    // recovery では Todo→In Progress 遷移は呼ばない (= In Review への 1 回のみ)
-    expect(github.updateProjectV2ItemStatus).toHaveBeenCalledTimes(1);
-    expect(github.updateProjectV2ItemStatus).toHaveBeenCalledWith(
-      expect.objectContaining({ optionId: 'opt_ir' }),
-    );
     expect(summary).toMatchObject({
       inProgressCount: 1,
       processed: 1,
@@ -369,7 +312,7 @@ describe('recoverInProgress', () => {
     });
   });
 
-  it('worktree が無ければそのまま dispatchSelected が走る (cleanup は呼ばない)', async () => {
+  it('worktree が無ければそのまま dispatchSelected が走る (cleanup は success 経路の 1 回のみ)', async () => {
     const projects = makeProjectsMock([makeCandidate({ issueNumber: 23 })]);
     const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'issue-23'));
@@ -385,33 +328,29 @@ describe('recoverInProgress', () => {
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       signal: new AbortController().signal,
+      gitRunner: noopGitRunner,
       runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
       logger,
       pathExists: async () => false,
       generateRunId: () => FIXED_RUN_ID,
       clock: () => new Date('2026-05-09T00:00:00Z'),
     });
 
-    expect(workspace.cleanupWorkspace).toHaveBeenCalledTimes(1); // 8.4 success cleanup のみ
-    // 8.4 cleanup は deleteBranch=true で呼ばれる (= force reset 用ではない)
+    // success 経路で 1 回 cleanup される (deleteBranch=true)
+    expect(workspace.cleanupWorkspace).toHaveBeenCalledTimes(1);
     expect(workspace.cleanupWorkspace).toHaveBeenCalledWith(
       expect.objectContaining({ deleteBranch: true }),
     );
     expect(workspace.createWorkspace).toHaveBeenCalledTimes(1);
-    expect(github.createPullRequest).toHaveBeenCalledTimes(1);
     expect(summary.succeeded).toBe(1);
   });
 
-  it('dispatchSelected が failed を返したら markFailed まで通って次 item に進む', async () => {
+  it('dispatchSelected が failed を返したら次 item に進む (Status flip は agent 任せ)', async () => {
     const projects = makeProjectsMock([
       makeCandidate({ itemId: 'PVTI_a', issueNumber: 23 }),
       makeCandidate({ itemId: 'PVTI_b', issueNumber: 24 }),
     ]);
-    const github = makeGitHubMock({
-      // Issue 23 は runner エラーになるよう仕込む
-      // → runClaude 側で kind=failed を返す
-    });
+    const github = makeGitHubMock();
     const workspace = makeWorkspaceMock(path.join(tempDir, 'issue-23'));
     const logger = makeLogger();
     let call = 0;
@@ -437,8 +376,8 @@ describe('recoverInProgress', () => {
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       signal: new AbortController().signal,
+      gitRunner: noopGitRunner,
       runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
       logger,
       pathExists: async () => false,
       generateRunId: () => FIXED_RUN_ID,
@@ -448,13 +387,6 @@ describe('recoverInProgress', () => {
     expect(summary.processed).toBe(2);
     expect(summary.succeeded).toBe(1);
     expect(summary.failed).toBe(1);
-    // 失敗側: Issue コメント + Status Failed が呼ばれる
-    expect(github.commentIssue).toHaveBeenCalledTimes(1);
-    expect(
-      github.updateProjectV2ItemStatus.mock.calls.some(
-        (c) => (c[0] as UpdateProjectV2ItemStatusInput).optionId === 'opt_fail',
-      ),
-    ).toBe(true);
   });
 
   it('signal が aborted になったら次 item に進まない', async () => {
@@ -469,7 +401,6 @@ describe('recoverInProgress', () => {
     const ac = new AbortController();
     workspace.resolveWorkspacePath.mockImplementation((k: string) => path.join(tempDir, k));
     workspace.createWorkspace.mockImplementation(async (input: CreateWorkspaceInput) => {
-      // 1 件目の dispatch 中に abort
       ac.abort();
       return {
         taskKey: input.taskKey,
@@ -489,43 +420,15 @@ describe('recoverInProgress', () => {
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       signal: ac.signal,
+      gitRunner: noopGitRunner,
       runClaude: runClaudeMock,
-      gitRunner: makeGitRunner(),
       logger,
       pathExists: async () => false,
       generateRunId: () => FIXED_RUN_ID,
       clock: () => new Date('2026-05-09T00:00:00Z'),
     });
 
-    expect(summary.processed).toBe(1); // 2 件目には進まない
-    expect(github.createPullRequest).toHaveBeenCalledTimes(1);
-  });
-
-  it('Project metadata 取得失敗は BootstrapError で再 throw する', async () => {
-    const projects = makeProjectsMock([makeCandidate()]);
-    projects.fetchProjectMetadata.mockRejectedValue(new Error('graphql down'));
-    const github = makeGitHubMock();
-    const workspace = makeWorkspaceMock(path.join(tempDir, 'issue-23'));
-    const logger = makeLogger();
-
-    await expect(
-      recoverInProgress({
-        config: makeConfig(),
-        repoRoot: tempDir,
-        githubClient: github,
-        projectsClient: projects,
-        workspaceManager: workspace,
-        workflowSource,
-        runnerLogsRoot: path.join(tempDir, 'runs'),
-        signal: new AbortController().signal,
-        runClaude: vi.fn(),
-        gitRunner: makeGitRunner(),
-        logger,
-      }),
-    ).rejects.toMatchObject({
-      name: 'BootstrapError',
-      reason: 'metadata_load_failed',
-    });
+    expect(summary.processed).toBe(1);
   });
 
   it('Issue が closed 状態なら skip して次に進む', async () => {
@@ -545,8 +448,8 @@ describe('recoverInProgress', () => {
       workflowSource,
       runnerLogsRoot: path.join(tempDir, 'runs'),
       signal: new AbortController().signal,
+      gitRunner: noopGitRunner,
       runClaude: vi.fn(),
-      gitRunner: makeGitRunner(),
       logger,
       pathExists: async () => false,
     });

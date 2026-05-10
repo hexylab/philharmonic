@@ -3,16 +3,9 @@ export type FailureReason =
   | 'runner_error'
   | 'timeout'
   | 'stalled'
-  | 'no_changes'
-  | 'push'
-  | 'pr_create'
   | 'hook_failed';
 
-export type BootstrapErrorReason =
-  | 'github_token_missing'
-  | 'config_load_failed'
-  | 'metadata_load_failed'
-  | 'status_transition_to_in_progress_failed';
+export type BootstrapErrorReason = 'github_token_missing' | 'config_load_failed';
 
 export class BootstrapError extends Error {
   public readonly code = 'orchestrator_bootstrap_error';

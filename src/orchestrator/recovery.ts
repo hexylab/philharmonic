@@ -9,17 +9,10 @@ import type { RunTracker } from '../server/index.js';
 import type { WorkflowSource } from '../workflow/index.js';
 import type { GitRunner, WorkspaceManager } from '../workspace/index.js';
 
-import { BootstrapError } from './errors.js';
 import { parseRepositoryNameWithOwner } from './repository.js';
-import {
-  dispatchSelected,
-  type ResolveAttempt,
-  type RunOnceClock,
-  type RunOnceResult,
-} from './run.js';
+import { dispatchSelected, type RunOnceClock, type RunOnceResult } from './run.js';
 import { isAcceptableIssue } from './select.js';
 import { buildIssueSlug } from './slug.js';
-import { resolveStatusOptions } from './status.js';
 
 const RECOVERY_STATUS = 'In Progress';
 
@@ -32,10 +25,11 @@ export type RecoveryDeps = {
   workflowSource: WorkflowSource;
   runnerLogsRoot: string;
   signal: AbortSignal;
-  remote?: string;
-  resolveAttempt?: ResolveAttempt;
   runClaude?: typeof runClaude;
+  /** workspace 作成前に `git fetch <remote> <baseBranch>` を実行する git runner */
   gitRunner?: GitRunner;
+  /** fetch 先 remote 名 (default: `origin`) */
+  remote?: string;
   logger: Logger;
   clock?: RunOnceClock;
   generateRunId?: () => string;
@@ -62,13 +56,15 @@ export type RecoverySummary = {
  * - 残っていなければ新規 worktree
  * してから {@link dispatchSelected} を呼ぶ。
  *
+ * ADR-0005 で Status 遷移は agent 側に移ったため、recovery 経路でも orchestrator は
+ * Status を書き換えない。同 Item は agent が再度 prompt 受領時に flip 判断する。
+ *
  * spec: docs/specs/orchestration-mvp.md#tracker-driven-recovery-serve-起動時
  */
 export async function recoverInProgress(deps: RecoveryDeps): Promise<RecoverySummary> {
   const { logger, signal } = deps;
   const exists = deps.pathExists ?? defaultPathExists;
 
-  // In Progress 全件取得
   const candidates = await deps.projectsClient.fetchProjectCandidates({
     owner: deps.config.owner,
     projectNumber: deps.config.projectNumber,
@@ -92,19 +88,6 @@ export async function recoverInProgress(deps: RecoveryDeps): Promise<RecoverySum
     logger.info('recovery completed', summary);
     return summary;
   }
-
-  // Project metadata は recovery 全体で 1 回だけ取得する
-  let metadataResolved: Awaited<ReturnType<typeof resolveMetadata>>;
-  try {
-    metadataResolved = await resolveMetadata(deps);
-  } catch (error) {
-    throw new BootstrapError(
-      'metadata_load_failed',
-      `Recovery: Project metadata の取得に失敗しました: ${describeError(error)}`,
-      { cause: error },
-    );
-  }
-  const { projectId, statusFieldId, statusOptions } = metadataResolved;
 
   for (const candidate of inProgress) {
     if (signal.aborted) break;
@@ -149,7 +132,7 @@ export async function recoverInProgress(deps: RecoveryDeps): Promise<RecoverySum
       continue;
     }
 
-    // 2. Issue 取得 (本文 / state / labels / assignees)
+    // 2. Issue 取得
     let issue;
     try {
       issue = await deps.githubClient.getIssue({
@@ -178,7 +161,6 @@ export async function recoverInProgress(deps: RecoveryDeps): Promise<RecoverySum
       agentUserLogin: deps.config.agentUserLogin,
     });
     if (!acceptable.ok) {
-      // 既に In Progress まで進んだ Item を skip するのは過剰なので info 留めにとどめ、recover は試みる
       logger.info(`recovery: agent acceptance check failed (${acceptable.reason})`, {
         issueNumber: candidate.issueNumber,
       });
@@ -200,12 +182,6 @@ export async function recoverInProgress(deps: RecoveryDeps): Promise<RecoverySum
     }
 
     if (workspaceExisted) {
-      // 強制 reset: 既存 worktree とローカル branch を削除してから新規作成する。
-      // branch を消さないと dispatchSelected の createWorkspace({ reuse: false }) が
-      // branch_already_exists で失敗してしまう。
-      // NOTE: Issue title が前回 run 以降に変更されていた場合、再計算 slug が実体と
-      //       食い違い branch 削除が空振りすることがある。MVP では title 不変前提
-      //       (orchestration-mvp.md の Open Question に記載)。
       const recoveryBranch = `feature/${candidate.issueNumber}-${buildIssueSlug(candidate.issueTitle)}`;
       logger.info('recovery worktree force reset', {
         issueNumber: candidate.issueNumber,
@@ -236,17 +212,12 @@ export async function recoverInProgress(deps: RecoveryDeps): Promise<RecoverySum
         candidate,
         issue,
         repository,
-        projectId,
-        statusFieldId,
-        statusOptions,
-        githubClient: deps.githubClient,
         workspaceManager: deps.workspaceManager,
         workflowSource: deps.workflowSource,
         runnerLogsRoot: deps.runnerLogsRoot,
-        remote: deps.remote,
-        resolveAttempt: deps.resolveAttempt,
         runClaude: deps.runClaude,
         gitRunner: deps.gitRunner,
+        remote: deps.remote,
         baseLogger: logger,
         clock: deps.clock,
         generateRunId: deps.generateRunId,
@@ -270,23 +241,6 @@ export async function recoverInProgress(deps: RecoveryDeps): Promise<RecoverySum
   return summary;
 }
 
-async function resolveMetadata(deps: RecoveryDeps): Promise<{
-  projectId: string;
-  statusFieldId: string;
-  statusOptions: ReturnType<typeof resolveStatusOptions>;
-}> {
-  const metadata = await deps.projectsClient.fetchProjectMetadata({
-    owner: deps.config.owner,
-    projectNumber: deps.config.projectNumber,
-    statusFieldName: deps.config.statusField,
-  });
-  return {
-    projectId: metadata.projectId,
-    statusFieldId: metadata.statusFieldId,
-    statusOptions: resolveStatusOptions(metadata),
-  };
-}
-
 function logRunResult(
   logger: Logger,
   candidate: Candidate,
@@ -296,7 +250,6 @@ function logRunResult(
     logger.info('recovery dispatch success', {
       issueNumber: candidate.issueNumber,
       runId: result.runId,
-      prNumber: result.prNumber,
     });
     return;
   }

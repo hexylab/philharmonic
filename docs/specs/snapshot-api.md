@@ -6,8 +6,8 @@
 
 ## 関連
 
-- 関連 Issue: #30 (Refs: #21, #28)
-- 設計判断: [ADR-0004 Snapshot HTTP API は Node 標準 http で loopback 固定で公開する](../adr/0004-snapshot-http-api.md)
+- 関連 Issue: #30 (Refs: #21, #28), #62 (`retrying` セクション撤廃)
+- 設計判断: [ADR-0004 Snapshot HTTP API は Node 標準 http で loopback 固定で公開する](../adr/0004-snapshot-http-api.md), [ADR-0005 薄い orchestrator + agent 委譲型 hybrid](../adr/0005-thin-orchestrator-agent-delegation.md)
 - 関連 spec: [serve-daemon.md](./serve-daemon.md), [config-schema.md](./config-schema.md), [observability.md](./observability.md), [orchestration-mvp.md](./orchestration-mvp.md)
 
 ## 要件
@@ -55,19 +55,9 @@ type Totals = {
 
 各 dispatch (`dispatchSelected`) は開始時に `tracker.runStarted(...)` を、終了時 (success / failure / 想定外 throw) に `tracker.runFinished(...)` を呼ぶ。`runFinished` は **runId が running set に居なければ no-op** (べき等)。
 
-### `RetryStateEntry` (既存)
+### `RetryStateEntry` の撤廃 (ADR-0005)
 
-`.philharmonic/retry-state.json` に永続化されている自動 retry 状態 (#22)。本 API では `RetryScheduler.listEntries()` / `getEntry(issueNumber)` で読み出す。
-
-```ts
-type RetryStateEntry = {
-  issueNumber: number;
-  attempts: number;
-  lastFailedAt: string;
-  nextAttemptAt: string;
-  lastReason: FailureReason;
-};
-```
+旧仕様 (#22) では `.philharmonic/retry-state.json` を読んで `retrying` 配列を返していたが、ADR-0005 で自動 retry 機能ごと撤廃された。本 API では `retrying` 配列を返さない / 出さない。Issue 別 endpoint (`/api/v1/<issue>`) でも `retrying` フィールドは常に省略される。
 
 ### `WakeController`
 
@@ -98,15 +88,6 @@ type RetryStateEntry = {
       "slot": 0
     }
   ],
-  "retrying": [
-    {
-      "issue_number": 99,
-      "attempts": 1,
-      "last_failed_at": "2026-05-09T00:00:00.000Z",
-      "next_attempt_at": "2026-05-09T00:00:10.000Z",
-      "last_reason": "runner_error"
-    }
-  ],
   "totals": {
     "runs_completed": 12,
     "runs_succeeded": 10,
@@ -128,12 +109,12 @@ type RetryStateEntry = {
 | `running[].branch`       | string           | feature ブランチ名                                                                  |
 | `running[].started_at`   | ISO 8601         | `dispatchSelected` の開始時刻                                                       |
 | `running[].slot`         | integer \| null  | 並列 dispatch (#24) の slot index。`max_concurrent_agents == 1` の互換動作なら null |
-| `retrying`               | array            | retry-state にある Issue (issue number 昇順)                                        |
-| `retrying[].*`           | -                | `.philharmonic/retry-state.json` の内容を snake_case 化したもの                     |
 | `totals.runs_completed`  | integer          | daemon プロセス起動以降に完了 (success+failed) した run 数                          |
 | `totals.runs_succeeded`  | integer          | 成功した run 数                                                                     |
 | `totals.runs_failed`     | integer          | 失敗した run 数                                                                     |
 | `totals.total_cost_usd`  | number           | runner からの `total_cost_usd` の総和 (null は 0 として扱う)                        |
+
+`retrying` 配列は ADR-0005 で撤廃。PR 番号 (`pr_number`) は orchestrator が知れなくなったため `running` entry にも含めない。
 
 **累計の集計範囲**: 「daemon プロセス起動以降」のみを保証する。再起動を跨いだ全期間累計は本 API の範囲外 (詳細: ADR-0004 「daemon-lifetime の in-memory tracker を新設する」)。
 
@@ -146,20 +127,19 @@ type RetryStateEntry = {
 ```json
 {
   "issue_number": 42,
-  "running": { ... } | null,
-  "retrying": { ... } | null
+  "running": { ... } | null
 }
 ```
 
-`running` / `retrying` のフィールド構造は `/api/v1/state` の各要素と同じ。
+`running` のフィールド構造は `/api/v1/state` の各要素と同じ。
 
 | 状況                                    | レスポンス                                                                                 |
 | --------------------------------------- | ------------------------------------------------------------------------------------------ |
-| 該当 Issue が in-flight                 | `running` に entry / `retrying` は null                                                    |
-| 該当 Issue が retry 待ち                | `running` は null / `retrying` に entry                                                    |
-| 両方                                    | 両方とも entry (= 直前の retry を消化中、in-flight 完了で state から消える)                |
-| どちらにもない                          | **404 Not Found** + `{"error":"not_found","issue_number":N}`                               |
+| 該当 Issue が in-flight                 | `running` に entry                                                                         |
+| 該当 Issue が in-flight でない          | **404 Not Found** + `{"error":"not_found","issue_number":N}`                               |
 | `<issue_number>` が `0` / 負数 / 非整数 | **400 Bad Request** + `{"error":"invalid_issue_number"}` (regex 不一致は 404 fall-through) |
+
+`retrying` フィールドは ADR-0005 で撤廃された。
 
 理由: project に存在する全 Issue 一覧を返すには Project metadata fetch が必要 (= rate limit を消費する)。本 API は read-only / 軽量を主眼としており、in-memory にあるものだけを返すのが合理的。
 

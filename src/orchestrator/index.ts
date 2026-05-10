@@ -1,12 +1,5 @@
 export { BootstrapError, type BootstrapErrorReason, type FailureReason } from './errors.js';
-export {
-  buildFailureCommentBody,
-  buildPullRequestBody,
-  summarizeRunResult,
-  type FailureCommentInput,
-  type PullRequestBodyInput,
-} from './format.js';
-export { countCommitsAhead, fetchBaseBranch, pushBranch } from './git.js';
+export { fetchBaseBranch } from './git.js';
 export {
   InvalidRepositoryError,
   parseRepositoryNameWithOwner,
@@ -19,18 +12,12 @@ export {
   runOnce,
   type ConcurrentDispatchOutcome,
   type DispatchSelectedDeps,
-  type ResolveAttempt,
   type RunConcurrentDeps,
   type RunOnceClock,
   type RunOnceDeps,
   type RunOnceResult,
 } from './run.js';
 export { recoverInProgress, type RecoveryDeps, type RecoverySummary } from './recovery.js';
-export {
-  promoteRetryReady,
-  type PromoteRetryReadyDeps,
-  type PromoteRetryReadySummary,
-} from './retry-promote.js';
 export {
   abortableSleep,
   serveLoop,
@@ -39,10 +26,14 @@ export {
   type ServeLoopSleep,
 } from './serve.js';
 export {
+  checkDispatchGuard,
   DEFAULT_DISPATCH_STATUSES,
   DEFAULT_SKIP_LABEL,
   isAcceptableIssue,
   selectFirstByStatus,
+  type CheckDispatchGuardResult,
+  type DispatchGuard,
+  type DispatchGuardSkipReason,
   type IsAcceptableIssueInput,
   type IsAcceptableIssueResult,
   type IssueAssigneeView,
@@ -50,10 +41,3 @@ export {
   type SelectCandidateInput,
 } from './select.js';
 export { buildIssueSlug, FALLBACK_SLUG } from './slug.js';
-export {
-  MissingStatusOptionError,
-  REQUIRED_STATUS_NAMES,
-  resolveStatusOptions,
-  type StatusName,
-  type StatusOptionMap,
-} from './status.js';

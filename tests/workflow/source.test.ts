@@ -34,8 +34,9 @@ function baseInput(overrides: Partial<RenderInput> = {}): RenderInput {
     issueUrl: 'https://github.com/hexylab/philharmonic/issues/27',
     issueBody: ISSUE_BODY,
     workspacePath: '/tmp/.philharmonic/worktrees/issue-27',
-    attempt: 1,
     runId: '01900000-0000-7000-8000-000000000000',
+    project: { owner: 'hexylab', number: 1, statusField: 'Status' },
+    statusTransitions: { inProgress: 'In Progress', inReview: 'In Review', failed: 'Failed' },
     ...overrides,
   };
 }
@@ -59,12 +60,11 @@ describe('createWorkflowSource', () => {
       [
         '# {{ repository.owner }}/{{ repository.name }} #{{ issue.number }}',
         '',
-        'Attempt: {{ attempt }}',
         'Run: {{ run_id }}',
         '',
-        '## Goal (from issue)',
+        '## Issue body (full)',
         '',
-        '{{ issue.goal }}',
+        '{{ issue.body }}',
       ].join('\n'),
       'utf8',
     );
@@ -72,37 +72,15 @@ describe('createWorkflowSource', () => {
     try {
       const prompt = await source.render(baseInput());
       expect(prompt).toContain('# hexylab/philharmonic #27');
-      expect(prompt).toContain('Attempt: 1');
       expect(prompt).toContain('Run: 01900000-0000-7000-8000-000000000000');
       expect(prompt).toContain('WORKFLOW.md テンプレートを上位レイヤとして取り扱う');
-      expect(prompt.trimEnd().endsWith('形式で commit すること')).toBe(true);
-      expect(prompt).toContain('## Orchestrator からの追加制約');
-      expect(prompt).toContain('`git push` を実行しないこと');
-      expect(prompt).toContain('Pull Request を作成しないこと');
-      expect(prompt).toContain('GitHub token を期待しないこと');
+      expect(prompt).toContain('## Orchestrator からの追加指示');
+      expect(prompt).toContain('Project Status を `In Progress` に遷移');
+      expect(prompt).toContain('`gh pr create`');
+      expect(prompt).toContain('Project Status を `In Review` に遷移');
+      expect(prompt).toContain('Project Status を `Failed` に遷移');
+      expect(prompt).toContain('Conventional Commits');
       expect(prompt.endsWith('\n')).toBe(true);
-    } finally {
-      await source.close();
-    }
-  });
-
-  it('attempt > 1 の if 分岐が描画される', async () => {
-    await writeFile(
-      workflowPath,
-      [
-        'attempt={{ attempt }}',
-        '{% if attempt > 1 %}retry-notice{% else %}first-try{% endif %}',
-      ].join('\n'),
-      'utf8',
-    );
-    const source = await createWorkflowSource({ workflowPath, fallbackOnMissing: true });
-    try {
-      const first = await source.render(baseInput({ attempt: 1 }));
-      const second = await source.render(baseInput({ attempt: 2 }));
-      expect(first).toContain('first-try');
-      expect(first).not.toContain('retry-notice');
-      expect(second).toContain('retry-notice');
-      expect(second).not.toContain('first-try');
     } finally {
       await source.close();
     }
@@ -115,7 +93,6 @@ describe('createWorkflowSource', () => {
       const before = await source.render(baseInput());
       expect(before).toContain('# v1 27');
 
-      // mtime が確実に変わるよう短く待機
       await new Promise((resolve) => setTimeout(resolve, 10));
       await writeFile(workflowPath, '# v2 {{ issue.title }}\n', 'utf8');
 
@@ -134,9 +111,10 @@ describe('createWorkflowSource', () => {
     });
     try {
       const prompt = await source.render(baseInput());
-      // buildPrompt の出力には Definition of Done セクションが含まれる
+      // buildPrompt の出力には Context / Issue 本文 / agent 委譲フッタが含まれる
       expect(prompt).toContain('# Context');
-      expect(prompt).toContain('# Definition of Done (Runner 向け)');
+      expect(prompt).toContain('# Issue 本文');
+      expect(prompt).toContain('## Orchestrator からの追加指示');
       expect(prompt).toContain('Conventional Commits');
     } finally {
       await source.close();
@@ -162,14 +140,12 @@ describe('createWorkflowSource', () => {
     }
   });
 
-  it('Issue body の必須セクション欠損時はテンプレート評価前に MissingPromptSectionError が伝播する', async () => {
-    await writeFile(workflowPath, '{{ issue.goal }}\n', 'utf8');
+  it('Issue body が空文字でもテンプレート評価は失敗しない (構造化セクション必須は撤廃)', async () => {
+    await writeFile(workflowPath, '{{ issue.body }}\n', 'utf8');
     const source = await createWorkflowSource({ workflowPath, fallbackOnMissing: true });
     try {
-      const broken = baseInput({
-        issueBody: '## Goal\n\n## Acceptance Criteria\n\n- [ ] x\n',
-      });
-      await expect(source.render(broken)).rejects.toThrow(/missing/);
+      const prompt = await source.render(baseInput({ issueBody: '' }));
+      expect(prompt).toContain('## Orchestrator からの追加指示');
     } finally {
       await source.close();
     }

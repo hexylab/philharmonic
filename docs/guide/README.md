@@ -19,34 +19,37 @@ Philharmonic の基本の使いかたは `philharmonic serve` の常駐デーモ
 ```
    [Project: Todo]
         │
-        │ ① 候補 Issue を 1 件選ぶ (なければ no candidate / 次の tick へ)
+        │ Orchestrator が候補を pick → worktree 作成 → Claude Code 起動
         ▼
-   [Project: In Progress]
+   [Agent in flight (Claude Code in worktree)]
         │
-        │ ② origin/main から git worktree を作成
-        │ ③ Issue 本文 (or WORKFLOW.md) から prompt を組み立て
-        │ ④ Claude Code を headless mode で起動 (token は渡さない)
-        │ ⑤ 生成された差分を git push
-        │ ⑥ Octokit で Pull Request を作成
+        │ ① agent: Status を In Progress に flip (`gh project item-edit`)
+        │ ② agent: コードを書いて Conventional Commits で commit
+        │ ③ agent: `git push -u origin <branch>`
+        │ ④ agent: `gh pr create` で PR 作成 (Closes #N を含める)
+        │ ⑤ agent: Status を In Review に flip
         ▼
-   [Project: In Review]                 ── 失敗時 ──▶  [Project: Failed]
+   [Project: In Review]                ── 失敗時 ──▶  [Project: Failed]
         │                                                    │
-        │ ⑦ 人間レビュー + merge (Philharmonic の範囲外)      │ Issue に失敗コメント
-        ▼                                                    │ (serve daemon は retry.max_attempts の範囲で自動的に Todo に戻す)
+        │ 人間レビュー + merge (Philharmonic の範囲外)        │ agent が Issue に失敗コメント (token / 機微情報なし)
+        ▼                                                    │ 再実行は人手で Failed → Todo に戻すか別 Issue で
    [Project: Done]
 ```
 
-`philharmonic serve` は SIGTERM / SIGINT を受信すると in-flight run の完了を待って graceful に exit します。並列 dispatch / 自動 retry / Snapshot HTTP API は serve daemon のみが提供します (詳細: [operations.md](./operations.md))。`philharmonic run` は同じ 1 ターン分を 1 回だけ走らせて exit する単発モードで、cron / GitHub Actions の `schedule` 統合や動作検証用に使います。
+ADR-0005 で Status 遷移 / PR 作成 / Issue コメントは **agent (Claude Code + `gh` CLI)** が runner subprocess 内で行います。Orchestrator は worktree を作って Claude を起動し、runner exit 0 のときだけ worktree を片付ける薄い役割に縮小されました。
+
+`philharmonic serve` は SIGTERM / SIGINT を受信すると in-flight run の完了を待って graceful に exit します。並列 dispatch / Snapshot HTTP API は serve daemon のみが提供します (詳細: [operations.md](./operations.md))。`philharmonic run` は同じ 1 ターン分を 1 回だけ走らせて exit する単発モードで、cron / GitHub Actions の `schedule` 統合や動作検証用に使います。
 
 ## システム全体像
 
-| コンポーネント                      | 役割                                                                                                                     |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| **Orchestrator** (Node.js)          | GitHub API・git worktree・Runner 起動・PR 作成を司る本体。GitHub token を **唯一** 保持するレイヤ                        |
-| **Runner** (Claude Code 子プロセス) | `claude -p ... --output-format stream-json` で起動。worktree を `cwd` として作業し、token は **渡されない**              |
-| **Workspace** (git worktree)        | `<repo>/.philharmonic/worktrees/issue-<番号>/`。1 タスク = 1 worktree = 1 ブランチ。失敗時は `philharmonic clean` で掃除 |
-| **Project Item Status**             | `Todo` → `In Progress` → `In Review` (or `Failed`)。Orchestrator が GitHub Projects v2 GraphQL 経由で駆動                |
-| **Snapshot HTTP API** (任意)        | `philharmonic serve` 起動時に `127.0.0.1` の loopback で `/api/v1/state` 等を提供。dashboard / 外部監視向け              |
+| コンポーネント                      | 役割                                                                                                                                            |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Orchestrator** (Node.js)          | Project poll / 候補選定 / git worktree 作成 / Runner 起動までを担う薄いレイヤ (ADR-0005 で書き込み系 API は撤廃)                                |
+| **Runner** (Claude Code 子プロセス) | `claude -p ... --output-format stream-json` で起動。worktree を `cwd` として作業し、env allowlist 経由で `GITHUB_TOKEN` / `GH_TOKEN` を渡される |
+| **Agent** (Claude Code in worktree) | `gh` / `git` で Status 遷移 / commit / push / PR 作成 / Issue コメント投稿を行う                                                                |
+| **Workspace** (git worktree)        | `<repo>/.philharmonic/worktrees/issue-<番号>/`。1 タスク = 1 worktree = 1 ブランチ。失敗時は `philharmonic clean` で掃除                        |
+| **Project Item Status**             | `Todo` → `In Progress` → `In Review` (or `Failed`)。**Agent** が `gh` で駆動。Orchestrator は読むだけ                                           |
+| **Snapshot HTTP API** (任意)        | `philharmonic serve` 起動時に `127.0.0.1` の loopback で `/api/v1/state` 等を提供。dashboard / 外部監視向け                                     |
 
 ## より詳しく (仕様の真実)
 

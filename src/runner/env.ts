@@ -31,6 +31,11 @@ export const ALLOWED_ENV_KEYS: readonly string[] = [
   'TMPDIR',
   'TMP',
   'TEMP',
+  // GitHub 認証 (ADR-0005)
+  // agent が `gh` / `git push` で利用するため allowlist で透過する。
+  // `GH_ENTERPRISE_TOKEN` / `OCTOKIT_*` は引き続き allowlist 外 (orchestrator 用途のみ)。
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
 ];
 
 /**

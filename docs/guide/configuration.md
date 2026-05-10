@@ -27,25 +27,28 @@ project_number: 1
 
 ### Project / 候補選定
 
-| キー                | 既定     | 何が変わるか                                                                                                                            |
-| ------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `owner`             | (必須)   | Project owner の GitHub login (user または org)                                                                                         |
-| `project_number`    | (必須)   | Project URL 末尾の整数                                                                                                                  |
-| `status_field`      | `Status` | Project 上の単一選択フィールド名。Status を別フィールド名で運用しているならここを変える                                                 |
-| `dispatch_statuses` | `[Todo]` | dispatch 候補とする Status option 名の配列。`[Ready for Agent, Todo]` のように複数指定可。`status_field` のどの option を拾うか直交設定 |
-| `agent_user_login`  | `null`   | `null` のとき unassigned のみ拾う。bot login (例: `philharmonic-bot`) を指定するとその assignee の Issue だけ拾う                       |
-| `base_branch`       | `main`   | PR の base ブランチ。worktree もこの ref から派生する                                                                                   |
+| キー                             | 既定          | 何が変わるか                                                                                                                            |
+| -------------------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `owner`                          | (必須)        | Project owner の GitHub login (user または org)                                                                                         |
+| `project_number`                 | (必須)        | Project URL 末尾の整数                                                                                                                  |
+| `status_field`                   | `Status`      | Project 上の単一選択フィールド名。Status を別フィールド名で運用しているならここを変える                                                 |
+| `dispatch_statuses`              | `[Todo]`      | dispatch 候補とする Status option 名の配列。`[Ready for Agent, Todo]` のように複数指定可。`status_field` のどの option を拾うか直交設定 |
+| `status_transitions.in_progress` | `In Progress` | agent が dispatch 直後に flip する遷移先 Status 名。Project の Status options に合わせて差し替える (#62)                                |
+| `status_transitions.in_review`   | `In Review`   | PR 作成成功後に agent が flip する遷移先 Status 名                                                                                      |
+| `status_transitions.failed`      | `Failed`      | 失敗時に agent が flip する遷移先 Status 名                                                                                             |
+| `agent_user_login`               | `null`        | `null` のとき unassigned のみ拾う。bot login (例: `philharmonic-bot`) を指定するとその assignee の Issue だけ拾う                       |
+| `base_branch`                    | `main`        | PR の base ブランチ。worktree もこの ref から派生する                                                                                   |
 
 ### Runner (Claude Code) の挙動
 
-| キー                     | 既定              | 何が変わるか                                                                                                                                                                                                                                     |
-| ------------------------ | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `permission_mode`        | `auto`            | `auto` = `--permission-mode acceptEdits` (worktree 内編集のみ自動承認)。`bypass` = `--dangerously-skip-permissions` (**worktree 外、ホスト全体への副作用が起き得る**)。`bypass` を使うときは git worktree + 非特権ユーザによる隔離前提でのみ使う |
-| `timeout_ms`             | `1800000` (30 分) | Runner subprocess の timeout                                                                                                                                                                                                                     |
-| `kill_grace_period_ms`   | `5000` (5 秒)     | timeout 後 SIGTERM → SIGKILL までの猶予                                                                                                                                                                                                          |
-| `agent.max_turns`        | `1`               | `1` で 1 セッション完結 (従来動作)。`>= 2` で `error_max_turns` で打ち切られたとき `--resume` で次ターンへ進む                                                                                                                                   |
-| `agent.stall_timeout_ms` | `300000` (5 分)   | Runner stdout の無音許容時間。`0` で stall 検知を無効化                                                                                                                                                                                          |
-| `workflow_file`          | `WORKFLOW.md`     | リポジトリ直下の prompt テンプレートファイル名 (Liquid)。後述                                                                                                                                                                                    |
+| キー                     | 既定              | 何が変わるか                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------ | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `permission_mode`        | `auto`            | `auto` = `--permission-mode acceptEdits` (worktree 内編集のみ自動承認)。`bypass` = `--dangerously-skip-permissions` (**worktree 外、ホスト全体への副作用が起き得る**)。**ADR-0005 で agent 委譲型に切り替えたため、`auto` では Bash tool (`gh` / `git push`) を agent が呼べず、Status 遷移 / PR 作成が失敗します。実用上は `bypass` を選んでください** |
+| `timeout_ms`             | `1800000` (30 分) | Runner subprocess の timeout                                                                                                                                                                                                                                                                                                                            |
+| `kill_grace_period_ms`   | `5000` (5 秒)     | timeout 後 SIGTERM → SIGKILL までの猶予                                                                                                                                                                                                                                                                                                                 |
+| `agent.max_turns`        | `1`               | `1` で 1 セッション完結 (従来動作)。`>= 2` で `error_max_turns` で打ち切られたとき `--resume` で次ターンへ進む                                                                                                                                                                                                                                          |
+| `agent.stall_timeout_ms` | `300000` (5 分)   | Runner stdout の無音許容時間。`0` で stall 検知を無効化                                                                                                                                                                                                                                                                                                 |
+| `workflow_file`          | `WORKFLOW.md`     | リポジトリ直下の prompt テンプレートファイル名 (Liquid)。後述                                                                                                                                                                                                                                                                                           |
 
 ### Workspace / クリーンアップ
 
@@ -56,13 +59,13 @@ project_number: 1
 
 ### `philharmonic serve` (常駐デーモン)
 
-| キー                          | 既定             | 何が変わるか                                                                                                  |
-| ----------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------- |
-| `polling.interval_ms`         | `30000` (30 秒)  | 1 tick 終了後の sleep 時間。**下限 1000ms**。1000〜4999ms は起動時に warning が出る                           |
-| `retry.max_attempts`          | `3`              | `Failed` を自動的に `Todo` に戻す最大回数。`0` で自動 retry 無効化 (`philharmonic run` の挙動に揃う)          |
-| `retry.max_backoff_ms`        | `600000` (10 分) | exponential backoff の上限                                                                                    |
-| `agent.max_concurrent_agents` | `1`              | 1 tick で並列 dispatch する Issue 件数。`1` で逐次 (MVP 互換)                                                 |
-| `server.port`                 | -                | Snapshot HTTP API (#30) の listen port。**未指定なら API 自体を起動しない**。指定時は `127.0.0.1` 固定で bind |
+| キー                          | 既定            | 何が変わるか                                                                                                  |
+| ----------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------- |
+| `polling.interval_ms`         | `30000` (30 秒) | 1 tick 終了後の sleep 時間。**下限 1000ms**。1000〜4999ms は起動時に warning が出る                           |
+| `agent.max_concurrent_agents` | `1`             | 1 tick で並列 dispatch する Issue 件数。`1` で逐次 (MVP 互換)                                                 |
+| `server.port`                 | -               | Snapshot HTTP API (#30) の listen port。**未指定なら API 自体を起動しない**。指定時は `127.0.0.1` 固定で bind |
+
+> 自動 retry (`retry.max_attempts` / `retry.max_backoff_ms`) は ADR-0005 で撤廃されました。Failed を再実行する場合は人手で `Todo` に戻すか、別 Issue で起票しなおします。
 
 ### 観測
 
@@ -83,11 +86,15 @@ status_field: Status
 dispatch_statuses:
   - Ready for Agent
   - Todo
+status_transitions:
+  in_progress: In Progress
+  in_review: In Review
+  failed: Failed
 agent_user_login: philharmonic-bot
 base_branch: main
 
 workflow_file: WORKFLOW.md
-permission_mode: auto
+permission_mode: bypass # ADR-0005: agent 委譲型では bypass が実用上必須
 timeout_ms: 1800000
 
 workspace_root: .philharmonic/worktrees
@@ -96,8 +103,6 @@ log_level: info
 
 polling:
   interval_ms: 30000
-retry:
-  max_attempts: 3
 agent:
   max_concurrent_agents: 1
 server:
@@ -120,38 +125,42 @@ hooks:
 
 - `Status = Ready for Agent` または `Status = Todo` の **assignee が `philharmonic-bot` の Issue** だけが dispatch 候補
 - 1 ターンの timeout は 30 分、Runner stdout 5 分無音で stall 判定
-- `philharmonic serve` は 30 秒ごとに 1 件 dispatch、Failed は最大 3 回まで自動 retry
+- `philharmonic serve` は 30 秒ごとに 1 件 dispatch (自動 retry は撤廃。Failed は人手で再起票)
 - `localhost:4000` で Snapshot HTTP API が読める
 - worktree 新規作成直後に `pnpm install --frozen-lockfile` が走る
 - worktree 削除直前に `./scripts/cleanup.sh` が走る (失敗しても削除は止めない)
 
 ## `WORKFLOW.md` で prompt をカスタマイズする
 
-リポジトリ直下に `WORKFLOW.md` を置くと、Claude Code に渡す prompt の **本体構造** をリポジトリごとに変えられます。`WORKFLOW.md` が無いリポジトリでは Issue 本文 (`## Goal` / `## Constraints` / `## Acceptance Criteria`) からデフォルトの prompt が組み立てられます。
+リポジトリ直下に `WORKFLOW.md` を置くと、Claude Code に渡す prompt の **本体構造** をリポジトリごとに変えられます。`WORKFLOW.md` が無いリポジトリでは Issue body をそのまま埋めたデフォルト prompt が組み立てられます (構造化セクション必須は ADR-0005 で撤廃)。
 
 ### 仕組み
 
 - テンプレートエンジンは [LiquidJS](https://liquidjs.com/)
 - `philharmonic run` は dispatch ごとにファイルを読み直し、`philharmonic serve` は `fs.watch` で変更検出時にもログを出します
-- prompt の **末尾には Orchestrator が無条件で追加制約セクションを連結** します (`git push しない` / `PR 作らない` / `token 期待しない` / Conventional Commits)。テンプレート側でこれを書く必要はありません
+- prompt の **末尾には Orchestrator が無条件で agent 委譲指示を連結** します (Status を `status_transitions.in_progress` に遷移 / commit / push / PR 作成 / 失敗時の Issue コメント / Conventional Commits)。テンプレート側でこれを書く必要はありません。Status 名はすべて `philharmonic.yaml` の `status_transitions` を参照するため、Project の Status options に合わせて差し替え可能です
 
 ### 提供される変数 (snake_case)
 
-| 変数名                      | 例                                                                  |
-| --------------------------- | ------------------------------------------------------------------- |
-| `repository.owner`          | `hexylab`                                                           |
-| `repository.name`           | `philharmonic`                                                      |
-| `base_branch`               | `main`                                                              |
-| `issue.number`              | `27`                                                                |
-| `issue.title`               | `WORKFLOW.md ...`                                                   |
-| `issue.url`                 | `https://github.com/hexylab/philharmonic/issues/27`                 |
-| `issue.body`                | Issue body 全文                                                     |
-| `issue.goal`                | `## Goal` セクションの本文 (parse 済み)                             |
-| `issue.constraints`         | `## Constraints` セクションの本文                                   |
-| `issue.acceptance_criteria` | `## Acceptance Criteria` セクションの本文                           |
-| `workspace_path`            | worktree の絶対パス                                                 |
-| `attempt`                   | 試行回数 (`philharmonic run` は常に `1`、`serve` の retry で増える) |
-| `run_id`                    | UUIDv7                                                              |
+| 変数名                           | 例                                                  |
+| -------------------------------- | --------------------------------------------------- |
+| `repository.owner`               | `hexylab`                                           |
+| `repository.name`                | `philharmonic`                                      |
+| `base_branch`                    | `main`                                              |
+| `issue.number`                   | `27`                                                |
+| `issue.title`                    | `WORKFLOW.md ...`                                   |
+| `issue.url`                      | `https://github.com/hexylab/philharmonic/issues/27` |
+| `issue.body`                     | Issue body 全文                                     |
+| `project.owner`                  | `hexylab`                                           |
+| `project.number`                 | `1`                                                 |
+| `project.status_field`           | `Status`                                            |
+| `status_transitions.in_progress` | `In Progress` (config 既定) / Project の Status 名  |
+| `status_transitions.in_review`   | `In Review` (config 既定)                           |
+| `status_transitions.failed`      | `Failed` (config 既定)                              |
+| `workspace_path`                 | worktree の絶対パス                                 |
+| `run_id`                         | UUIDv7                                              |
+
+> ADR-0005 で `issue.goal` / `issue.constraints` / `issue.acceptance_criteria` / `attempt` 変数は撤廃されました。本文を部分抽出したい場合はテンプレート側で `{{ issue.body | split: '## Goal' | last | split: '##' | first }}` のように加工してください。
 
 ### サンプル
 
@@ -160,28 +169,14 @@ hooks:
 
 - Issue: [#{{ issue.number }} {{ issue.title }}]({{ issue.url }})
 - Workspace: {{ workspace_path }}
-- Attempt: {{ attempt }}
+- Run ID: `{{ run_id }}`
 
-## Goal
+## Issue 本文
 
-{{ issue.goal }}
-
-## Constraints (from Issue)
-
-{{ issue.constraints }}
-
-## Acceptance Criteria
-
-{{ issue.acceptance_criteria }}
-
-{% if attempt > 1 %}
-## Retry Notice
-
-This is attempt #{{ attempt }}. Investigate why the previous attempts failed before re-doing the work.
-{% endif %}
+{{ issue.body }}
 ```
 
-`WORKFLOW.md` の安全制約 / hot-reload 仕様 / フォールバック挙動は [`docs/specs/workflow.md`](../specs/workflow.md) を参照。
+`WORKFLOW.md` の hot-reload 仕様 / フォールバック挙動は [`docs/specs/workflow.md`](../specs/workflow.md) を参照。
 
 ## Lifecycle hooks の使いかた
 

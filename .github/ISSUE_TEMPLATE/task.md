@@ -6,20 +6,18 @@ labels: ['task']
 assignees: []
 ---
 
-## Goal
+<!--
+Issue 本文の構造は自由フォーマットです。Philharmonic の orchestrator は本文をそのまま agent に渡します
+(構造化セクション抽出は ADR-0005 で撤廃)。
 
-<!-- 達成したいことを 1〜3 文で記述する -->
+agent (Claude Code + `gh` CLI) が Status 遷移 / commit / push / PR 作成 / 必要に応じ Issue コメント
+までを完結させます。詳細は docs/adr/0005-thin-orchestrator-agent-delegation.md を参照。
 
-## Constraints
+以下は起票時に書きやすいガイドの例 (任意):
 
-<!-- 制約条件をリスト形式で記述する。例: 使用するライブラリ、性能要件、互換性、スケジュール等 -->
-
--
-
-## Acceptance Criteria
-
-<!-- 完了条件をチェックボックスリスト形式で記述する。客観的に達成状況を判断できる粒度にする -->
-
-- [ ]
-- [ ]
-- [ ]
+- やりたいこと / 達成したい状態
+- 制約 (使うライブラリ・性能・互換性 等)
+- 完了条件 (チェックボックスにすると agent が自己評価しやすい)
+- 関連 Issue / PR / 仕様書 / 過去 run のリンク
+- 備考 (背景・open questions・参考資料)
+-->

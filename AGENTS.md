@@ -25,7 +25,7 @@
 
 すべての開発作業は以下のフローで進めます。
 
-1. **Issue 起票**: `.github/ISSUE_TEMPLATE/task.md` を使って、Goal / Constraints / Acceptance Criteria を明記した Issue を作成する
+1. **Issue 起票**: `.github/ISSUE_TEMPLATE/task.md` を使って、Issue 本文を起票する。本文は自由フォーマットでよい (構造化セクション必須は [ADR-0005](./docs/adr/0005-thin-orchestrator-agent-delegation.md) で撤廃)。書きやすさのために「やりたいこと / 制約 / 完了条件 / 関連 Issue / 背景」などを並べてもよい
 2. **既存ドキュメントの確認**: 着手前に `docs/adr/` と `docs/specs/` を確認し、関連する設計判断や仕様を把握する
 3. **feature ブランチ作成**: `main` から `feature/<issue番号>-<短い英語の説明>` 形式でブランチを切る
 4. **実装**: Acceptance Criteria を満たすように実装し、必要に応じて `docs/adr/` や `docs/specs/` を更新する
@@ -102,7 +102,7 @@ Refs: #42
 
 PR をマージするには以下のすべてを満たす必要があります。
 
-- [ ] Issue の Acceptance Criteria をすべて満たしている
+- [ ] Issue の完了条件 / 受け入れ条件をすべて満たしている (Issue 本文で示された範囲)
 - [ ] CI (`format` / `lint` / `unit-test` / `e2e-test`) がすべて green である
 - [ ] 必要なドキュメント (`docs/adr/` の ADR、`docs/specs/` の仕様書) を作成・更新している
 - [ ] コミットメッセージが Conventional Commits に準拠している

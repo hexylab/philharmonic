@@ -1,3 +1,4 @@
+import { stat } from 'node:fs/promises';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -17,28 +18,31 @@ import { runClaude, type RunResult } from '../runner/index.js';
 import { noopRunTracker, type RunTracker } from '../server/tracker.js';
 import type { WorkflowSource } from '../workflow/index.js';
 import {
+  defaultGitRunner,
   HookExecutionError,
   HookTimeoutError,
-  defaultGitRunner,
   type GitRunner,
   type HookContext,
   type WorkspaceManager,
 } from '../workspace/index.js';
 
-import { BootstrapError, type FailureReason } from './errors.js';
-import { buildFailureCommentBody, buildPullRequestBody, summarizeRunResult } from './format.js';
-import { countCommitsAhead, fetchBaseBranch, pushBranch } from './git.js';
+import { type FailureReason } from './errors.js';
+import { fetchBaseBranch } from './git.js';
 import { dispatchPool } from './pool.js';
 import { parseRepositoryNameWithOwner, type Repository } from './repository.js';
-import { DEFAULT_DISPATCH_STATUSES, isAcceptableIssue, selectFirstByStatus } from './select.js';
+import {
+  checkDispatchGuard,
+  DEFAULT_DISPATCH_STATUSES,
+  isAcceptableIssue,
+  selectFirstByStatus,
+  type DispatchGuard,
+  type DispatchGuardSkipReason,
+} from './select.js';
 import { buildIssueSlug } from './slug.js';
-import { resolveStatusOptions, type StatusOptionMap } from './status.js';
-
-const DEFAULT_REMOTE = 'origin';
 
 export type RunOnceClock = () => Date;
 
-export type ResolveAttempt = (issueNumber: number) => Promise<number> | number;
+const DEFAULT_REMOTE = 'origin';
 
 export type RunOnceDeps = {
   config: Config;
@@ -48,16 +52,21 @@ export type RunOnceDeps = {
   workspaceManager: WorkspaceManager;
   workflowSource: WorkflowSource;
   runnerLogsRoot: string;
-  remote?: string;
   dispatchStatuses?: readonly string[];
-  resolveAttempt?: ResolveAttempt;
   runClaude?: typeof runClaude;
+  /** workspace 作成前に `git fetch <remote> <baseBranch>` を実行する git runner */
   gitRunner?: GitRunner;
+  /** fetch 先 remote 名 (default: `origin`) */
+  remote?: string;
   logger?: Logger;
   clock?: RunOnceClock;
   generateRunId?: () => string;
   /** snapshot HTTP API (#30) 用の in-memory tracker。未指定なら no-op */
   runTracker?: RunTracker;
+  /**
+   * 二重 dispatch ガードに使う path 存在判定 (テストで差し替え可能)。未指定なら fs.stat。
+   */
+  pathExists?: (target: string) => Promise<boolean>;
 };
 
 export type RunOnceResult =
@@ -66,7 +75,6 @@ export type RunOnceResult =
       kind: 'success';
       runId: string;
       issueNumber: number;
-      prNumber: number;
       branch: string;
     }
   | {
@@ -86,14 +94,30 @@ const noopLogger: Logger = {
   child: () => noopLogger,
 };
 
+const DEFAULT_PATH_EXISTS = async (target: string): Promise<boolean> => {
+  try {
+    await stat(target);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
   const baseLogger = deps.logger ?? noopLogger;
   const clock = deps.clock ?? (() => new Date());
-  const remote = deps.remote ?? DEFAULT_REMOTE;
   const dispatchStatuses =
     deps.dispatchStatuses ?? deps.config.dispatchStatuses ?? DEFAULT_DISPATCH_STATUSES;
+  const tracker = deps.runTracker ?? noopRunTracker;
+  const pathExists = deps.pathExists ?? DEFAULT_PATH_EXISTS;
 
-  // 1. Candidate Selection
+  const guard: DispatchGuard = {
+    workspaceExists: async (issueNumber) =>
+      pathExists(deps.workspaceManager.resolveWorkspacePath(`issue-${issueNumber}`)),
+    isRunning: (issueNumber) => tracker.getRunningByIssue(issueNumber) !== null,
+  };
+
+  // 1. Candidate Selection (orchestration-mvp.md「Candidate Selection Rule」)
   const candidates = await deps.projectsClient.fetchProjectCandidates({
     owner: deps.config.owner,
     projectNumber: deps.config.projectNumber,
@@ -105,73 +129,29 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     githubClient: deps.githubClient,
     agentUserLogin: deps.config.agentUserLogin,
     logger: baseLogger,
+    guard,
   });
   if (selected === null) {
     baseLogger.info('no candidate', { dispatchStatuses });
     return { kind: 'no_candidate' };
   }
 
-  const { candidate, issue, repository } = selected;
-
-  // 2. Project metadata + status options
-  let statusOptions: StatusOptionMap;
-  let projectId: string;
-  let statusFieldId: string;
-  try {
-    const metadata = await deps.projectsClient.fetchProjectMetadata({
-      owner: deps.config.owner,
-      projectNumber: deps.config.projectNumber,
-      statusFieldName: deps.config.statusField,
-    });
-    statusOptions = resolveStatusOptions(metadata);
-    projectId = metadata.projectId;
-    statusFieldId = metadata.statusFieldId;
-  } catch (error) {
-    throw new BootstrapError(
-      'metadata_load_failed',
-      `Project metadata の取得に失敗しました: ${describeError(error)}`,
-      { cause: error },
-    );
-  }
-
-  // 3. Status Update: Todo → In Progress
-  try {
-    await deps.githubClient.updateProjectV2ItemStatus({
-      projectId,
-      itemId: candidate.itemId,
-      fieldId: statusFieldId,
-      optionId: statusOptions['In Progress'],
-    });
-  } catch (error) {
-    throw new BootstrapError(
-      'status_transition_to_in_progress_failed',
-      `Status を In Progress に遷移できませんでした: ${describeError(error)}`,
-      { cause: error },
-    );
-  }
-
-  // 4-9. Workspace 作成以降は dispatchSelected に委譲する
   return await dispatchSelected({
     config: deps.config,
     repoRoot: deps.repoRoot,
-    candidate,
-    issue,
-    repository,
-    projectId,
-    statusFieldId,
-    statusOptions,
-    githubClient: deps.githubClient,
+    candidate: selected.candidate,
+    issue: selected.issue,
+    repository: selected.repository,
     workspaceManager: deps.workspaceManager,
     workflowSource: deps.workflowSource,
     runnerLogsRoot: deps.runnerLogsRoot,
-    remote,
-    resolveAttempt: deps.resolveAttempt,
     runClaude: deps.runClaude,
     gitRunner: deps.gitRunner,
+    remote: deps.remote,
     baseLogger,
     clock,
     generateRunId: deps.generateRunId,
-    runTracker: deps.runTracker,
+    runTracker: tracker,
   });
 }
 
@@ -187,27 +167,27 @@ export type ConcurrentDispatchOutcome = {
 /**
  * 1 tick で `maxConcurrent` 件まで並列 dispatch する。
  *
- * - 候補は acceptable filter を通った先頭 N 件だけを pick する (1 tick の処理上限が予測しやすい)
- * - 各 dispatch は独立した Promise として走り、相互に状態を汚染しない
- * - dispatch 中の予期せぬ例外は worker 内で握って `failed` として結果配列に落とす
- *   (BootstrapError 相当の Status update 失敗は warn ログのみ出して該当 Issue だけ skip)
- * - 結果配列は dispatch 完了順で返す (slot ごとに完了タイミングが違うため)
- *
- * 仕様: docs/specs/serve-daemon.md#並列-dispatch-24
+ * spec: docs/specs/serve-daemon.md#並列-dispatch-24
  */
 export async function runConcurrent(deps: RunConcurrentDeps): Promise<ConcurrentDispatchOutcome[]> {
   const baseLogger = deps.logger ?? noopLogger;
   const clock = deps.clock ?? (() => new Date());
-  const remote = deps.remote ?? DEFAULT_REMOTE;
   const dispatchStatuses =
     deps.dispatchStatuses ?? deps.config.dispatchStatuses ?? DEFAULT_DISPATCH_STATUSES;
+  const tracker = deps.runTracker ?? noopRunTracker;
+  const pathExists = deps.pathExists ?? DEFAULT_PATH_EXISTS;
   const { maxConcurrent } = deps;
 
   if (maxConcurrent < 1) {
     throw new Error(`runConcurrent: maxConcurrent must be >= 1 (got ${maxConcurrent})`);
   }
 
-  // 1. Candidate Selection (上から最大 N 件 acceptable な candidate を pick)
+  const guard: DispatchGuard = {
+    workspaceExists: async (issueNumber) =>
+      pathExists(deps.workspaceManager.resolveWorkspacePath(`issue-${issueNumber}`)),
+    isRunning: (issueNumber) => tracker.getRunningByIssue(issueNumber) !== null,
+  };
+
   const candidates = await deps.projectsClient.fetchProjectCandidates({
     owner: deps.config.owner,
     projectNumber: deps.config.projectNumber,
@@ -219,6 +199,7 @@ export async function runConcurrent(deps: RunConcurrentDeps): Promise<Concurrent
     githubClient: deps.githubClient,
     agentUserLogin: deps.config.agentUserLogin,
     logger: baseLogger,
+    guard,
     limit: maxConcurrent,
   });
   if (selected.length === 0) {
@@ -226,56 +207,13 @@ export async function runConcurrent(deps: RunConcurrentDeps): Promise<Concurrent
     return [];
   }
 
-  // 2. Project metadata + status options (1 回だけ取得)
-  let statusOptions: StatusOptionMap;
-  let projectId: string;
-  let statusFieldId: string;
-  try {
-    const metadata = await deps.projectsClient.fetchProjectMetadata({
-      owner: deps.config.owner,
-      projectNumber: deps.config.projectNumber,
-      statusFieldName: deps.config.statusField,
-    });
-    statusOptions = resolveStatusOptions(metadata);
-    projectId = metadata.projectId;
-    statusFieldId = metadata.statusFieldId;
-  } catch (error) {
-    throw new BootstrapError(
-      'metadata_load_failed',
-      `Project metadata の取得に失敗しました: ${describeError(error)}`,
-      { cause: error },
-    );
-  }
-
-  // 3. Status: Todo → In Progress を逐次に試みる (失敗は warn だけで skip)
-  //    並列で叩いてもいいが、結果集計とログがシンプルになるので先に直列で確定させる。
-  const dispatchable: SelectResult[] = [];
-  for (const task of selected) {
-    try {
-      await deps.githubClient.updateProjectV2ItemStatus({
-        projectId,
-        itemId: task.candidate.itemId,
-        fieldId: statusFieldId,
-        optionId: statusOptions['In Progress'],
-      });
-      dispatchable.push(task);
-    } catch (error) {
-      baseLogger.warn('concurrent dispatch status_transition skipped', {
-        issueNumber: task.candidate.issueNumber,
-        error: describeError(error),
-      });
-    }
-  }
-  if (dispatchable.length === 0) return [];
-
   baseLogger.info('concurrent tick', {
     maxConcurrent,
-    dispatched: dispatchable.length,
+    dispatched: selected.length,
   });
 
-  // 4. dispatchSelected を slot pool で並列実行
   return await dispatchPool({
-    tasks: dispatchable,
+    tasks: selected,
     maxConcurrent,
     worker: async (task, slot): Promise<ConcurrentDispatchOutcome> => {
       try {
@@ -285,27 +223,20 @@ export async function runConcurrent(deps: RunConcurrentDeps): Promise<Concurrent
           candidate: task.candidate,
           issue: task.issue,
           repository: task.repository,
-          projectId,
-          statusFieldId,
-          statusOptions,
-          githubClient: deps.githubClient,
           workspaceManager: deps.workspaceManager,
           workflowSource: deps.workflowSource,
           runnerLogsRoot: deps.runnerLogsRoot,
-          remote,
-          resolveAttempt: deps.resolveAttempt,
           runClaude: deps.runClaude,
           gitRunner: deps.gitRunner,
+          remote: deps.remote,
           baseLogger,
           clock,
           generateRunId: deps.generateRunId,
-          runTracker: deps.runTracker,
+          runTracker: tracker,
           slot,
         });
         return { slot, result };
       } catch (error) {
-        // dispatchSelected は通常 markFailed 経由で `failed` を return するため、
-        // ここに来るのは想定外の throw のみ。daemon を落とさず failed として記録する。
         baseLogger.warn('dispatch error', {
           slot,
           issueNumber: task.candidate.issueNumber,
@@ -332,17 +263,14 @@ export type DispatchSelectedDeps = {
   candidate: Candidate;
   issue: Issue;
   repository: Repository;
-  projectId: string;
-  statusFieldId: string;
-  statusOptions: StatusOptionMap;
-  githubClient: GitHubClient;
   workspaceManager: WorkspaceManager;
   workflowSource: WorkflowSource;
   runnerLogsRoot: string;
-  remote?: string;
-  resolveAttempt?: ResolveAttempt;
   runClaude?: typeof runClaude;
+  /** workspace 作成前に `git fetch <remote> <baseBranch>` を実行する git runner */
   gitRunner?: GitRunner;
+  /** fetch 先 remote 名 (default: `origin`) */
+  remote?: string;
   baseLogger?: Logger;
   clock?: RunOnceClock;
   generateRunId?: () => string;
@@ -353,20 +281,21 @@ export type DispatchSelectedDeps = {
 };
 
 /**
- * Project Item が選択され、Status が `In Progress` の状態から先を実行する。
+ * Project Item が選択された後の dispatch 本体 (worktree → prompt → runner → cleanup)。
  *
- * - `runOnce` は Todo → In Progress 遷移後にこの関数を呼ぶ
- * - `recovery` は既に `In Progress` の Item を引き取って直接呼ぶ (Todo→IP は不要)
+ * ADR-0005 で Status 遷移 / PR 作成 / Issue コメント / Acceptance Criteria 抽出は agent 側に
+ * 移ったため、本関数は **GitHub に書き込みを行わない**。runner exit 0 で worktree を cleanup
+ * するだけ。失敗時も orchestrator は worktree を保持して exit 1 する (debug 用)。
  */
 export async function dispatchSelected(
   deps: DispatchSelectedDeps,
 ): Promise<Extract<RunOnceResult, { kind: 'success' | 'failed' }>> {
   const baseLogger = deps.baseLogger ?? noopLogger;
   const clock = deps.clock ?? (() => new Date());
-  const remote = deps.remote ?? DEFAULT_REMOTE;
-  const gitRunner = deps.gitRunner ?? defaultGitRunner;
   const runner = deps.runClaude ?? runClaude;
   const idGen = deps.generateRunId ?? generateRunId;
+  const gitRunner = deps.gitRunner ?? defaultGitRunner;
+  const remote = deps.remote ?? DEFAULT_REMOTE;
 
   const { candidate, issue, repository } = deps;
   const runId = idGen();
@@ -396,18 +325,24 @@ export async function dispatchSelected(
     issue,
     repository,
     branch,
-    projectId: deps.projectId,
-    statusFieldId: deps.statusFieldId,
-    statusOptions: deps.statusOptions,
     startedAt,
-    githubClient: deps.githubClient,
     logger,
     clock,
     runTracker: tracker,
   };
 
+  let resolved = false;
+  const finalize = (
+    result: Extract<RunOnceResult, { kind: 'success' | 'failed' }>,
+  ): Extract<RunOnceResult, { kind: 'success' | 'failed' }> => {
+    resolved = true;
+    return result;
+  };
+
   try {
-    // 4. Workspace Provisioning
+    // Workspace Provisioning (orchestration-mvp.md「3. Workspace Provisioning」)
+    // git fetch を先に実行してから worktree を作成する。WorkspaceManager は worktree add のみで
+    // remote 取得は行わないため、orchestrator 側で必ず fetch しておく必要がある (#62)。
     let workspacePath: string;
     try {
       await fetchBaseBranch(gitRunner, deps.repoRoot, remote, deps.config.baseBranch);
@@ -419,18 +354,10 @@ export async function dispatchSelected(
       });
       workspacePath = workspace.path;
     } catch (error) {
-      return await markFailed(failureContext, 'workspace_provisioning', error);
+      return finalize(await markFailed(failureContext, 'workspace_provisioning', error));
     }
 
-    // 5. Prompt Construction
-    //    WORKFLOW.md があれば Liquid テンプレート (上位レイヤ)、無ければ buildPrompt フォールバック (下位レイヤ)
-    //    spec: docs/specs/workflow.md / docs/adr/0003-prompt-templating.md
-    let attempt: number;
-    try {
-      attempt = deps.resolveAttempt ? await deps.resolveAttempt(candidate.issueNumber) : 1;
-    } catch (error) {
-      return await markFailed(failureContext, 'runner_error', error);
-    }
+    // Prompt Construction
     let prompt: string;
     try {
       prompt = await deps.workflowSource.render({
@@ -441,15 +368,20 @@ export async function dispatchSelected(
         issueUrl: candidate.issueUrl,
         issueBody: issue.body ?? '',
         workspacePath,
-        attempt,
         runId,
+        project: {
+          owner: deps.config.owner,
+          number: deps.config.projectNumber,
+          statusField: deps.config.statusField,
+        },
+        statusTransitions: deps.config.statusTransitions,
       });
     } catch (error) {
-      return await markFailed(failureContext, 'runner_error', error);
+      return finalize(await markFailed(failureContext, 'runner_error', error));
     }
     await writeFile(path.join(runLog.dir, 'prompt.md'), prompt, 'utf8');
 
-    // 6. Runner Execution
+    // Runner Execution
     const hookContext: HookContext = {
       taskKey,
       branch,
@@ -461,12 +393,11 @@ export async function dispatchSelected(
       },
     };
 
-    // before_run hook (runner 起動直前)
     try {
       await deps.workspaceManager.runHooks('before_run', hookContext);
     } catch (error) {
       if (isHookError(error)) {
-        return await markFailed(failureContext, 'hook_failed', error);
+        return finalize(await markFailed(failureContext, 'hook_failed', error));
       }
       throw error;
     }
@@ -476,6 +407,8 @@ export async function dispatchSelected(
         'permission_mode=bypass で Claude Code を起動します。--dangerously-skip-permissions の副作用は worktree 外 (ホスト全体) にも及び得るため、git worktree + 非特権ユーザによる隔離を必ず確認してください',
       );
     }
+    // permission_mode=auto は agent 委譲型では実用上機能しないが (ADR-0005)、警告は CLI bootstrap
+    // で 1 回だけ出す方針 (dispatch ごとの再警告はノイズになるため)。
     let run: RunResult;
     try {
       run = await runner({
@@ -492,10 +425,9 @@ export async function dispatchSelected(
       });
     } catch (error) {
       await runAfterRunHooksSafely(deps.workspaceManager, hookContext, 'failed', logger);
-      return await markFailed(failureContext, 'runner_error', error);
+      return finalize(await markFailed(failureContext, 'runner_error', error));
     }
 
-    // after_run hook (runner status に関わらず必ず発火)
     try {
       await deps.workspaceManager.runHooks('after_run', {
         ...hookContext,
@@ -506,78 +438,23 @@ export async function dispatchSelected(
       });
     } catch (error) {
       if (isHookError(error)) {
-        return await markFailed(failureContext, 'hook_failed', error, run);
+        return finalize(await markFailed(failureContext, 'hook_failed', error, run));
       }
       throw error;
     }
 
-    // 7. Result Triage
+    // Result Triage (orchestration-mvp.md「6. Result Triage」)
     if (run.status === 'timeout') {
-      return await markFailed(failureContext, 'timeout', null, run);
+      return finalize(await markFailed(failureContext, 'timeout', null, run));
     }
     if (run.status === 'stalled') {
-      return await markFailed(failureContext, 'stalled', null, run);
+      return finalize(await markFailed(failureContext, 'stalled', null, run));
     }
     if (run.status === 'failed') {
-      return await markFailed(failureContext, 'runner_error', null, run);
+      return finalize(await markFailed(failureContext, 'runner_error', null, run));
     }
 
-    let commits: number;
-    try {
-      commits = await countCommitsAhead(gitRunner, workspacePath, baseRef);
-    } catch (error) {
-      return await markFailed(failureContext, 'no_changes', error, run);
-    }
-    if (commits === 0) {
-      return await markFailed(failureContext, 'no_changes', null, run);
-    }
-
-    // 8. PR Submission
-    try {
-      await pushBranch(gitRunner, workspacePath, branch, remote);
-    } catch (error) {
-      return await markFailed(failureContext, 'push', error, run);
-    }
-
-    let prNumber: number;
-    try {
-      const acceptanceCriteria = extractAcceptanceCriteria(issue.body ?? '');
-      const pr = await deps.githubClient.createPullRequest({
-        owner: repository.owner,
-        repo: repository.name,
-        base: deps.config.baseBranch,
-        head: branch,
-        title: candidate.issueTitle,
-        body: buildPullRequestBody({
-          issueNumber: candidate.issueNumber,
-          acceptanceCriteria,
-          runId,
-          durationMs: run.durationMs,
-          totalCostUsd: run.totalCostUsd,
-          finalText: run.finalText,
-          numTurns: run.numTurns,
-        }),
-      });
-      prNumber = pr.number;
-    } catch (error) {
-      return await markFailed(failureContext, 'pr_create', error, run);
-    }
-
-    // 8.3 Status Update: In Progress → In Review
-    try {
-      await deps.githubClient.updateProjectV2ItemStatus({
-        projectId: deps.projectId,
-        itemId: candidate.itemId,
-        fieldId: deps.statusFieldId,
-        optionId: deps.statusOptions['In Review'],
-      });
-    } catch (error) {
-      logger.warn('Status を In Review に遷移できませんでした (PR は作成済み)', {
-        error: describeError(error),
-      });
-    }
-
-    // 8.4 worktree cleanup
+    // Cleanup (success): runner exit 0 のみ worktree を削除する (ADR-0005)
     try {
       await deps.workspaceManager.cleanupWorkspace({ taskKey, branch, deleteBranch: true });
     } catch (error) {
@@ -590,7 +467,6 @@ export async function dispatchSelected(
       status: 'success',
       failureReason: null,
       branch,
-      prNumber,
       durationMs: run.durationMs,
       totalCostUsd: run.totalCostUsd,
       finalText: run.finalText,
@@ -598,7 +474,6 @@ export async function dispatchSelected(
     });
 
     logger.info('run completed successfully', {
-      prNumber,
       branch,
     });
 
@@ -609,23 +484,24 @@ export async function dispatchSelected(
       totalCostUsd: run.totalCostUsd,
     });
 
-    return {
+    return finalize({
       kind: 'success',
       runId,
       issueNumber: candidate.issueNumber,
-      prNumber,
       branch,
-    };
-  } finally {
-    // 防御策: hook の非 HookError 再 throw 等で markFailed/success のいずれにも入れず
-    // 抜けた場合に、tracker.running から確実に除去する (idempotent なので二重呼びは no-op)。
-    tracker.runFinished({
-      kind: 'failed',
-      runId,
-      issueNumber: candidate.issueNumber,
-      reason: 'runner_error',
-      totalCostUsd: null,
     });
+  } finally {
+    // 想定外の throw で resolved にならなかった場合の防御的な finalize。
+    // 通常パス (success / markFailed) は finalize を経由して runFinished 済みなので noop になる。
+    if (!resolved) {
+      tracker.runFinished({
+        kind: 'failed',
+        runId,
+        issueNumber: candidate.issueNumber,
+        reason: 'runner_error',
+        totalCostUsd: null,
+      });
+    }
   }
 }
 
@@ -636,11 +512,7 @@ type FailureContext = {
   issue: Issue;
   repository: { owner: string; name: string };
   branch: string;
-  projectId: string;
-  statusFieldId: string;
-  statusOptions: StatusOptionMap;
   startedAt: Date;
-  githubClient: GitHubClient;
   logger: Logger;
   clock: RunOnceClock;
   runTracker: RunTracker;
@@ -655,7 +527,6 @@ async function markFailed(
   const finishedAt = ctx.clock();
   const durationMs = run?.durationMs ?? finishedAt.getTime() - ctx.startedAt.getTime();
   const totalCostUsd = run?.totalCostUsd ?? null;
-  const summary = run !== undefined ? summarizeRunResult(run) : null;
   const detail = error !== undefined && error !== null ? describeError(error) : null;
 
   ctx.logger.error('run failed', {
@@ -663,44 +534,10 @@ async function markFailed(
     detail,
   });
 
-  try {
-    await ctx.githubClient.commentIssue({
-      owner: ctx.repository.owner,
-      repo: ctx.repository.name,
-      issueNumber: ctx.candidate.issueNumber,
-      body: buildFailureCommentBody({
-        reason,
-        runId: ctx.runId,
-        durationMs,
-        totalCostUsd,
-        runnerSummary: summary,
-        detail,
-      }),
-    });
-  } catch (commentError) {
-    ctx.logger.warn('Issue 失敗コメントの投稿に失敗しました', {
-      error: describeError(commentError),
-    });
-  }
-
-  try {
-    await ctx.githubClient.updateProjectV2ItemStatus({
-      projectId: ctx.projectId,
-      itemId: ctx.candidate.itemId,
-      fieldId: ctx.statusFieldId,
-      optionId: ctx.statusOptions['Failed'],
-    });
-  } catch (statusError) {
-    ctx.logger.warn('Status を Failed に遷移できませんでした', {
-      error: describeError(statusError),
-    });
-  }
-
   await persistRun(ctx, {
     status: 'failed',
     failureReason: reason,
     branch: ctx.branch,
-    prNumber: null,
     durationMs,
     totalCostUsd,
     finalText: run?.finalText ?? null,
@@ -728,7 +565,6 @@ type PersistInput = {
   status: RunLogStatus;
   failureReason: FailureReason | null;
   branch: string | null;
-  prNumber: number | null;
   durationMs: number;
   totalCostUsd: number | null;
   finalText: string | null;
@@ -745,7 +581,6 @@ async function persistRun(ctx: FailureContext, input: PersistInput): Promise<voi
     failureReason: input.failureReason,
     totalCostUsd: input.totalCostUsd,
     branch: input.branch,
-    prNumber: input.prNumber,
   });
   await writeSummary(ctx.runLog, {
     runId: ctx.runId,
@@ -766,6 +601,7 @@ type SelectInput = {
   githubClient: GitHubClient;
   agentUserLogin: string | null;
   logger: Logger;
+  guard: DispatchGuard;
 };
 
 type SelectResult = {
@@ -803,7 +639,12 @@ async function selectAcceptableCandidates(
         agentUserLogin: input.agentUserLogin,
       });
       if (result.ok) {
-        acceptable.push({ candidate, issue, repository });
+        const guardResult = await checkDispatchGuard(input.guard, candidate.issueNumber);
+        if (guardResult.ok) {
+          acceptable.push({ candidate, issue, repository });
+        } else {
+          logSkipReason(input.logger, candidate.issueNumber, guardResult.reason);
+        }
       } else {
         input.logger.info(`skip candidate (${result.reason})`, {
           issueNumber: candidate.issueNumber,
@@ -819,18 +660,12 @@ async function selectAcceptableCandidates(
   return acceptable;
 }
 
-function extractAcceptanceCriteria(body: string): string {
-  const normalized = body.replace(/\r\n/g, '\n');
-  const lines = normalized.split('\n');
-  const headerIndex = lines.findIndex((line) => /^##\s+Acceptance Criteria\s*$/.test(line));
-  if (headerIndex === -1) return '';
-  const collected: string[] = [];
-  for (let i = headerIndex + 1; i < lines.length; i += 1) {
-    const line = lines[i] ?? '';
-    if (/^##\s+/.test(line)) break;
-    collected.push(line);
+function logSkipReason(logger: Logger, issueNumber: number, reason: DispatchGuardSkipReason): void {
+  if (reason === 'workspace_exists') {
+    logger.info('skip candidate (workspace already exists)', { issueNumber });
+    return;
   }
-  return collected.join('\n').trim();
+  logger.info('skip candidate (already in flight)', { issueNumber });
 }
 
 function describeError(error: unknown): string {
@@ -842,12 +677,6 @@ function isHookError(error: unknown): error is HookExecutionError | HookTimeoutE
   return error instanceof HookExecutionError || error instanceof HookTimeoutError;
 }
 
-/**
- * runner が throw したパス用の after_run 発火ヘルパー。
- *
- * ここで hook が失敗しても、後段の `markFailed` が runner エラーで失敗を確定させるため
- * 上書きせずに warn ログだけ残して飲み込む。
- */
 async function runAfterRunHooksSafely(
   workspaceManager: WorkspaceManager,
   context: HookContext,

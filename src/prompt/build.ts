@@ -1,4 +1,8 @@
-import { parseIssueBody } from './parse.js';
+import {
+  buildOrchestratorFooterLines,
+  ORCHESTRATOR_FOOTER_HEADER,
+  type StatusTransitions,
+} from '../workflow/footer.js';
 
 export type BuildPromptInput = {
   repository: { owner: string; name: string };
@@ -8,26 +12,24 @@ export type BuildPromptInput = {
   issueUrl: string;
   issueBody: string;
   workspacePath: string;
+  project: {
+    owner: string;
+    number: number;
+    statusField: string;
+  };
+  statusTransitions: StatusTransitions;
 };
 
-const ORCHESTRATOR_CONSTRAINTS_HEADER = '## Orchestrator からの追加制約';
-const ORCHESTRATOR_CONSTRAINTS = [
-  '- `git push` を実行しないこと (push は Orchestrator が行う)',
-  '- Pull Request を作成しないこと (PR 作成は Orchestrator が行う)',
-  '- GitHub token を期待しないこと (token は Runner プロセスに渡されない)',
-  '- 現在の worktree のブランチ上で [Conventional Commits](https://www.conventionalcommits.org/) 形式で commit すること',
-];
-
-const RUNNER_DEFINITION_OF_DONE = [
-  '- [ ] Issue の Acceptance Criteria をすべて満たしている',
-  '- [ ] ローカルで CI 相当のチェック (`format` / `lint` / `unit-test`) が green である',
-  '- [ ] 必要なドキュメント (`docs/adr/` の ADR、`docs/specs/` の仕様書) を作成・更新している',
-  '- [ ] コミットメッセージが Conventional Commits に準拠している',
-];
-
+/**
+ * Issue body を構造化抽出せずそのまま prompt に貼り付けるフォールバック実装 (ADR-0005)。
+ *
+ * - `## Goal` / `## Constraints` / `## Acceptance Criteria` の必須セクションは撤廃
+ * - footer は `workflow/footer.ts` の単一ソースを利用 (テンプレート経路と同一文言)
+ * - 遷移先 Status 名は `philharmonic.yaml` の `status_transitions` から渡す
+ *
+ * spec: docs/specs/prompt-construction.md
+ */
 export function buildPrompt(input: BuildPromptInput): string {
-  const parsed = parseIssueBody(input.issueBody);
-
   const context = [
     '# Context',
     '',
@@ -35,29 +37,22 @@ export function buildPrompt(input: BuildPromptInput): string {
     `- Base branch: ${input.baseBranch}`,
     `- Issue: #${input.issueNumber} ${input.issueTitle}`,
     `- Issue URL: ${input.issueUrl}`,
+    `- Project: ${input.project.owner}/projects/${input.project.number} (Status field: \`${input.project.statusField}\`)`,
     `- Workspace (worktree, absolute path): ${input.workspacePath}`,
     '- 必ずリポジトリの `AGENTS.md` および `CLAUDE.md` を参照してから着手すること',
   ].join('\n');
 
-  const goal = ['# Goal', '', parsed.goal].join('\n');
+  const issueBody = ['# Issue 本文', '', normalizeBody(input.issueBody)].join('\n');
 
-  const constraints = [
-    '# Constraints',
+  const footer = [
+    ORCHESTRATOR_FOOTER_HEADER,
     '',
-    parsed.constraints,
-    '',
-    ORCHESTRATOR_CONSTRAINTS_HEADER,
-    '',
-    ...ORCHESTRATOR_CONSTRAINTS,
+    ...buildOrchestratorFooterLines(input.statusTransitions),
   ].join('\n');
 
-  const acceptanceCriteria = ['# Acceptance Criteria', '', parsed.acceptanceCriteria].join('\n');
+  return [context, issueBody, footer].join('\n\n') + '\n';
+}
 
-  const definitionOfDone = [
-    '# Definition of Done (Runner 向け)',
-    '',
-    ...RUNNER_DEFINITION_OF_DONE,
-  ].join('\n');
-
-  return [context, goal, constraints, acceptanceCriteria, definitionOfDone].join('\n\n') + '\n';
+function normalizeBody(body: string): string {
+  return body.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
 }

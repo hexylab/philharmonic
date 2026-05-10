@@ -30,10 +30,10 @@ function fakeConfig(overrides: Partial<Config> = {}): Config {
     killGracePeriodMs: 5_000,
     workspaceRoot: '.philharmonic/worktrees',
     dispatchStatuses: ['Todo'],
+    statusTransitions: { inProgress: 'In Progress', inReview: 'In Review', failed: 'Failed' },
     cleanRetentionDays: 7,
     logLevel: 'info',
     polling: { intervalMs: 30_000 },
-    retry: { maxAttempts: 3, maxBackoffMs: 600_000 },
     agent: { maxConcurrentAgents: 1, maxTurns: 1, stallTimeoutMs: 300_000 },
     hooks: { afterCreate: [], beforeRun: [], afterRun: [], beforeRemove: [] },
     server: null,
@@ -49,14 +49,11 @@ const fakeCreateWorkflowSource = vi.fn(async () => fakeWorkflowSource);
 
 const fakeGitHub: GitHubClient = {
   getIssue: vi.fn(),
-  commentIssue: vi.fn(),
-  createPullRequest: vi.fn(),
-  updateProjectV2ItemStatus: vi.fn(),
+  listOpenPullRequests: vi.fn(),
 };
 
 const fakeProjects: ProjectsClient = {
   fetchProjectCandidates: vi.fn(),
-  fetchProjectMetadata: vi.fn(),
 };
 
 const fakeWorkspace: WorkspaceManager = {
@@ -127,14 +124,13 @@ describe('philharmonic run CLI コマンド', () => {
     expect(runOnceMock).toHaveBeenCalledTimes(1);
   });
 
-  it('success のときは run-id / pr / branch を含む 1 行を stdout に出す', async () => {
+  it('success のときは run-id / branch を含む 1 行を stdout に出す (ADR-0005 で PR 番号は agent 領域)', async () => {
     const streams = createStreams();
     const runOnceMock = vi.fn(
       async (): Promise<RunOnceResult> => ({
         kind: 'success',
         runId: 'rid',
         issueNumber: 19,
-        prNumber: 99,
         branch: 'feature/19-task',
       }),
     );
@@ -151,8 +147,8 @@ describe('philharmonic run CLI コマンド', () => {
     const written = streams.stdout.write.mock.calls.map((c) => c[0] as string).join('');
     expect(written).toContain('success');
     expect(written).toContain('run-id=rid');
-    expect(written).toContain('pr=#99');
     expect(written).toContain('branch=feature/19-task');
+    expect(written).not.toContain('pr=');
   });
 
   it('failed のときは reason 付きで stderr に出して exit 1', async () => {
@@ -203,10 +199,7 @@ describe('philharmonic run CLI コマンド', () => {
   it('BootstrapError が throw されたら stderr に出して exit 1', async () => {
     const streams = createStreams();
     const runOnceMock = vi.fn(async () => {
-      throw new BootstrapError(
-        'status_transition_to_in_progress_failed',
-        'Status を In Progress に遷移できませんでした: oops',
-      );
+      throw new BootstrapError('config_load_failed', 'Project metadata の取得に失敗しました: oops');
     });
     const { exit } = await runCmd(streams, {
       cwd: () => '/tmp/repo',
@@ -218,7 +211,7 @@ describe('philharmonic run CLI コマンド', () => {
       createWorkflowSource: fakeCreateWorkflowSource,
       runOnce: runOnceMock,
     });
-    expect(streams.stderr.write).toHaveBeenCalledWith(expect.stringContaining('In Progress'));
+    expect(streams.stderr.write).toHaveBeenCalledWith(expect.stringContaining('Project metadata'));
     expect(exit).toHaveBeenCalledWith(1);
   });
 });

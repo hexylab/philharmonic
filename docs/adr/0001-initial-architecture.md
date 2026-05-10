@@ -1,7 +1,18 @@
 # ADR-0001: 初期アーキテクチャ — 技術スタックと MVP スコープ
 
-- **ステータス**: Accepted
+- **ステータス**: Accepted (一部 Superseded by [ADR-0005](./0005-thin-orchestrator-agent-delegation.md))
 - **決定日**: 2026-05-06
+
+> **NOTE (2026-05-10)**: 以下は ADR-0005 で Superseded され、現在は適用されない。
+>
+> - 「PR 作成は Orchestrator が Octokit REST 経由で行う」
+> - 「Status 遷移は Orchestrator が GitHub Projects v2 GraphQL 経由で行う」
+> - 「Runner には GitHub token を一切渡さない (環境変数からも除外)」
+> - In-scope の「対応 Issue へのリンクを含む Pull Request を作成」「Project Item の Status を更新」
+>
+> Status 遷移 / PR 作成 / Issue コメントは agent (Claude Code + `gh` CLI) が行う。Runner には `GITHUB_TOKEN` / `GH_TOKEN` を env allowlist 経由で渡す。詳細は [ADR-0005](./0005-thin-orchestrator-agent-delegation.md) を参照。
+>
+> 言語 / runtime / pnpm / Octokit / Claude Code subprocess 起動方式 / git worktree per task / `permission_mode: auto / bypass` の枠組みは引き続き有効。
 
 ---
 
