@@ -24,4 +24,13 @@ describe('createProgram', () => {
 
     expect(program.version()).toBe('0.0.0');
   });
+
+  it('--help 出力に主要サブコマンドが列挙される (dashboard 含む)', () => {
+    const program = createProgram();
+
+    const helpText = program.helpInformation();
+    for (const name of ['init', 'projects', 'run', 'serve', 'clean', 'dashboard']) {
+      expect(helpText).toContain(name);
+    }
+  });
 });
