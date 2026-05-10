@@ -4,6 +4,13 @@ export {
   type DependencyIssueFetcherDeps,
 } from './dependency-filter.js';
 export { BootstrapError, type BootstrapErrorReason, type FailureReason } from './errors.js';
+export {
+  renderFailureSummary,
+  resolveFailureSummaryPath,
+  writeFailureSummary,
+  type FailureSummaryArtifact,
+  type FailureSummaryInput,
+} from './failure-summary.js';
 export { fetchBaseBranch } from './git.js';
 export {
   InvalidRepositoryError,

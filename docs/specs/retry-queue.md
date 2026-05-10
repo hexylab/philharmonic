@@ -13,6 +13,7 @@
 
 - Issue #84 — 失敗・stalled run を指数バックオフで自動リトライする
 - Issue #85 — 正常終了後も Issue が active なら continuation retry で再確認する
+- Issue #86 — 自動リトライ上限到達時に失敗情報と手動復旧手順を残す ([Failure summary on exhaustion](#failure-summary-on-exhaustion-issue-86))
 - ADR: [ADR-0008 失敗 / stalled run を指数バックオフで再 dispatch する in-memory retry queue を導入する](../adr/0008-in-memory-retry-queue.md), [ADR-0009 agent run の正常終了後に Issue が active のままなら continuation retry で再確認する](../adr/0009-continuation-retry-after-success.md)
 - 関連 spec: [serve-daemon.md](./serve-daemon.md), [orchestration-mvp.md](./orchestration-mvp.md), [snapshot-api.md](./snapshot-api.md), [config-schema.md](./config-schema.md)
 - 関連 ADR: [ADR-0005 §7 worktree cleanup の trigger 簡素化](../adr/0005-thin-orchestrator-agent-delegation.md), [ADR-0005 §8 retry-state は撤廃](../adr/0005-thin-orchestrator-agent-delegation.md)
@@ -333,17 +334,43 @@ retry queue 上の entry は **`/api/v1/<issue_number>` には載せない** (= 
 | `dispatchSelected` の throw                           | BootstrapError 等   | 既存挙動 (catch して `runner_error` 扱い)。retry queue にも積み直す                                                              |
 | retry queue が `agent.max_retry_attempts == 0` で無効 | retry 機能 off      | `dispatchSelected` 失敗時に schedule しない (`retryQueue.schedule` を呼ばない)                                                   |
 
+## Failure summary on exhaustion (Issue #86)
+
+`kind=failure` の retry が上限に到達した瞬間に、運用者向けの失敗サマリを **per-run-id** の Markdown ファイルとして書き出す。
+
+- 出力先: `<runnerLogsRoot>/<runId>/failure-summary.md` (= 通常の repo 配下では `.philharmonic/runs/<run-id>/failure-summary.md`)
+- 既存 `createRunLog` が `<runId>` dir を mkdir 済みのため追加 mkdir は不要
+- ファイル内容には issue number / final attempt / max attempts / last failure reason / last run id / branch / worktree path / exhausted at / 直近 error summary (先頭 500 文字) と、関連 run artifact (`summary.md` / `stream.jsonl` / `stderr.log` / `metadata.json`) への相対パス、人手での再実行手順 (`Project Status を Todo に戻す` ほか) を含める
+- `kind=continuation` の exhaustion では failure summary は **書かない** (失敗ではなく「Status flip 漏れの上限到達」のため)。既存 `retry exhausted` warn ログだけが残る
+- 書き込みに失敗した場合は `failure summary write failed` warn を 1 行残し、後続の `retry exhausted` warn の `failureSummaryPath` を `null` にして処理継続する (Issue #86 完了条件「comment / log 投稿に失敗しても orchestrator 本体の failure handling は壊れない」を満たす)
+
+ADR-0005「orchestrator は GitHub に書き込まない」方針との関係上、Issue comment 投稿 / `Failed` Status 遷移は本 spec の範囲では **行わない**。Issue #86 の Acceptance Criteria は「Issue comment を使う場合は ...」「`Failed` state 遷移を行う/行わない方針が実装または文書化される」と条件付き / 文書化要件で書かれており、本 spec で「現状は file + 構造化ログのみ」と明文化することで満たす。
+
+### 構造化ログとの対応
+
+`retry exhausted` warn (kind=`failure`) には failure summary 関連フィールドが追加で乗る:
+
+| field                | 値                                                    |
+| -------------------- | ----------------------------------------------------- |
+| `failureSummaryPath` | 書き出した absolute path (失敗時 null)                |
+| `summaryPath`        | `.philharmonic/runs/<runId>/summary.md` (相対 path)   |
+| `streamPath`         | `.philharmonic/runs/<runId>/stream.jsonl` (相対 path) |
+| `stderrPath`         | `.philharmonic/runs/<runId>/stderr.log` (相対 path)   |
+| `branch`             | feature branch                                        |
+| `workspacePath`      | retry 対象 Issue の worktree path                     |
+
 ## 構造化ログ
 
-| level | msg                             | fields                                                                                                                                   |
-| ----- | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| info  | `retry scheduled`               | `kind`, `issueNumber`, `attempt`, `delayMs`, `dueAt`, `failureReason` (continuation では null), `lastRunId`, `via` (recovery 経由のとき) |
-| info  | `retry due`                     | `kind`, `issueNumber`, `attempt`, `lastRunId`                                                                                            |
-| info  | `retry skipped`                 | `kind`, `issueNumber`, `attempt`, `reason` (`closed` / `terminal_status` / `inactive_status` / `fetch_error` / `tracker_in_flight`)      |
-| warn  | `retry exhausted`               | `kind`, `issueNumber`, `attempt`, `failureReason` (continuation では null), `lastRunId`                                                  |
-| warn  | `retry drain error`             | `error`                                                                                                                                  |
-| info  | `continuation released`         | `issueNumber`, `reason` (`closed` / `terminal_status` / `inactive_status` / `fetch_error`), `status` (取得できたとき), `lastRunId`       |
-| info  | `skip candidate (retry queued)` | `issueNumber` — `DispatchGuard.inRetryQueue` が true で fresh selection から skip した                                                   |
+| level | msg                             | fields                                                                                                                                                                                                                                                                                                                                 |
+| ----- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| info  | `retry scheduled`               | `kind`, `issueNumber`, `attempt`, `delayMs`, `dueAt`, `failureReason` (continuation では null), `lastRunId`, `via` (recovery 経由のとき)                                                                                                                                                                                               |
+| info  | `retry due`                     | `kind`, `issueNumber`, `attempt`, `lastRunId`                                                                                                                                                                                                                                                                                          |
+| info  | `retry skipped`                 | `kind`, `issueNumber`, `attempt`, `reason` (`closed` / `terminal_status` / `inactive_status` / `fetch_error` / `tracker_in_flight`)                                                                                                                                                                                                    |
+| warn  | `retry exhausted`               | `kind`, `issueNumber`, `attempt`, `failureReason` (continuation では null), `lastRunId`。**kind=`failure` のみ** さらに `branch`, `workspacePath`, `failureSummaryPath` (書き込み失敗時 null), `summaryPath`, `streamPath`, `stderrPath` を含む (Issue #86 / [Failure summary on exhaustion](#failure-summary-on-exhaustion-issue-86)) |
+| warn  | `failure summary write failed`  | `issueNumber`, `runId`, `attempt`, `path`, `error` — `kind=failure` exhaustion 時に Markdown 書き込みが失敗したとき (Issue #86)                                                                                                                                                                                                        |
+| warn  | `retry drain error`             | `error`                                                                                                                                                                                                                                                                                                                                |
+| info  | `continuation released`         | `issueNumber`, `reason` (`closed` / `terminal_status` / `inactive_status` / `fetch_error`), `status` (取得できたとき), `lastRunId`                                                                                                                                                                                                     |
+| info  | `skip candidate (retry queued)` | `issueNumber` — `DispatchGuard.inRetryQueue` が true で fresh selection から skip した                                                                                                                                                                                                                                                 |
 
 `concurrent tick` ログには `retries` フィールドを追加する (= 当 tick で dispatch する retry 件数)。
 
@@ -370,6 +397,8 @@ retry queue 上の entry は **`/api/v1/<issue_number>` には載せない** (= 
 - multi-host 跨ぎの retry queue 共有 — multi-host orchestration ADR で扱う (MVP out-of-scope)
 - attempt counter を runlog に記録する — 個別 retry の root cause を後追いするため。`<run-id>/metadata.json` に `retryAttempt` を追加する案あり (本 spec では未採用)
 - continuation drain 時に DAG (ADR-0007) を再評価して blocked なら release する — 短い delay の間に依存先が増えるケースは稀だが、別 PR で追加する余地あり
+- failure exhaustion の Issue comment 投稿 (hidden marker `<!-- philharmonic-run-failed:issue=...;run_id=... -->` で重複防止) — ADR-0005 「orchestrator は GitHub に書き込まない」方針を覆すため、新 ADR で別途検討する (Issue #86 では comment / Status は **行わない** 方針で MVP を確定)
+- failure exhaustion 時の Project Status `Failed` 自動遷移 (opt-in 設定) — 同上の理由で新 ADR で別途検討
 
 ## MVP でやらないこと
 
@@ -378,3 +407,5 @@ retry queue 上の entry は **`/api/v1/<issue_number>` には載せない** (= 
 - failure reason 別の retry on/off 切り替え
 - jitter の追加 (固定 backoff のみ)
 - multi-host 同期
+- failure exhaustion 時の Issue comment 投稿 (Issue #86 — ADR-0005 方針維持のため、本 spec では file + 構造化ログのみ)
+- failure exhaustion 時の Project Status `Failed` 自動遷移 (Issue #86 — 同上)

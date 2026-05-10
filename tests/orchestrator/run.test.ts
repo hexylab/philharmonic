@@ -991,6 +991,91 @@ describe('runOnce + retry queue (#84 / ADR-0008)', () => {
     expect(queue.size()).toBe(0);
     const warnMessages = logger.warn.mock.calls.map((c) => c[0] as string);
     expect(warnMessages.some((m) => m === 'retry exhausted')).toBe(true);
+
+    // Issue #86: retry 上限到達時に failure summary が残り、warn ログから path で辿れる
+    const exhausted = logger.warn.mock.calls.find((c) => c[0] === 'retry exhausted');
+    const fields = exhausted?.[1] as Record<string, unknown> | undefined;
+    expect(fields).toMatchObject({
+      kind: 'failure',
+      issueNumber: 19,
+      attempt: 5,
+      failureReason: 'stalled',
+      lastRunId: FIXED_RUN_ID,
+      branch: expect.stringMatching(/^feature\/19-/),
+      summaryPath: `.philharmonic/runs/${FIXED_RUN_ID}/summary.md`,
+      streamPath: `.philharmonic/runs/${FIXED_RUN_ID}/stream.jsonl`,
+      stderrPath: `.philharmonic/runs/${FIXED_RUN_ID}/stderr.log`,
+    });
+    const failureSummaryPath = fields?.['failureSummaryPath'] as string | null;
+    expect(failureSummaryPath).toBe(path.join(tempDir, 'runs', FIXED_RUN_ID, 'failure-summary.md'));
+    const { readFileSync } = await import('node:fs');
+    const body = readFileSync(failureSummaryPath as string, 'utf8');
+    expect(body).toContain('# Run Failed (Retry Exhausted)');
+    expect(body).toContain('Issue: #19');
+    expect(body).toContain('Last failure reason: stalled');
+    expect(body).toContain(`Last run id: ${FIXED_RUN_ID}`);
+    expect(body).toContain('Manual recovery');
+  });
+
+  it('failure summary 書き込みに失敗しても retry exhausted は warn される (orchestrator は壊れない)', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const { processDispatchResultForRetryForTest } = await import('../../src/orchestrator/run.js');
+    const queue = createRetryQueue();
+
+    // 直前 attempt が retry queue 起源 (kind=failure attempt=5) で再失敗 → next=6 > max=5 で exhausted
+    const previousEntry = queue.schedule({
+      kind: 'failure',
+      issueNumber: 19,
+      repository: { owner: 'hexylab', name: 'philharmonic' },
+      branch: 'feature/19-x',
+      workspacePath: path.join(tempDir, 'wt-x'),
+      attempt: 5,
+      failureReason: 'runner_error',
+      lastRunId: 'prev-run',
+      lastErrorSummary: null,
+      now: new Date('2026-05-09T00:00:00Z'),
+      maxBackoffMs: 0,
+    });
+
+    const logger = makeFakeLogger();
+    // run log dir が存在しない runsRoot を渡すことで writeFile を ENOENT で落とす
+    // (dispatchSelected を経由しないため createRunLog の mkdir は走らない)
+    const missingRunsRoot = path.join(tempDir, 'never-created');
+
+    await processDispatchResultForRetryForTest({
+      task: {
+        candidate: SAMPLE_CANDIDATE,
+        issue: SAMPLE_ISSUE,
+        repository: { owner: 'hexylab', name: 'philharmonic' },
+        retryAttempt: 5,
+        retryFrom: previousEntry,
+      },
+      result: {
+        kind: 'failed',
+        runId: FIXED_RUN_ID,
+        issueNumber: 19,
+        reason: 'runner_error',
+        branch: 'feature/19-x',
+        errorSummary: 'boom',
+      },
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+      runnerLogsRoot: missingRunsRoot,
+      config: makeConfig(),
+      dispatchStatuses: ['Todo'],
+      logger,
+      clock: () => new Date('2026-05-09T00:01:00Z'),
+      resolveWorkspacePath: () => path.join(tempDir, 'wt-x'),
+      resolveContinuationCandidates: async () => null,
+    });
+
+    const warnCalls = logger.warn.mock.calls.map((c) => c[0] as string);
+    expect(warnCalls).toContain('failure summary write failed');
+    expect(warnCalls).toContain('retry exhausted');
+    const exhausted = logger.warn.mock.calls.find((c) => c[0] === 'retry exhausted');
+    expect((exhausted?.[1] as Record<string, unknown>)['failureSummaryPath']).toBeNull();
+    expect(queue.size()).toBe(0);
   });
 
   it('Issue が closed なら retry を skip して queue から落とす', async () => {
