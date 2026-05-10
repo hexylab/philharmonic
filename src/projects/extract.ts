@@ -31,7 +31,20 @@ export type ExtractCandidatesInput = {
   statusFieldName?: string;
 };
 
+export type ExtractedProjectContext = {
+  projectId: string;
+  candidates: Candidate[];
+};
+
 export function extractCandidates(input: ExtractCandidatesInput): Candidate[] {
+  return extractProjectContext(input).candidates;
+}
+
+/**
+ * Project candidates と一緒に project ID も返す。`philharmonic retry` (#88) のように
+ * `gh project item-edit --project-id <id>` で project ID を別途必要とする経路で使う。
+ */
+export function extractProjectContext(input: ExtractCandidatesInput): ExtractedProjectContext {
   const { response, owner, projectNumber } = input;
   const statusFieldName = input.statusFieldName ?? DEFAULT_STATUS_FIELD_NAME;
 
@@ -52,7 +65,7 @@ export function extractCandidates(input: ExtractCandidatesInput): Candidate[] {
       candidates.push(candidate);
     }
   }
-  return candidates;
+  return { projectId: project.id, candidates };
 }
 
 function toCandidate(item: ProjectItem, statusFieldName: string): Candidate | null {

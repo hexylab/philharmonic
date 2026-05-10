@@ -1,6 +1,6 @@
 import { graphql } from '@octokit/graphql';
 
-import { extractCandidates } from './extract.js';
+import { extractProjectContext, type ExtractedProjectContext } from './extract.js';
 import { PROJECT_ITEMS_QUERY } from './query.js';
 import { projectItemsResponseSchema, type Candidate } from './schema.js';
 
@@ -21,8 +21,15 @@ export type FetchProjectCandidatesInput = {
   first?: number;
 };
 
+export type ProjectContext = ExtractedProjectContext;
+
 export type ProjectsClient = {
   fetchProjectCandidates(input: FetchProjectCandidatesInput): Promise<Candidate[]>;
+  /**
+   * project ID 込みで candidates を返す read-only API。`philharmonic retry` (#88) など
+   * `gh project item-edit --project-id <id>` で project ID を必要とする経路で使う。
+   */
+  fetchProjectContext(input: FetchProjectCandidatesInput): Promise<ProjectContext>;
 };
 
 const DEFAULT_FIRST = 100;
@@ -49,25 +56,33 @@ export function createProjectsClient(options: CreateProjectsClientOptions): Proj
 
   return {
     async fetchProjectCandidates(input) {
-      const first = input.first ?? DEFAULT_FIRST;
-      if (!Number.isInteger(first) || first < MIN_FIRST || first > MAX_FIRST) {
-        throw new InvalidFirstError(first);
-      }
-
-      const raw = await request<unknown>(PROJECT_ITEMS_QUERY, {
-        owner: input.owner,
-        number: input.projectNumber,
-        first,
-      });
-
-      const response = projectItemsResponseSchema.parse(raw);
-
-      return extractCandidates({
-        response,
-        owner: input.owner,
-        projectNumber: input.projectNumber,
-        statusFieldName: input.statusFieldName,
-      });
+      const context = await fetchContext(input);
+      return context.candidates;
+    },
+    async fetchProjectContext(input) {
+      return fetchContext(input);
     },
   };
+
+  async function fetchContext(input: FetchProjectCandidatesInput): Promise<ProjectContext> {
+    const first = input.first ?? DEFAULT_FIRST;
+    if (!Number.isInteger(first) || first < MIN_FIRST || first > MAX_FIRST) {
+      throw new InvalidFirstError(first);
+    }
+
+    const raw = await request<unknown>(PROJECT_ITEMS_QUERY, {
+      owner: input.owner,
+      number: input.projectNumber,
+      first,
+    });
+
+    const response = projectItemsResponseSchema.parse(raw);
+
+    return extractProjectContext({
+      response,
+      owner: input.owner,
+      projectNumber: input.projectNumber,
+      statusFieldName: input.statusFieldName,
+    });
+  }
 }

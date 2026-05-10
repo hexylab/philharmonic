@@ -130,6 +130,7 @@ philharmonic serve
 | Todo の候補を見る      | `philharmonic projects list` |
 | 1 回だけ実行する       | `philharmonic run`           |
 | 常駐して自動 dispatch  | `philharmonic serve`         |
+| 失敗 Issue を再実行    | `philharmonic retry <n>`     |
 | 古い作業場所を掃除する | `philharmonic clean`         |
 | daemon の状態を見る    | `philharmonic dashboard`     |
 

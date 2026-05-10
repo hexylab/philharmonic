@@ -4,6 +4,7 @@ import { createCleanCommand } from './cli/clean.js';
 import { createDashboardCommand } from './cli/dashboard.js';
 import { createInitCommand } from './cli/init.js';
 import { createProjectsCommand } from './cli/projects.js';
+import { createRetryCommand } from './cli/retry.js';
 import { createRunCommand } from './cli/run.js';
 import { createServeCommand } from './cli/serve.js';
 
@@ -24,6 +25,7 @@ export function createProgram(): Command {
   program.addCommand(createProjectsCommand());
   program.addCommand(createRunCommand());
   program.addCommand(createServeCommand());
+  program.addCommand(createRetryCommand());
   program.addCommand(createCleanCommand());
   program.addCommand(createDashboardCommand());
 

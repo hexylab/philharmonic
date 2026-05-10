@@ -3,7 +3,11 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import { extractCandidates, ProjectNotFoundError } from '../../src/projects/extract.js';
+import {
+  extractCandidates,
+  extractProjectContext,
+  ProjectNotFoundError,
+} from '../../src/projects/extract.js';
 import {
   projectItemsResponseSchema,
   type ProjectItemsResponse,
@@ -118,5 +122,24 @@ describe('extractCandidates', () => {
       expect(error).toBeInstanceOf(ProjectNotFoundError);
       expect((error as ProjectNotFoundError).reason).toBe('project_not_found');
     }
+  });
+});
+
+describe('extractProjectContext', () => {
+  it('projectId と candidates を一緒に返す (`philharmonic retry` で gh project item-edit に使う)', () => {
+    const response = loadFixture();
+
+    const context = extractProjectContext({
+      response,
+      owner: 'hexylab',
+      projectNumber: 1,
+    });
+
+    expect(context.projectId).toBe('PVT_kwHOA_example');
+    expect(context.candidates.map((c) => c.itemId)).toEqual([
+      'PVTI_lADOA_issue_todo',
+      'PVTI_lADOA_issue_in_progress',
+      'PVTI_lADOA_issue_no_status',
+    ]);
   });
 });
