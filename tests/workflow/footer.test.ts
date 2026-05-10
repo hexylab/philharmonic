@@ -13,11 +13,14 @@ describe('appendOrchestratorFooter', () => {
     expect(out).toBe(`\n\n${ORCHESTRATOR_FOOTER}\n`);
   });
 
-  it('フッタには 4 つの安全制約と Conventional Commits リンクが含まれる', () => {
-    expect(ORCHESTRATOR_FOOTER).toContain('## Orchestrator からの追加制約');
-    expect(ORCHESTRATOR_FOOTER).toContain('`git push` を実行しないこと');
-    expect(ORCHESTRATOR_FOOTER).toContain('Pull Request を作成しないこと');
-    expect(ORCHESTRATOR_FOOTER).toContain('GitHub token を期待しないこと');
+  it('フッタには agent 委譲指示が含まれる (ADR-0005)', () => {
+    expect(ORCHESTRATOR_FOOTER).toContain('## Orchestrator からの追加指示');
+    expect(ORCHESTRATOR_FOOTER).toContain('Project Status を `In Progress` に遷移');
+    expect(ORCHESTRATOR_FOOTER).toContain('`git push -u origin <branch>`');
+    expect(ORCHESTRATOR_FOOTER).toContain('`gh pr create`');
+    expect(ORCHESTRATOR_FOOTER).toContain('Project Status を `In Review` に遷移');
+    expect(ORCHESTRATOR_FOOTER).toContain('Project Status を `Failed` に遷移');
     expect(ORCHESTRATOR_FOOTER).toContain('Conventional Commits');
+    expect(ORCHESTRATOR_FOOTER).toContain('GITHUB_TOKEN');
   });
 });

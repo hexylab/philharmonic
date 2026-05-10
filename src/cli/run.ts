@@ -137,6 +137,14 @@ async function runRunCommand(
     logger,
   });
 
+  if (config.permissionMode === 'auto') {
+    // ADR-0005: agent 委譲型では bypass が実用上必須。auto では agent が gh / git push を呼べず
+    // Status 遷移 / PR 作成が失敗する。
+    logger.warn(
+      'permission_mode=auto では agent が Bash tool (gh / git push) を呼べず、Status 遷移 / PR 作成が失敗します (ADR-0005)。philharmonic.yaml の permission_mode を bypass に変更してください',
+    );
+  }
+
   // WORKFLOW.md は repoRoot 直下に解決する。`philharmonic run` は単発実行のため watch=false。
   let workflowSource: WorkflowSource;
   try {
@@ -184,7 +192,7 @@ async function runRunCommand(
       return;
     case 'success':
       deps.stdout.write(
-        `success run-id=${result.runId} issue=#${result.issueNumber} pr=#${result.prNumber} branch=${result.branch}\n`,
+        `success run-id=${result.runId} issue=#${result.issueNumber} branch=${result.branch}\n`,
       );
       return;
     case 'failed':

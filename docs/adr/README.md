@@ -60,7 +60,8 @@
 
 <!-- 新規 ADR を追加したらこのリストを更新する -->
 
-- [ADR-0001: 初期アーキテクチャ — 技術スタックと MVP スコープ](./0001-initial-architecture.md) (Accepted)
+- [ADR-0001: 初期アーキテクチャ — 技術スタックと MVP スコープ](./0001-initial-architecture.md) (Accepted, 一部 Superseded by ADR-0005)
 - [ADR-0002: 横串の構造化ロガーを自作で導入する](./0002-structured-logger.md) (Accepted)
-- [ADR-0003: WORKFLOW.md の prompt テンプレートエンジンに LiquidJS を採用する](./0003-prompt-templating.md) (Accepted)
+- [ADR-0003: WORKFLOW.md の prompt テンプレートエンジンに LiquidJS を採用する](./0003-prompt-templating.md) (Accepted, 一部 Superseded by ADR-0005)
 - [ADR-0004: Snapshot HTTP API は Node 標準 http で loopback 固定で公開する](./0004-snapshot-http-api.md) (Accepted)
+- [ADR-0005: Philharmonic を薄い orchestrator に再設計し、Status 遷移 / PR 作成 / Issue コメントを agent に委譲する](./0005-thin-orchestrator-agent-delegation.md) (Accepted)

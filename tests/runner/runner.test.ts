@@ -158,10 +158,12 @@ describe('runClaude — spawn arguments', () => {
     expect(call.options.cwd).toBe('/abs/ws');
   });
 
-  it('env に GitHub token 系を含めない (default env 使用時)', async () => {
+  it('env に GitHub token (GITHUB_TOKEN / GH_TOKEN) を agent 委譲のため透過する (ADR-0005, default env 使用時)', async () => {
     const { spawn, calls } = createSpawnFn();
-    const original = process.env.GH_TOKEN;
-    process.env.GH_TOKEN = 'should-be-removed';
+    const originalGh = process.env.GH_TOKEN;
+    const originalGithub = process.env.GITHUB_TOKEN;
+    process.env.GH_TOKEN = 'gh-token-value';
+    process.env.GITHUB_TOKEN = 'github-token-value';
     let call: SpawnCall;
     try {
       const promise = runClaude(baseOptions({ spawn, env: undefined }));
@@ -169,11 +171,14 @@ describe('runClaude — spawn arguments', () => {
       call.child.emit('close', 0, null);
       await promise;
     } finally {
-      if (original === undefined) delete process.env.GH_TOKEN;
-      else process.env.GH_TOKEN = original;
+      if (originalGh === undefined) delete process.env.GH_TOKEN;
+      else process.env.GH_TOKEN = originalGh;
+      if (originalGithub === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = originalGithub;
     }
 
-    expect(call.options.env.GH_TOKEN).toBeUndefined();
+    expect(call.options.env.GH_TOKEN).toBe('gh-token-value');
+    expect(call.options.env.GITHUB_TOKEN).toBe('github-token-value');
   });
 });
 

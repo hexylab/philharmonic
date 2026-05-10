@@ -76,7 +76,6 @@ describe('writeMetadata', () => {
       failureReason: null,
       totalCostUsd: 0.12345,
       branch: 'feature/18-runlog-persistence',
-      prNumber: 42,
     };
     await writeMetadata(runLog, metadata);
 
@@ -91,7 +90,6 @@ describe('writeMetadata', () => {
       failure_reason: null,
       total_cost_usd: 0.12345,
       branch: 'feature/18-runlog-persistence',
-      pr_number: 42,
     });
     expect(raw.endsWith('\n')).toBe(true);
   });
@@ -107,7 +105,6 @@ describe('writeMetadata', () => {
       failureReason: 'runner_error',
       totalCostUsd: null,
       branch: null,
-      prNumber: null,
     };
     await writeMetadata(runLog, metadata);
 
@@ -116,7 +113,7 @@ describe('writeMetadata', () => {
     expect(parsed.failure_reason).toBe('runner_error');
     expect(parsed.total_cost_usd).toBeNull();
     expect(parsed.branch).toBeNull();
-    expect(parsed.pr_number).toBeNull();
+    expect(parsed.pr_number).toBeUndefined();
   });
 
   it('実行中の状態として finished_at=null を書ける', async () => {
@@ -130,7 +127,6 @@ describe('writeMetadata', () => {
       failureReason: null,
       totalCostUsd: null,
       branch: null,
-      prNumber: null,
     };
     await writeMetadata(runLog, metadata);
 

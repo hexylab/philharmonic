@@ -33,7 +33,6 @@ export type RunMetadata = {
   failureReason: string | null;
   totalCostUsd: number | null;
   branch: string | null;
-  prNumber: number | null;
 };
 
 export type WriteSummaryInput = {
@@ -83,7 +82,6 @@ export async function writeMetadata(runLog: RunLog, metadata: RunMetadata): Prom
     failure_reason: metadata.failureReason,
     total_cost_usd: metadata.totalCostUsd,
     branch: metadata.branch,
-    pr_number: metadata.prNumber,
   };
   const json = JSON.stringify(payload, null, 2) + '\n';
   await writeFile(runLog.paths.metadata, json, 'utf8');

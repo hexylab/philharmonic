@@ -41,16 +41,18 @@ philharmonic run --config ./path/to/philharmonic.yaml
 
 stdout / stderr の出力は次のとおり。
 
-| 経路   | 出力                                               | 意味                                              |
-| ------ | -------------------------------------------------- | ------------------------------------------------- |
-| stdout | `no candidate`                                     | 候補 0 件 (exit 0)                                |
-| stdout | `success run-id=... issue=#... pr=#... branch=...` | 成功 (exit 0)                                     |
-| stderr | `failed run-id=... issue=#... reason=...`          | 失敗 (exit 1)。Issue に失敗コメントが入る         |
-| stderr | JSON line (構造化ログ)                             | 進捗 / 警告 / 失敗。`run_id` などで絞り込みできる |
+| 経路   | 出力                                       | 意味                                                   |
+| ------ | ------------------------------------------ | ------------------------------------------------------ |
+| stdout | `no candidate`                             | 候補 0 件 (exit 0)                                     |
+| stdout | `success run-id=... issue=#... branch=...` | runner が exit 0 で終わった (exit 0)                   |
+| stderr | `failed run-id=... issue=#... reason=...`  | runner が失敗した (exit 1)。worktree は debug 用に残る |
+| stderr | JSON line (構造化ログ)                     | 進捗 / 警告 / 失敗。`run_id` などで絞り込みできる      |
 
 並列実行 / 自動 retry / 自動 merge は **行いません**。常駐させたい場合は `philharmonic serve` を、cron 駆動にしたい場合は systemd timer / GitHub Actions の `schedule` から `philharmonic run` を呼んでください。
 
-詳細仕様 (state machine / Failure ハンドリング / PR 本文の構成) は [`docs/specs/orchestration-mvp.md`](../specs/orchestration-mvp.md)。
+> ADR-0005 で Status 遷移 / PR 作成 / Issue コメントは agent が `gh` 経由で行います。`success` の stdout に PR 番号は含まれません (PR 番号は agent が `gh pr create` で発行し、Issue / PR コメントから後追いするか `gh pr list` で確認してください)。
+
+詳細仕様 (state machine / Failure ハンドリング) は [`docs/specs/orchestration-mvp.md`](../specs/orchestration-mvp.md)。
 
 ## `philharmonic serve` — 常駐デーモン
 
@@ -66,22 +68,23 @@ philharmonic serve --config ./path/to/philharmonic.yaml
 
 主な違い (`philharmonic run` との比較):
 
-| 項目              | `run`           | `serve`                                                                        |
-| ----------------- | --------------- | ------------------------------------------------------------------------------ |
-| 実行回数          | 1 ターンで exit | ポーリング loop で繰り返す                                                     |
-| 自動 retry        | 無し            | `retry.max_attempts` で `Failed` → `Todo` を自動的に戻す (exponential backoff) |
-| 並列 dispatch     | 無し            | `agent.max_concurrent_agents` で 1 tick 内に複数 dispatch                      |
-| Tracker recovery  | 無し            | 起動時に `In Progress` の Issue を引き取る (#23)                               |
-| Snapshot HTTP API | 起動しない      | `server.port` 指定時に `127.0.0.1` で起動                                      |
-| 二重起動防止      | 無し            | `.philharmonic/serve.lock` で同一 repo の二重起動を弾く                        |
+| 項目              | `run`           | `serve`                                                   |
+| ----------------- | --------------- | --------------------------------------------------------- |
+| 実行回数          | 1 ターンで exit | ポーリング loop で繰り返す                                |
+| 並列 dispatch     | 無し            | `agent.max_concurrent_agents` で 1 tick 内に複数 dispatch |
+| Tracker recovery  | 無し            | 起動時に `In Progress` の Issue を引き取る (#23)          |
+| Snapshot HTTP API | 起動しない      | `server.port` 指定時に `127.0.0.1` で起動                 |
+| 二重起動防止      | 無し            | `.philharmonic/serve.lock` で同一 repo の二重起動を弾く   |
+
+> 自動 retry (`retry.*`) は ADR-0005 で撤廃されました。Failed の再実行は人手で `Todo` に戻すか別 Issue で起票します。
 
 `permission_mode: bypass` を `serve` で使う場合は、長時間稼働で `--dangerously-skip-permissions` が連続発火することへの opt-in として、環境変数 `PHILHARMONIC_ALLOW_BYPASS_IN_SERVE=1` を明示的に設定する必要があります (#49)。
 
-詳細仕様 (lock file / signal handling / 自動 retry / 並列 dispatch / Tracker recovery) は [`docs/specs/serve-daemon.md`](../specs/serve-daemon.md)。
+詳細仕様 (lock file / signal handling / 並列 dispatch / Tracker recovery) は [`docs/specs/serve-daemon.md`](../specs/serve-daemon.md)。
 
 ## `philharmonic clean` — 失敗 worktree の掃除
 
-worktree は **成功時のみ自動削除** されます。失敗時は `.philharmonic/worktrees/issue-<番号>/` に残るので、調査後に手動削除するか、`philharmonic clean` で retention 経過後にまとめて掃除してください。
+worktree は **runner exit 0 のときのみ自動削除** されます。失敗時 (`runner_error` / `timeout` / `stalled` / `hook_failed` / `workspace_provisioning`) は `.philharmonic/worktrees/issue-<番号>/` に残るので、調査後に手動削除するか、`philharmonic clean` で retention 経過後にまとめて掃除してください。
 
 ```sh
 # 削除候補の確認 (何も削除しない)
@@ -106,7 +109,7 @@ philharmonic clean --retention-days 3
 - `run_id` / `issue_number` — Orchestrator 内のすべてのイベントに付与
 - `session_id` — Claude Code subprocess 起動後のイベントに付与
 
-`stdout` には人間向けの結果 (`success run-id=... pr=#... branch=...` / `no candidate`) のみが流れます。「シェルスクリプトで結果を読み取る」のと「ログを集計する」の責務が綺麗に分離されています。
+`stdout` には人間向けの結果 (`success run-id=... branch=...` / `no candidate`) のみが流れます。「シェルスクリプトで結果を読み取る」のと「ログを集計する」の責務が綺麗に分離されています。
 
 ```sh
 # 対象 run のログだけ取り出す
@@ -125,13 +128,13 @@ philharmonic serve 2>&1 1>/dev/null | jq -c 'select(.level == "info")'
 
 実行ごとに **対象リポジトリ** の `.philharmonic/runs/<run-id>/` に以下が残ります (`run-id` は UUIDv7 で時刻順ソート可能)。
 
-| ファイル        | 内容                                                 |
-| --------------- | ---------------------------------------------------- |
-| `prompt.md`     | Claude に渡した prompt 全文                          |
-| `stream.jsonl`  | Claude Code の stream-json 出力 (1 行 1 イベント)    |
-| `stderr.log`    | Claude Code の stderr                                |
-| `metadata.json` | run-id / issue / branch / PR 番号 / cost / status 等 |
-| `summary.md`    | Claude の最終応答 (Markdown 整形済み)                |
+| ファイル        | 内容                                              |
+| --------------- | ------------------------------------------------- |
+| `prompt.md`     | Claude に渡した prompt 全文                       |
+| `stream.jsonl`  | Claude Code の stream-json 出力 (1 行 1 イベント) |
+| `stderr.log`    | Claude Code の stderr                             |
+| `metadata.json` | run-id / issue / branch / cost / status 等        |
+| `summary.md`    | Claude の最終応答 (Markdown 整形済み)             |
 
 失敗時のデバッグはこのディレクトリから始めます。`stream.jsonl` を `jq` で追えば、Claude Code がどの tool を呼び、どこで止まったかを再現できます。`metadata.json` には `total_cost_usd` も入っているので、コスト集計にも使えます。
 
@@ -146,8 +149,8 @@ server:
 
 | エンドポイント           | method | 用途                                                                                |
 | ------------------------ | ------ | ----------------------------------------------------------------------------------- |
-| `/api/v1/state`          | GET    | 全体 snapshot (進行中の run / retry 待ち / 累計コスト 等)                           |
-| `/api/v1/<issue_number>` | GET    | 指定 Issue の snapshot (in-flight / retry 待ちのいずれか、なければ 404)             |
+| `/api/v1/state`          | GET    | 全体 snapshot (進行中の run / 累計コスト 等)                                        |
+| `/api/v1/<issue_number>` | GET    | 指定 Issue の snapshot (in-flight があれば返す、なければ 404)                       |
 | `/api/v1/refresh`        | POST   | 次 tick の sleep を起こす (in-flight 中は no-op、`{"woken": true \| false}` を返す) |
 
 ```sh
@@ -185,7 +188,7 @@ ClaudeNotInstalledError: claude command not found
 環境変数 GITHUB_TOKEN を設定してください
 ```
 
-→ `export GITHUB_TOKEN=...` の漏れ。Philharmonic は `GITHUB_TOKEN` を直接環境変数から読みます (config ファイルには書きません / 書けません)。
+→ `export GITHUB_TOKEN=...` の漏れ。Philharmonic は `GITHUB_TOKEN` を直接環境変数から読みます (config ファイルには書きません / 書けません)。ADR-0005 で `GITHUB_TOKEN` / `GH_TOKEN` は Runner subprocess にも allowlist 経由で渡され、agent が `gh` / `git push` で利用します。
 
 ### `philharmonic.yaml` が見つからない / 検証エラー
 
@@ -233,4 +236,4 @@ ls -1 .philharmonic/runs/ | tail -5
 jq -c '{type, subtype, is_error, result}' .philharmonic/runs/<run-id>/stream.jsonl | tail
 ```
 
-`metadata.json` に `status` / `reason` が入っているので、Failed の理由 (`runner_error` / `git_push_failed` / `pr_creation_failed` / `hook_failed` 等) もここから読めます。
+`metadata.json` に `status` / `failure_reason` が入っているので、Failed の理由 (`workspace_provisioning` / `runner_error` / `timeout` / `stalled` / `hook_failed`) もここから読めます。Status flip / PR 作成は agent が runner 内で行うため、当該操作の失敗は `summary.md` (Claude の最終応答) と Issue / PR コメント側にも痕跡が残ります。

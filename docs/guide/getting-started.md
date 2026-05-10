@@ -36,7 +36,9 @@ philharmonic --help
 export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 ```
 
-Philharmonic は `GITHUB_TOKEN` を **Orchestrator プロセスのみ** が保持します。Claude Code 子プロセスの環境変数からは自動的に除外されるため、Claude には GitHub への鍵が渡りません (allowlist 方式の env フィルタは [`docs/specs/claude-runner.md`](../specs/claude-runner.md) を参照)。
+Philharmonic は `GITHUB_TOKEN` / `GH_TOKEN` を Orchestrator + Runner の env allowlist 経由で透過させ、agent (Claude Code + `gh` CLI) が Status 遷移 / `git push` / PR 作成 / Issue コメント投稿に使います ([ADR-0005](../adr/0005-thin-orchestrator-agent-delegation.md))。fine-grained PAT (対象リポジトリと Project に絞ったもの) を強く推奨します。
+
+> ホストで `gh auth login` 済みなら env 未設定でも動作します (`~/.config/gh` を runner subprocess が読みます)。daemon 用途や CI 用途では env 経由が確実です。
 
 ## 4. 対象リポジトリに `philharmonic.yaml` を置く
 
@@ -59,42 +61,29 @@ project_number: 1
 
 ## 5. Project の Status を整える
 
-Philharmonic は Projects v2 の単一選択フィールド `Status` を駆動します。Project に以下のオプションが揃っていることを確認してください (新規作成した Project であれば `Todo` / `In Progress` / `Done` は最初から入っています。`In Review` / `Failed` は手動で追加が必要)。
+Philharmonic は Projects v2 の単一選択フィールド `Status` を **読むだけ** (候補選定用) で、書き込みは agent が `gh project item-edit` 等で行います。Project に以下のオプションが揃っていることを確認してください。
 
-| 値          | 役割                                                                                                           |
-| ----------- | -------------------------------------------------------------------------------------------------------------- |
-| Todo        | 候補のスタート地点 (人間がここに積む)                                                                          |
-| In Progress | Philharmonic が候補選定 → 実行中に遷移させる                                                                   |
-| In Review   | Philharmonic が PR を作成した後に遷移させる (人間レビュー待ち)                                                 |
-| Failed      | Philharmonic が失敗時に遷移させる (再実行は人手で `Todo` に戻すか、`philharmonic serve` の自動 retry に任せる) |
-| Done        | merge 後の終端。Philharmonic はこの遷移を **行わない** (人間 / 別ツールで管理)                                 |
+| 値          | 役割                                                | 駆動元                             |
+| ----------- | --------------------------------------------------- | ---------------------------------- |
+| Todo        | 候補のスタート地点                                  | 人間が積む                         |
+| In Progress | agent 実行中                                        | **Agent** (prompt 受領直後に flip) |
+| In Review   | PR 作成完了。人間レビュー待ち                       | **Agent** (PR 作成後に flip)       |
+| Failed      | 失敗時。人手で `Todo` に戻すか、別 Issue で対応する | **Agent** (失敗判断時に flip)      |
+| Done        | merge 後の終端                                      | 人間 / 別ツール                    |
 
 Status 名やどの Status を dispatch 対象にするかはカスタマイズできます (`status_field` / `dispatch_statuses`)。詳細は [configuration.md](./configuration.md) を参照。
 
+> **`permission_mode` の注意**: agent が `gh` / `git push` を実行するには Bash tool が必要なため、`permission_mode: bypass` の設定が **実用上必須** です (`auto` では Bash tool が対話プロンプトになり、headless 環境では permission denied になります)。`bypass` は worktree 外への副作用リスクを伴うため、隔離環境前提で使ってください ([ADR-0005](../adr/0005-thin-orchestrator-agent-delegation.md))。
+
 ## 6. 任せたい Issue を Project に積む
 
-Philharmonic は Issue 本文の以下 3 セクションから prompt を組み立てます。`.github/ISSUE_TEMPLATE/task.md` をベースにすると綺麗にハマります。
+Issue 本文は **自由フォーマット** で構いません ([ADR-0005](../adr/0005-thin-orchestrator-agent-delegation.md) で構造化セクション必須は撤廃されました)。Philharmonic は本文をそのまま agent に渡します。書きやすいガイドの一例:
 
 ```markdown
-## Goal
-
-<!-- 達成したいことを 1〜3 文 -->
-
-## Constraints
-
-<!-- 制約条件 (使うライブラリ・性能・互換性 等) -->
-
--
-
-## Acceptance Criteria
-
-<!-- 客観的に判定可能な完了条件 -->
-
-- [ ]
-- [ ]
+<!-- 達成したいこと / 完了条件 / 関連 Issue / 背景 などを自由に書く -->
 ```
 
-Issue を Project に追加し、`Status = Todo` にしておけば候補に入ります。
+Issue を Project に追加し、`Status = Todo` にしておけば候補に入ります。Status 遷移 / commit / push / PR 作成は agent が prompt 指示に従って完結します。
 
 > `WORKFLOW.md` (Liquid テンプレート) をリポジトリ直下に置けば、prompt 構造そのものをカスタマイズできます (詳細: [configuration.md](./configuration.md#workflowmd-で-prompt-をカスタマイズする))。
 
@@ -138,7 +127,7 @@ Todo に Issue を積めば、次の polling tick で以下のような流れが
 | `no candidate`                                                | Todo が空のとき                       |
 | `runner finished`                                             | Claude Code subprocess が終了したとき |
 
-成功時は Project Status が `In Review` まで進み、PR が立ちます。失敗時は Issue に失敗コメントが残り、Status が `Failed` に (`philharmonic serve` は `retry.max_attempts` の範囲で自動的に `Todo` に戻して再試行します)。
+成功時は agent が PR を立てて Status を `In Review` に遷移します。失敗時は agent が判断で Status を `Failed` に遷移し、必要に応じて Issue にコメントを残します。再実行は人手で `Failed → Todo` に戻すか、別 Issue で再起票します ([ADR-0005](../adr/0005-thin-orchestrator-agent-delegation.md) で自動 retry は撤廃)。
 
 ### 停止のしかた
 

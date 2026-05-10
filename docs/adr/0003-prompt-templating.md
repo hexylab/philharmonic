@@ -1,7 +1,15 @@
 # ADR-0003: WORKFLOW.md の prompt テンプレートエンジンに LiquidJS を採用する
 
-- **ステータス**: Accepted
+- **ステータス**: Accepted (一部 Superseded by [ADR-0005](./0005-thin-orchestrator-agent-delegation.md))
 - **決定日**: 2026-05-09
+
+> **NOTE (2026-05-10)**: 以下は ADR-0005 で Superseded され、現在は適用されない。
+>
+> - Issue body 必須セクション (`## Goal` / `## Constraints` / `## Acceptance Criteria` / `MissingPromptSectionError`) の前提
+> - テンプレート変数 `issue.goal` / `issue.constraints` / `issue.acceptance_criteria`
+> - テンプレート変数 `attempt` (retry が消えるため)
+>
+> LiquidJS の採用 / Orchestrator フッタを末尾に無条件で連結する設計は維持。フッタの中身は agent 委譲指示 (Status 遷移 / PR 作成 / 必要に応じ Issue コメント / Conventional Commits) に変わる。詳細は [ADR-0005](./0005-thin-orchestrator-agent-delegation.md) を参照。
 
 ---
 

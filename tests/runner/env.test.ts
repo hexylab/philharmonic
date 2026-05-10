@@ -45,18 +45,25 @@ describe('buildRunnerEnv (allowlist 方式)', () => {
     expect(env.PHILHARMONIC_DEBUG).toBe('1');
   });
 
-  it('GitHub token 系 (GH_TOKEN / GITHUB_TOKEN / GH_ENTERPRISE_TOKEN / OCTOKIT_*) は落ちる', () => {
+  it('GitHub token (GITHUB_TOKEN / GH_TOKEN) は agent 委譲のため allowlist で透過する (ADR-0005)', () => {
     const env = buildRunnerEnv({
       PATH: '/usr/bin',
       GH_TOKEN: 'ghp_secret',
       GITHUB_TOKEN: 'gho_secret',
+    });
+    expect(env.PATH).toBe('/usr/bin');
+    expect(env.GH_TOKEN).toBe('ghp_secret');
+    expect(env.GITHUB_TOKEN).toBe('gho_secret');
+  });
+
+  it('GH_ENTERPRISE_TOKEN / OCTOKIT_* は引き続き allowlist 外 (orchestrator 用途のみ)', () => {
+    const env = buildRunnerEnv({
+      PATH: '/usr/bin',
       GH_ENTERPRISE_TOKEN: 'ghe_secret',
       OCTOKIT_AUTH: 'oa_secret',
       OCTOKIT_API_URL: 'https://api.example.com',
     });
     expect(env.PATH).toBe('/usr/bin');
-    expect(env.GH_TOKEN).toBeUndefined();
-    expect(env.GITHUB_TOKEN).toBeUndefined();
     expect(env.GH_ENTERPRISE_TOKEN).toBeUndefined();
     expect(env.OCTOKIT_AUTH).toBeUndefined();
     expect(env.OCTOKIT_API_URL).toBeUndefined();

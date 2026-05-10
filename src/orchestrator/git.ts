@@ -1,5 +1,14 @@
-import type { GitRunner } from '../workspace/index.js';
+import { defaultGitRunner, type GitRunner } from '../workspace/index.js';
 
+/**
+ * `git fetch origin <baseBranch>` を Orchestrator から実行する。
+ *
+ * `WorkspaceManager.createWorkspace` 自体は `git worktree add` だけを行うため、
+ * `origin/<baseBranch>` を起点にした worktree を fresh な状態にするには
+ * 直前にこの関数で fetch を済ませておく必要がある。
+ *
+ * spec: docs/specs/orchestration-mvp.md「3. Workspace Provisioning」
+ */
 export async function fetchBaseBranch(
   runGit: GitRunner,
   repoRoot: string,
@@ -9,25 +18,4 @@ export async function fetchBaseBranch(
   await runGit(['fetch', remote, baseBranch], { cwd: repoRoot });
 }
 
-export async function pushBranch(
-  runGit: GitRunner,
-  worktreePath: string,
-  branch: string,
-  remote: string,
-): Promise<void> {
-  await runGit(['push', '-u', remote, branch], { cwd: worktreePath });
-}
-
-export async function countCommitsAhead(
-  runGit: GitRunner,
-  worktreePath: string,
-  baseRef: string,
-): Promise<number> {
-  const { stdout } = await runGit(['rev-list', '--count', `${baseRef}..HEAD`], {
-    cwd: worktreePath,
-  });
-  const trimmed = stdout.trim();
-  const n = Number(trimmed);
-  if (!Number.isInteger(n) || n < 0) return 0;
-  return n;
-}
+export { defaultGitRunner };
