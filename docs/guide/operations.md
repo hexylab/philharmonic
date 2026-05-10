@@ -208,6 +208,112 @@ philharmonic dashboard --once
 
 詳細仕様 (フィールド構造 / state machine / `--once` の出力形式) は [`docs/specs/dashboard.md`](../specs/dashboard.md)。設計判断の背景は [`docs/adr/0006-tui-dashboard.md`](../adr/0006-tui-dashboard.md)。
 
+## 依存関係付き Issue を運用する (DAG scheduling)
+
+Issue 本文に `Depends-On:` 行を書くと、Philharmonic の scheduler は依存先 Issue がすべて close されるまでその Issue を dispatch しません。先行 Issue (例: DB schema 変更) と後続 Issue (例: API 変更) の順序を `Todo` の昇格タイミングで人手制御する代わりに、Issue body の 1 行で機械可読に表現できます。
+
+設計判断の背景は [`ADR-0007`](../adr/0007-dependency-dag-aware-scheduler.md)、syntax の真実は [`docs/specs/dependency-parser.md`](../specs/dependency-parser.md)、scheduler semantics の真実は [`docs/specs/dependency-resolver.md`](../specs/dependency-resolver.md) にあります。本セクションは利用者視点で「どう書くと何が起きるか」だけを扱います。
+
+### Issue body に依存関係を書く
+
+Issue 本文の **行頭 (前後の空白を許す)** に半角コロンの `Depends-On:` で始まる行を置きます。値は `#<番号>` のカンマ区切り。
+
+```md
+Depends-On: #123, #124
+```
+
+書きかたのポイント:
+
+- ヘッダ部 (`Depends-On:`) は case-insensitive (`depends-on:` / `DEPENDS-ON:` でも可)
+- コロンは **半角 `:` のみ受理** されます (全角 `：` は parse されません)
+- `#` の前後の空白は許容 (`Depends-On:#123` / `Depends-On: # 123` どちらも OK)
+- 同一 Issue 内に複数行書いてもよく、parser はすべての行を **union で集約** します
+- code fence (` ``` ` / `~~~`) と blockquote (`> `) の中の `Depends-On:` は **無視** されます (引用や例示で誤認識しないため)
+- cross-repository 表記 (`owner/repo#123`) は MVP では未対応 (`invalid` として扱われ dispatch されません)
+- `Depends-On:` 行が無ければ依存なし (= 即 ready) とみなされます
+
+### Todo に積んだあとに何が起きるか
+
+候補 Issue 1 件に対して、scheduler は以下 4 値のいずれかに分類します。dispatch されるのは **`ready` のみ**。
+
+| state                | 条件                                                                               | dispatch | log key (`philharmonic serve` の structured log) |
+| -------------------- | ---------------------------------------------------------------------------------- | -------- | ------------------------------------------------ |
+| `ready`              | `Depends-On:` 行が無い、または列挙された依存先がすべて closed                      | する     | (通常通り `dispatch success` / `failed` 等)      |
+| `blocked`            | 列挙された依存先のうち 1 件以上が **open**                                         | しない   | info: `dependency blocked`                       |
+| `invalid_dependency` | 依存先が存在しない (404) / 権限不足 (403) / parse 不能 (`owner/repo#N` / 数値以外) | しない   | warn: `dependency invalid`                       |
+| `cycle`              | 依存グラフに循環がある (自己依存 `Depends-On: #self` を含む)                       | しない   | warn: `dependency cycle`                         |
+
+優先順位は `cycle > invalid_dependency > blocked > ready`。複数該当する候補は上位 1 つだけが報告されます (例: cycle 中の候補が invalid な entry も持つ場合、`cycle` のみ報告)。
+
+補足:
+
+- 「closed-but-not-merged」も resolved 扱いです。`closed-as-not-planned` (Issue 不採用) で close された依存先も自動的に ready 化します (ADR-0007 §2)
+- 依存先 Issue が **Project board に積まれていなくても** state (open / closed) で判定されます
+- 依存先 Issue が `agent:skip` ラベル付き / assignee 不一致で dispatch 対象外でも、依存解決には影響しません (close されない限り `blocked` のまま)
+- recovery (`philharmonic serve` 起動時の `In Progress` 引き取り) は dependency filter を **適用しません**。mid-execution の Issue が依存先後退で永遠に停止しないためです
+
+### TUI / Snapshot API で blocked を確認する
+
+`philharmonic.yaml` で `server.port` を設定して `philharmonic serve` を起動すると、Snapshot HTTP API の `scheduler` フィールドで直近 tick の評価結果が読めます。
+
+```sh
+# scheduler サマリだけ取り出す
+curl -s http://127.0.0.1:4000/api/v1/state | jq .scheduler
+```
+
+```json
+{
+  "last_evaluated_at": "2026-05-09T00:00:30.000Z",
+  "ready": [{ "issue_number": 104, "title": "Add foo handler" }],
+  "blocked": [{ "issue_number": 102, "title": "Switch to async API", "blocked_by": [101] }],
+  "cycles": [{ "issue_numbers": [201, 202] }],
+  "invalid_dependencies": [
+    {
+      "issue_number": 103,
+      "title": "Migrate legacy endpoint",
+      "entries": [{ "raw": "owner/repo#123", "issue_number": null, "reason": "parse_invalid" }]
+    }
+  ]
+}
+```
+
+`philharmonic dashboard` の TUI でも同じ情報が `Scheduler` セクションに表示されます (詳細: [`docs/specs/dashboard.md`](../specs/dashboard.md) `Scheduler section の表示ルール`)。`scheduler: null` のときは「まだ poll tick が走っていない」(= 起動直後 / recovery のみ走った状態) です。
+
+フィールドの全表は [`docs/specs/snapshot-api.md`](../specs/snapshot-api.md) の `scheduler` フィールド節を参照してください。
+
+### `agent:skip` との使い分け
+
+| やりたいこと                                                                 | 使うもの                 |
+| ---------------------------------------------------------------------------- | ------------------------ |
+| **永続的に dispatch 対象外** にしたい (人間が直接書きたい / agent NG タスク) | `agent:skip` ラベル      |
+| **一時的に順序を制御** したい (依存先 Issue が close されたら自動 ready 化)  | `Depends-On: #<番号>` 行 |
+
+`agent:skip` は人間が外すまで永続的に effective です。`Depends-On:` は依存先 Issue が close されると次 tick で自動的に ready 判定に移ります。両方 effective な Issue は `agent:skip` の段階で先に弾かれるため、dependency filter には到達しません。
+
+### `agent.max_concurrent_agents` との関係
+
+DAG filter は **既存 candidate filter (status / assignee / `agent:skip` / worktree / in-flight) を全件通過した acceptable candidate に対して、最終段で `ready` のみを残す** filter です。`agent.max_concurrent_agents = N` は **その後に残った `ready` candidate の上から N 件を 1 tick で並列 dispatch** します。
+
+| 設定                              | 1 tick の挙動                                                           |
+| --------------------------------- | ----------------------------------------------------------------------- |
+| `max_concurrent_agents: 1` (既定) | board 順で先頭の `ready` 1 件のみ dispatch (MVP 互換)                   |
+| `max_concurrent_agents: 5`        | board 順で先頭の `ready` 5 件を並列 dispatch。`ready` が 5 未満なら全件 |
+
+scheduler は **continuous worker pool ではなく tick-batched** で動作します (ADR-0007 §4)。1 件完走するたびに即次 candidate を pick するわけではなく、`Promise.allSettled` で N 件揃って完走を待ってから次 tick (= `polling.interval_ms` だけ sleep) に進みます。依存先 Issue が close された直後でも、後続 Issue が dispatch されるまでは **最大 `polling.interval_ms` 1 周期分** (既定 30 秒) のレイテンシがあります。
+
+`philharmonic run` (1 ターン実行) も同じ DAG filter を経由します。先頭 candidate が `blocked` のときはその次の `ready` 1 件を選びます。
+
+### 並列実行に向く / 向かない Issue
+
+| 並列に向く                                                      | 並列に向かない (= `Depends-On:` で直列化を推奨)                          |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| 互いに独立した bug fix (例: `#A` は logger / `#B` は formatter) | DB schema 変更 → API 変更 → frontend 変更 のような縦割り                 |
+| 別 module / 別 directory に閉じる feature                       | 共有 module (例: `src/config.ts`) を同時に書き換える Issue               |
+| ドキュメント更新と独立した実装                                  | 同じファイルを編集する複数 Issue (merge conflict が多発する)             |
+| 依存関係が無く、PR レビューも独立してできるタスク               | 同じ Project Item Status に依存する workflow (Done 待ちの後続が並ぶ場合) |
+
+並列 dispatch を増やしすぎると merge conflict / GitHub API rate limit / Claude Code subprocess の host 負荷で実質スループットが下がります。`max_concurrent_agents` は最初は `1` か `2` から始め、運用ログ (`dispatch success` / `dispatch failed` / `dependency blocked` の比率) を見て段階的に増やすのが安全です。
+
 ## トラブルシュート
 
 ### `claude` コマンドが見つからない
@@ -259,6 +365,7 @@ ConfigFileNotFoundError: ... / ConfigValidationError: ... / ConfigParseError: ..
 3. `agent_user_login` が `null` の場合、Issue が **unassigned** になっているか (assignee が居ると拾われない)
 4. `agent_user_login` を指定している場合、その login が assignee に居るか
 5. `philharmonic projects list` で Philharmonic の視点を確認
+6. Issue 本文に `Depends-On:` 行があり、依存先の少なくとも 1 件が **open のまま** になっていないか (Snapshot HTTP API の `scheduler.blocked` か structured log の `dependency blocked` で確認できます。詳細: [依存関係付き Issue を運用する](#依存関係付き-issue-を運用する-dag-scheduling))
 
 ### `philharmonic serve` が「lock held」で起動しない
 
@@ -271,6 +378,24 @@ ServeLockHeldError: another `philharmonic serve` is running on this repo
 ### Failed worktree が溜まっている
 
 → `philharmonic clean --dry-run` で削除候補を見て、問題なければ `philharmonic clean` を実行。あるいは個別に `git worktree remove --force <path>` で削除してから `git branch -D <branch>` でローカルブランチも掃除。
+
+### `Depends-On:` を書いた Issue が永遠に dispatch されない
+
+Snapshot HTTP API の `scheduler` フィールド (`curl -s http://127.0.0.1:<port>/api/v1/state | jq .scheduler`) または `philharmonic dashboard` の `Scheduler` セクションを見ます。
+
+- `blocked[]` に出ている: 依存先 Issue がまだ open です。先行 Issue を close するか、依存関係の記述を修正してください。`closed-as-not-planned` (Issue 不採用) で close されても resolved 扱いになります
+- `invalid_dependencies[]` に出ている: 各 entry の `reason` を確認します
+  - `parse_invalid`: cross-repo 表記 `owner/repo#N` は MVP 未対応。半角コロン `:` を使っているか / `#<番号>` 形式になっているかも確認 (全角 `：` / 数値以外は parse されません)
+  - `not_found`: 依存先 Issue 番号が存在しない (タイポを疑う)
+  - `forbidden`: PAT に依存先 Issue の read 権限がない
+  - `fetch_error`: GitHub API エラー (network / rate limit 等)。次 tick で再評価されます
+- `cycles[]` に出ている: 依存グラフに循環があります (自己依存 `Depends-On: #self` も含む)。orchestrator は cycle を解消しないため、人間が Issue body を書き換えて循環を断ち切ってください
+
+Issue 本文の **code fence (` ``` ` で囲まれたブロック) や blockquote (`> `) の中に書いた `Depends-On:` は parser に無視される** ため、引用扱いになって ready 化されているケースもあります。意図せず parse されたい場合は本文の地の文に置きます。
+
+### `philharmonic serve` 起動直後に `Depends-On:` を書いた Issue が dispatch される
+
+recovery (起動時の `In Progress` 引き取り) は dependency filter を **適用しません**。前回プロセスで途中だった Issue が依存先後退で永遠に停止しないようにするためです (詳細: [`docs/specs/orchestration-mvp.md`](../specs/orchestration-mvp.md) `Dependency filter (ADR-0007)` 節)。通常の poll tick では DAG filter が必ず効きます。
 
 ### Runner timeout が頻発する
 

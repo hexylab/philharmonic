@@ -26,6 +26,7 @@ Issue を Project の **Todo** に置くと、Philharmonic が作業場所を用
 |    🤖    | Claude Code を起動する     | headless mode の Claude Code に実装を任せます           |
 |    🌿    | 作業場所を分ける           | タスクごとに git worktree を作り、作業を隔離します      |
 |    🔀    | Pull Request を作る        | commit / push / PR 作成まで agent が進めます            |
+|    🪢    | 依存関係で順序を制御する   | Issue 本文の `Depends-On:` 行で先行・後続を表現できます |
 |    👀    | 最後は人がレビューする     | merge 判断は自動化せず、人間に残します                  |
 |    🧩    | リポジトリごとに調整できる | prompt や lifecycle hook をカスタマイズできます         |
 
@@ -154,14 +155,15 @@ export PHILHARMONIC_ALLOW_BYPASS_IN_SERVE=1
 
 ## 詳しいドキュメント
 
-| 読みたいこと            | ドキュメント                                       |
-| ----------------------- | -------------------------------------------------- |
-| まず 1 件 PR を作りたい | [Getting Started](./docs/guide/getting-started.md) |
-| 設定を変えたい          | [Configuration](./docs/guide/configuration.md)     |
-| 運用・ログ・掃除        | [Operations](./docs/guide/operations.md)           |
-| 仕様を確認したい        | [Specs](./docs/specs/)                             |
-| 設計判断を知りたい      | [ADR](./docs/adr/)                                 |
-| 開発ルールを確認したい  | [AGENTS.md](./AGENTS.md)                           |
+| 読みたいこと                 | ドキュメント                                                                                   |
+| ---------------------------- | ---------------------------------------------------------------------------------------------- |
+| まず 1 件 PR を作りたい      | [Getting Started](./docs/guide/getting-started.md)                                             |
+| 設定を変えたい               | [Configuration](./docs/guide/configuration.md)                                                 |
+| 運用・ログ・掃除             | [Operations](./docs/guide/operations.md)                                                       |
+| Issue の順序制約を表現したい | [DAG scheduling 運用](./docs/guide/operations.md#依存関係付き-issue-を運用する-dag-scheduling) |
+| 仕様を確認したい             | [Specs](./docs/specs/)                                                                         |
+| 設計判断を知りたい           | [ADR](./docs/adr/)                                                                             |
+| 開発ルールを確認したい       | [AGENTS.md](./AGENTS.md)                                                                       |
 
 ## ライセンス
 
