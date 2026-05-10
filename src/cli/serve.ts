@@ -6,10 +6,10 @@ import {
   ConfigFileNotFoundError,
   ConfigParseError,
   ConfigValidationError,
-  DEFAULT_WORKFLOW_FILE,
   loadConfig,
   LOW_POLLING_INTERVAL_WARN_THRESHOLD_MS,
   type Config,
+  type LoadConfigOptions,
 } from '../config/index.js';
 import {
   GitHubTokenNotSetError,
@@ -57,6 +57,7 @@ import {
 } from '../workspace/index.js';
 
 import { configHooksToHookConfigMap } from './hooks.js';
+import { resolveWorkflowPath } from './paths.js';
 
 export type ServeSignal = 'SIGTERM' | 'SIGINT';
 
@@ -77,7 +78,7 @@ export const BYPASS_OPT_IN_ENV = 'PHILHARMONIC_ALLOW_BYPASS_IN_SERVE';
 
 export type ServeCommandDeps = {
   cwd?: () => string;
-  loadConfig?: (configPath?: string, options?: { cwd?: string }) => Promise<Config>;
+  loadConfig?: (configPath?: string, options?: LoadConfigOptions) => Promise<Config>;
   getToken?: () => string;
   getEnv?: (key: string) => string | undefined;
   createGitHubClient?: (token: string) => GitHubClient;
@@ -136,7 +137,10 @@ export function createServeCommand(deps: ServeCommandDeps = {}): Command {
     .description(
       'Project board を一定間隔でポーリングして候補があれば run を 1 件処理する常駐デーモン (SIGTERM/SIGINT で graceful shutdown)',
     )
-    .option('-c, --config <path>', '設定ファイルのパス (省略時は cwd の philharmonic.yaml)')
+    .option(
+      '-c, --config <path>',
+      '設定ファイルのパス (省略時は cwd の .philharmonic/philharmonic.yaml、不在なら legacy philharmonic.yaml に fallback)',
+    )
     .action(async (options: { config?: string }) => {
       await runServeCommand(options, resolved);
     });
@@ -164,8 +168,14 @@ async function runServeCommand(
   }
 
   let config: Config;
+  let legacyConfigUsed: { legacyPath: string; expectedPath: string } | null = null;
   try {
-    config = await deps.loadConfig(options.config, { cwd });
+    config = await deps.loadConfig(options.config, {
+      cwd,
+      onLegacyPathUsed: (legacyPath, expectedPath) => {
+        legacyConfigUsed = { legacyPath, expectedPath };
+      },
+    });
   } catch (error) {
     if (
       error instanceof ConfigFileNotFoundError ||
@@ -217,6 +227,17 @@ async function runServeCommand(
     level: config.logLevel,
     destination: deps.stderr,
   });
+
+  if (legacyConfigUsed !== null) {
+    const { legacyPath, expectedPath } = legacyConfigUsed as {
+      legacyPath: string;
+      expectedPath: string;
+    };
+    logger.warn(
+      'legacy `philharmonic.yaml` を repo root から読み込みました。`.philharmonic/philharmonic.yaml` への移動を推奨します (#67)',
+      { legacyPath, expectedPath },
+    );
+  }
 
   const workspaceManager = deps.createWorkspaceManager({
     repoRoot,
@@ -304,11 +325,18 @@ async function runServeCommand(
     }
   }
 
+  // WORKFLOW.md は `.philharmonic/WORKFLOW.md` を default とし、不在なら legacy `WORKFLOW.md`
+  // (repo root 直下) に fallback する (#67)。serve は常駐デーモンのため watch=true。
+  const { workflowPath, fallbackOnMissing } = await resolveWorkflowPath({
+    repoRoot,
+    workflowFile: config.workflowFile,
+    logger,
+  });
   let workflowSource: WorkflowSource;
   try {
     workflowSource = await deps.createWorkflowSource({
-      workflowPath: path.resolve(repoRoot, config.workflowFile),
-      fallbackOnMissing: config.workflowFile === DEFAULT_WORKFLOW_FILE,
+      workflowPath,
+      fallbackOnMissing,
       watch: true,
       logger,
     });

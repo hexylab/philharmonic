@@ -1,8 +1,8 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   ConfigFileNotFoundError,
@@ -10,6 +10,7 @@ import {
   ConfigValidationError,
   DEFAULT_CONFIG_FILE,
   formatConfigError,
+  LEGACY_CONFIG_FILE,
   loadConfig,
 } from '../../src/config/index.js';
 
@@ -25,6 +26,7 @@ afterEach(async () => {
 
 async function writeConfig(contents: string, name = DEFAULT_CONFIG_FILE): Promise<string> {
   const filePath = path.join(workdir, name);
+  await mkdir(path.dirname(filePath), { recursive: true });
   await writeFile(filePath, contents, 'utf8');
   return filePath;
 }
@@ -59,12 +61,62 @@ describe('loadConfig', () => {
     expect((await loadConfig(omittedPath)).agentUserLogin).toBeNull();
   });
 
-  it('path 省略時は cwd の philharmonic.yaml を読みに行く', async () => {
+  it('path 省略時は cwd の .philharmonic/philharmonic.yaml を読みに行く (#67)', async () => {
     await writeConfig('owner: hexylab\nproject_number: 1\n');
 
     const config = await loadConfig(undefined, { cwd: workdir });
 
     expect(config.owner).toBe('hexylab');
+  });
+
+  it('default が無く legacy `philharmonic.yaml` のみが存在する場合は legacy を採用し warning コールバックを呼ぶ (#67)', async () => {
+    await writeConfig('owner: hexylab\nproject_number: 1\n', LEGACY_CONFIG_FILE);
+    const onLegacyPathUsed = vi.fn();
+
+    const config = await loadConfig(undefined, { cwd: workdir, onLegacyPathUsed });
+
+    expect(config.owner).toBe('hexylab');
+    expect(onLegacyPathUsed).toHaveBeenCalledTimes(1);
+    expect(onLegacyPathUsed).toHaveBeenCalledWith(
+      path.join(workdir, LEGACY_CONFIG_FILE),
+      path.join(workdir, DEFAULT_CONFIG_FILE),
+    );
+  });
+
+  it('default と legacy 両方ある場合は default を優先し warning は出ない (#67)', async () => {
+    await writeConfig('owner: hexylab\nproject_number: 1\n');
+    await writeConfig('owner: legacy-owner\nproject_number: 99\n', LEGACY_CONFIG_FILE);
+    const onLegacyPathUsed = vi.fn();
+
+    const config = await loadConfig(undefined, { cwd: workdir, onLegacyPathUsed });
+
+    expect(config.owner).toBe('hexylab');
+    expect(onLegacyPathUsed).not.toHaveBeenCalled();
+  });
+
+  it('default も legacy も無いときは新パスを含む ConfigFileNotFoundError を投げる (#67)', async () => {
+    const expected = path.join(workdir, DEFAULT_CONFIG_FILE);
+
+    const error = await loadConfig(undefined, { cwd: workdir }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ConfigFileNotFoundError);
+    if (error instanceof ConfigFileNotFoundError) {
+      expect(error.path).toBe(expected);
+    }
+  });
+
+  it('--config 明示指定時は legacy fallback の探索を行わない (#67)', async () => {
+    await writeConfig('owner: legacy-owner\nproject_number: 99\n', LEGACY_CONFIG_FILE);
+    const explicit = path.join(workdir, 'missing.yaml');
+    const onLegacyPathUsed = vi.fn();
+
+    const error = await loadConfig(explicit, { cwd: workdir, onLegacyPathUsed }).catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ConfigFileNotFoundError);
+    if (error instanceof ConfigFileNotFoundError) {
+      expect(error.path).toBe(explicit);
+    }
+    expect(onLegacyPathUsed).not.toHaveBeenCalled();
   });
 
   it('ファイルが存在しない場合は ConfigFileNotFoundError を投げる', async () => {

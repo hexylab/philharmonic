@@ -15,5 +15,8 @@ coverage/
 npm-debug.log*
 pnpm-debug.log*
 
-# Philharmonic 実行時生成物 (worktree, run ログ)
-.philharmonic/
+# Philharmonic 実行時生成物 (worktree / run ログ / serve lock)
+# `.philharmonic/philharmonic.yaml` や `.philharmonic/WORKFLOW.md` は commit 可能にする
+.philharmonic/worktrees/
+.philharmonic/runs/
+.philharmonic/serve.lock

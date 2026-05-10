@@ -2,11 +2,18 @@ import { z } from 'zod';
 
 import { LOG_LEVELS, type LogLevel } from '../logger/index.js';
 
-export const DEFAULT_CONFIG_FILE = 'philharmonic.yaml';
+/**
+ * Philharmonic が読み書きするファイルは原則 `.philharmonic/` 配下に集約する (#67)。
+ * 旧来 (`philharmonic.yaml` / `WORKFLOW.md` を repo root に置く) からの移行のため、
+ * default 解決時に limit して legacy パスへ fallback する経路を loader / CLI 側で持つ。
+ */
+export const DEFAULT_CONFIG_FILE = '.philharmonic/philharmonic.yaml';
+export const LEGACY_CONFIG_FILE = 'philharmonic.yaml';
 
 export const DEFAULT_BASE_BRANCH = 'main';
 export const DEFAULT_STATUS_FIELD = 'Status';
-export const DEFAULT_WORKFLOW_FILE = 'WORKFLOW.md';
+export const DEFAULT_WORKFLOW_FILE = '.philharmonic/WORKFLOW.md';
+export const LEGACY_WORKFLOW_FILE = 'WORKFLOW.md';
 export const DEFAULT_PERMISSION_MODE = 'auto';
 export const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 export const DEFAULT_KILL_GRACE_PERIOD_MS = 5_000;

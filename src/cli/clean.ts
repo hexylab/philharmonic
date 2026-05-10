@@ -6,6 +6,7 @@ import {
   ConfigValidationError,
   loadConfig,
   type Config,
+  type LoadConfigOptions,
 } from '../config/index.js';
 import {
   createWorkspaceManager,
@@ -24,7 +25,7 @@ import { configHooksToHookConfigMap } from './hooks.js';
 export type CleanCommandDeps = {
   cwd?: () => string;
   now?: () => Date;
-  loadConfig?: (configPath?: string, options?: { cwd?: string }) => Promise<Config>;
+  loadConfig?: (configPath?: string, options?: LoadConfigOptions) => Promise<Config>;
   listIssueWorktrees?: (input: ListIssueWorktreesInput) => Promise<IssueWorktree[]>;
   createWorkspaceManager?: (input: {
     repoRoot: string;
@@ -63,7 +64,10 @@ export function createCleanCommand(deps: CleanCommandDeps = {}): Command {
     .description(
       'retention 経過済みの issue-* worktree とローカルブランチを掃除する (失敗 worktree のクリーンアップ用)',
     )
-    .option('-c, --config <path>', '設定ファイルのパス (省略時は cwd の philharmonic.yaml)')
+    .option(
+      '-c, --config <path>',
+      '設定ファイルのパス (省略時は cwd の .philharmonic/philharmonic.yaml、不在なら legacy philharmonic.yaml に fallback)',
+    )
     .option(
       '--retention-days <days>',
       'mtime からの経過日数の閾値 (省略時は philharmonic.yaml の clean_retention_days)',

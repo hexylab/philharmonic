@@ -5,13 +5,24 @@ import readline from 'node:readline/promises';
 import { Command, InvalidArgumentError } from 'commander';
 import yaml from 'js-yaml';
 
+import { DEFAULT_CONFIG_FILE, DEFAULT_WORKFLOW_FILE, LEGACY_CONFIG_FILE } from '../config/index.js';
 import { configSchema } from '../config/schema.js';
 import { defaultGitRunner, type GitRunner } from '../workspace/index.js';
 
-const PHILHARMONIC_YAML_FILE = 'philharmonic.yaml';
-const WORKFLOW_FILE = 'WORKFLOW.md';
+/**
+ * `philharmonic init` は `.philharmonic/` 配下に config / workflow を生成する (#67)。
+ * `.gitignore` には worktrees / runs / serve.lock のみを追記し、
+ * `.philharmonic/philharmonic.yaml` と `.philharmonic/WORKFLOW.md` は commit 可能にしておく。
+ */
+const PHILHARMONIC_YAML_FILE = DEFAULT_CONFIG_FILE;
+const LEGACY_PHILHARMONIC_YAML_FILE = LEGACY_CONFIG_FILE;
+const WORKFLOW_FILE = DEFAULT_WORKFLOW_FILE;
 const GITIGNORE_FILE = '.gitignore';
-const GITIGNORE_LINE = '.philharmonic/';
+const GITIGNORE_LINES = [
+  '.philharmonic/worktrees/',
+  '.philharmonic/runs/',
+  '.philharmonic/serve.lock',
+] as const;
 const PHILHARMONIC_PACKAGE_NAME = 'philharmonic';
 
 const WORKFLOW_TEMPLATE = `# {{ repository.owner }}/{{ repository.name }} — Task #{{ issue.number }}
@@ -58,11 +69,18 @@ const defaultPrompt: Prompter = async (question) => {
   }
 };
 
+const defaultWriteFile = async (filePath: string, content: string): Promise<void> => {
+  // `.philharmonic/philharmonic.yaml` のような subdir を含むパスでも書き込めるよう
+  // 親ディレクトリを recursive に作成してから書く (#67)。
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, content, 'utf8');
+};
+
 const DEFAULT_DEPS: Required<InitCommandDeps> = {
   cwd: () => process.cwd(),
   runGit: defaultGitRunner,
   readFile: (filePath) => fs.readFile(filePath, 'utf8'),
-  writeFile: (filePath, content) => fs.writeFile(filePath, content, 'utf8'),
+  writeFile: defaultWriteFile,
   pathExists: defaultPathExists,
   prompt: defaultPrompt,
   isTTY: () => Boolean(process.stdin.isTTY) && Boolean(process.stdout.isTTY),
@@ -85,16 +103,21 @@ export function createInitCommand(deps: InitCommandDeps = {}): Command {
 
   const cmd = new Command('init');
   cmd
-    .description('対象リポジトリで Philharmonic を始めるための philharmonic.yaml を scaffold する')
+    .description(
+      '対象リポジトリで Philharmonic を始めるための .philharmonic/philharmonic.yaml を scaffold する',
+    )
     .option(
       '--owner <login>',
       'Project owner の GitHub login (省略時は origin remote から auto-detect)',
     )
     .option('--project <number>', 'Project number (整数、必須)', parseProjectNumber)
     .option('--yes', '対話プロンプトをすべてスキップする (非対話モード)', false)
-    .option('--force', '既存の philharmonic.yaml を上書きする', false)
+    .option('--force', '既存の .philharmonic/philharmonic.yaml を上書きする', false)
     .option('--dry-run', 'ファイルを書き込まず stdout に内容を出すだけ', false)
-    .option('--no-workflow', 'WORKFLOW.md の scaffold をスキップする (対話プロンプトを抑止)')
+    .option(
+      '--no-workflow',
+      '.philharmonic/WORKFLOW.md の scaffold をスキップする (対話プロンプトを抑止)',
+    )
     .action(async (options: InitOptions) => {
       await runInit(options, resolved);
     });
@@ -126,6 +149,18 @@ async function runInit(options: InitOptions, deps: Required<InitCommandDeps>): P
     );
     deps.exit(1);
     return;
+  }
+
+  // 旧来 (#67 前) に repo root へ書いた `philharmonic.yaml` がある場合は移行を促す。
+  // `--force` でも勝手には削除せず、ユーザに伝えるだけにとどめる。
+  const legacyYamlPath = path.resolve(cwd, LEGACY_PHILHARMONIC_YAML_FILE);
+  if (await deps.pathExists(legacyYamlPath)) {
+    deps.stderr.write(
+      `warning: legacy ${LEGACY_PHILHARMONIC_YAML_FILE} が repo root に存在します: ${legacyYamlPath}\n`,
+    );
+    deps.stderr.write(
+      `  起動時の fallback で当面読み込まれますが、\`mkdir -p .philharmonic && git mv ${LEGACY_PHILHARMONIC_YAML_FILE} ${PHILHARMONIC_YAML_FILE}\` で移行することを推奨します (#67)\n`,
+    );
   }
 
   const detectedOwner = await detectOriginOwner(cwd, deps.runGit);
@@ -182,9 +217,11 @@ async function runInit(options: InitOptions, deps: Required<InitCommandDeps>): P
   const gitignoreExists = await deps.pathExists(gitignorePath);
   let appendGitignore = false;
   if (gitignoreExists && interactive) {
+    // 生成物 (worktrees / runs / serve.lock) のみ ignore し、
+    // `.philharmonic/philharmonic.yaml` / `.philharmonic/WORKFLOW.md` は commit 可能にする方針 (#67)。
     appendGitignore = await confirm(
       deps.prompt,
-      `${GITIGNORE_LINE} を ${GITIGNORE_FILE} に追記しますか?`,
+      `Philharmonic の生成物を ${GITIGNORE_FILE} に追記しますか? (worktrees/ / runs/ / serve.lock)`,
       true,
     );
   }
@@ -201,7 +238,9 @@ async function runInit(options: InitOptions, deps: Required<InitCommandDeps>): P
       deps.stdout.write(WORKFLOW_TEMPLATE);
     }
     if (appendGitignore) {
-      deps.stdout.write(`\n# would append "${GITIGNORE_LINE}" to ${gitignorePath}\n`);
+      deps.stdout.write(
+        `\n# would append the following lines to ${gitignorePath}:\n${GITIGNORE_LINES.map((l) => `#   ${l}`).join('\n')}\n`,
+      );
     }
     return;
   }
@@ -216,11 +255,13 @@ async function runInit(options: InitOptions, deps: Required<InitCommandDeps>): P
   }
 
   if (appendGitignore) {
-    const updated = await appendGitignoreLine(gitignorePath, deps.readFile, deps.writeFile);
-    if (updated) {
-      deps.stdout.write(`appended "${GITIGNORE_LINE}" to ${gitignorePath}\n`);
+    const appended = await appendGitignoreLines(gitignorePath, deps.readFile, deps.writeFile);
+    if (appended.length > 0) {
+      deps.stdout.write(
+        `appended ${appended.length} line(s) to ${gitignorePath}: ${appended.join(', ')}\n`,
+      );
     } else {
-      deps.stdout.write(`skipped ${gitignorePath} (already contains "${GITIGNORE_LINE}")\n`);
+      deps.stdout.write(`skipped ${gitignorePath} (already contains generated artifact ignores)\n`);
     }
   }
 
@@ -265,7 +306,7 @@ ${projectLine}
 ${permissionModeLine}
 # timeout_ms: 1800000           # 30 分
 # kill_grace_period_ms: 5000
-# workflow_file: WORKFLOW.md
+# workflow_file: .philharmonic/WORKFLOW.md
 # agent:
 #   max_concurrent_agents: 1
 #   max_turns: 1
@@ -353,21 +394,27 @@ export function parseGitHubOwner(remoteUrl: string): string | null {
   return null;
 }
 
-async function appendGitignoreLine(
+async function appendGitignoreLines(
   gitignorePath: string,
   readFile: (filePath: string) => Promise<string>,
   writeFile: (filePath: string, content: string) => Promise<void>,
-): Promise<boolean> {
+): Promise<readonly string[]> {
   const existing = await readFile(gitignorePath);
-  const lines = existing.split(/\r?\n/);
-  const alreadyHas = lines.some((line) => {
-    const trimmed = line.trim();
-    return trimmed === GITIGNORE_LINE || trimmed === '.philharmonic';
-  });
-  if (alreadyHas) return false;
+  const trimmedLines = existing.split(/\r?\n/).map((line) => line.trim());
+  // `.philharmonic/` (broad ignore) が既にあるなら追記しない (重複防止)。
+  // 過去の init で broad ignore を入れていたユーザの .gitignore を尊重する。
+  const hasBroadIgnore = trimmedLines.some(
+    (line) => line === '.philharmonic/' || line === '.philharmonic',
+  );
+  if (hasBroadIgnore) return [];
+
+  const toAdd = GITIGNORE_LINES.filter((entry) => !trimmedLines.includes(entry));
+  if (toAdd.length === 0) return [];
+
   const sep = existing.length === 0 || existing.endsWith('\n') ? '' : '\n';
-  await writeFile(gitignorePath, `${existing}${sep}${GITIGNORE_LINE}\n`);
-  return true;
+  const appended = toAdd.join('\n');
+  await writeFile(gitignorePath, `${existing}${sep}${appended}\n`);
+  return toAdd;
 }
 
 async function confirm(prompt: Prompter, message: string, defaultYes: boolean): Promise<boolean> {

@@ -25,7 +25,7 @@ function fakeConfig(overrides: Partial<Config> = {}): Config {
     projectNumber: 1,
     baseBranch: 'main',
     statusField: 'Status',
-    workflowFile: 'WORKFLOW.md',
+    workflowFile: '.philharmonic/WORKFLOW.md',
     agentUserLogin: null,
     permissionMode: 'auto',
     timeoutMs: 1_800_000,
