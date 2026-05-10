@@ -41,27 +41,31 @@ corepack enable
 pnpm install && pnpm build
 pnpm link --global
 
-# 2) GitHub 認証を整える (gh auth login 済みなら追加設定不要 / config の default は github.token_source: auto)
+# 2) GitHub 認証を整える (gh auth login 済みなら追加 export 不要 / config の default は github.token_source: auto)
 gh auth login                              # 推奨経路
-# あるいは env を使う場合:
+# CI / systemd / cron など非対話環境では env を使う:
 # export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 
-# 3) 動かしたい先のリポジトリに .philharmonic/philharmonic.yaml を置く (#67)
+# 3) 動かしたい先のリポジトリで philharmonic init を実行 (#66 / #67)
 cd /path/to/your-repo
-mkdir -p .philharmonic
-cat > .philharmonic/philharmonic.yaml <<'EOF'
-owner: your-github-login
-project_number: 1
-permission_mode: bypass         # ADR-0005: agent 委譲には実用上必須
-safety:
-  allow_bypass_in_serve: true   # serve で bypass を使う opt-in (env でも可)
-EOF
+philharmonic init
+# 対話で owner / project_number / permission_mode: bypass / .gitignore 追記が訊かれます。
+# 生成先は .philharmonic/philharmonic.yaml (active 行 + コメント化された default サンプル)。
+# 非対話で完走したいときは:
+#   philharmonic init --yes --owner your-github-login --project 1
 
-# 4) 常駐デーモンを起動 (30 秒ごとに Project Todo を polling)
+# 4) serve で bypass を使うための opt-in を有効にする (#68)
+# .philharmonic/philharmonic.yaml の `safety:` ブロックの # を外して true にするか、
+# env で代替できます:
+# export PHILHARMONIC_ALLOW_BYPASS_IN_SERVE=1
+
+# 5) 常駐デーモンを起動 (30 秒ごとに Project Todo を polling)
 philharmonic serve
 ```
 
-これで Philharmonic が立ち上がります。あとは Project の Todo に Issue を積めば、次の polling tick で自動的に dispatch され、`stderr` の構造化ログに `dispatch success run-id=... issue=#... pr=#...` が流れて Pull Request が立ちます。停止したいときは **Ctrl+C** (または SIGTERM) を送れば、in-flight の run の完了を待ってから graceful に exit します。
+これで Philharmonic が立ち上がります。あとは Project の Todo に Issue を積めば、次の polling tick で自動的に dispatch され、`stderr` の構造化ログに `dispatch success run-id=... issue=#...` が流れて Pull Request が立ちます。停止したいときは **Ctrl+C** (または SIGTERM) を送れば、in-flight の run の完了を待ってから graceful に exit します。
+
+> **`permission_mode: bypass` と `safety.allow_bypass_in_serve` について**: agent が `gh` / `git push` を呼ぶには Bash tool が必要なため、`bypass` (= `--dangerously-skip-permissions`) が実用上必須です。worktree 外への副作用リスクを伴うため、長時間稼働する `serve` には config か env での明示的 opt-in を必須にしています ([ADR-0005](./docs/adr/0005-thin-orchestrator-agent-delegation.md))。
 
 > 1 件だけ単発で試したい場合や、cron / GitHub Actions の `schedule` から呼びたい場合は `philharmonic run` を使えます (1 ターンで exit する単発モード)。
 
@@ -69,12 +73,12 @@ philharmonic serve
 
 ## ユーザガイド
 
-| ドキュメント                                                       | 内容                                                                                     |
-| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
-| [`docs/guide/README.md`](./docs/guide/README.md)                   | ユーザガイドの目次と、1 ターンで何が起きるかの全体像                                     |
-| [`docs/guide/getting-started.md`](./docs/guide/getting-started.md) | 前提・インストール・最小設定・Project Status 整備・初回実行までの一気通貫                |
-| [`docs/guide/configuration.md`](./docs/guide/configuration.md)     | `philharmonic.yaml` / `WORKFLOW.md` / lifecycle hooks のカスタマイズ                     |
-| [`docs/guide/operations.md`](./docs/guide/operations.md)           | CLI コマンド / 構造化ログ / `.philharmonic/runs/` / Snapshot HTTP API / トラブルシュート |
+| ドキュメント                                                       | 内容                                                                                                 |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| [`docs/guide/README.md`](./docs/guide/README.md)                   | ユーザガイドの目次と、1 ターンで何が起きるかの全体像                                                 |
+| [`docs/guide/getting-started.md`](./docs/guide/getting-started.md) | 前提・インストール・`philharmonic init`・GitHub 認証・Project Status 整備・`philharmonic serve` 起動 |
+| [`docs/guide/configuration.md`](./docs/guide/configuration.md)     | `.philharmonic/philharmonic.yaml` / `.philharmonic/WORKFLOW.md` / lifecycle hooks のカスタマイズ     |
+| [`docs/guide/operations.md`](./docs/guide/operations.md)           | CLI コマンド / 構造化ログ / `.philharmonic/runs/` / Snapshot HTTP API / トラブルシュート             |
 
 ## もっと知る
 

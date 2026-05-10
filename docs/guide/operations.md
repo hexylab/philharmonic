@@ -6,12 +6,13 @@
 
 | コマンド                     | 何をするか                                                                                              |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `philharmonic init`          | 対象リポジトリで `.philharmonic/philharmonic.yaml` を scaffold する (初回セットアップ用 / #66 / #67)    |
 | `philharmonic projects list` | Project Item のうち Issue に紐づいたものを一覧表示する (dispatch 候補が見えているか確認)                |
 | `philharmonic run`           | 1 ターン分の orchestration を実行する (1 件処理して exit)                                               |
 | `philharmonic serve`         | 一定間隔でポーリングして候補があれば run を回す常駐デーモン (SIGTERM/SIGINT で graceful shutdown)       |
 | `philharmonic clean`         | retention 経過済みの `issue-*` worktree とローカルブランチを掃除する (失敗 worktree のクリーンアップ用) |
 
-すべてのコマンドで `--config <path>` が使えます (cwd 以外の `.philharmonic/philharmonic.yaml` を指定するとき)。
+`init` 以外のコマンドは `--config <path>` が使えます (cwd 以外の `.philharmonic/philharmonic.yaml` を指定するとき)。`init` の手順詳細は [getting-started.md](./getting-started.md#4-対象リポジトリで-philharmonic-init-を実行する) を参照してください。
 
 ## `philharmonic projects list` — 候補確認
 
