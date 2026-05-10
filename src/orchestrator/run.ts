@@ -11,6 +11,7 @@ import {
 import type { GitHubClient, Issue } from '../github/index.js';
 import type { Logger } from '../logger/index.js';
 import type { Candidate, ProjectsClient } from '../projects/index.js';
+import type { GhRunner } from '../projects/status-update.js';
 import {
   createRunLog,
   generateRunId,
@@ -34,6 +35,11 @@ import {
 
 import { createDependencyIssueFetcher, logDependencyEvaluation } from './dependency-filter.js';
 import { type FailureReason } from './errors.js';
+import {
+  notifyFailureExhausted as defaultNotifyFailureExhausted,
+  type ExhaustionNotifyInput,
+  type ExhaustionNotifyResult,
+} from './exhaustion-notify.js';
 import {
   resolveFailureSummaryPath,
   writeFailureSummary,
@@ -100,7 +106,25 @@ export type RunOnceDeps = {
   maxRetryAttempts?: number;
   /** retry backoff の clamp 上限 (ms)。default 300_000 */
   maxRetryBackoffMs?: number;
+  /**
+   * `kind=failure` の retry が exhausted した瞬間に GitHub Projects Status を `Failed` に倒し、
+   * Issue にコメントを残す safety-net (ADR-0010 / #103)。
+   *
+   * - `serve` では `defaultGhRunner` を渡して `gh project item-edit` / `gh issue comment` を実行する
+   * - `philharmonic run` (1 ターン CLI) や retry queue 未注入のテストでは省略すると no-op
+   */
+  runGh?: GhRunner;
+  /**
+   * テストで差し替え可能な exhaustion notify 関数。`runGh` と同時に省略すると no-op。
+   *
+   * `runGh` のみ渡せば本モジュール内 default の `notifyFailureExhausted` を使う。
+   */
+  notifyFailureExhausted?: NotifyFailureExhaustedFn;
 };
+
+export type NotifyFailureExhaustedFn = (
+  input: ExhaustionNotifyInput,
+) => Promise<ExhaustionNotifyResult>;
 
 export type RunOnceResult =
   | { kind: 'no_candidate' }
@@ -178,6 +202,8 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     logger: baseLogger,
   });
 
+  const notifyFailureExhaustedFn = resolveNotifyFailureExhausted(deps, baseLogger);
+
   if (retryTasks.length > 0) {
     const task = retryTasks[0]!;
     const result = await dispatchSelected({
@@ -212,6 +238,7 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
       resolveWorkspacePath: (t) =>
         deps.workspaceManager.resolveWorkspacePath(`issue-${t.candidate.issueNumber}`),
       resolveContinuationCandidates,
+      notifyFailureExhausted: notifyFailureExhaustedFn,
     });
     return result;
   }
@@ -276,6 +303,7 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     resolveWorkspacePath: (t) =>
       deps.workspaceManager.resolveWorkspacePath(`issue-${t.candidate.issueNumber}`),
     resolveContinuationCandidates,
+    notifyFailureExhausted: notifyFailureExhaustedFn,
   });
   return result;
 }
@@ -430,6 +458,8 @@ export async function runConcurrent(deps: RunConcurrentDeps): Promise<Concurrent
     logger: baseLogger,
   });
 
+  const notifyFailureExhaustedFn = resolveNotifyFailureExhausted(deps, baseLogger);
+
   for (const { task, result } of outcomes) {
     await processDispatchResultForRetry({
       task,
@@ -445,6 +475,7 @@ export async function runConcurrent(deps: RunConcurrentDeps): Promise<Concurrent
       resolveWorkspacePath: (t) =>
         deps.workspaceManager.resolveWorkspacePath(`issue-${t.candidate.issueNumber}`),
       resolveContinuationCandidates,
+      notifyFailureExhausted: notifyFailureExhaustedFn,
     });
   }
 
@@ -1042,6 +1073,29 @@ export function evaluateContinuationDecision(input: {
   return { kind: 'schedule', status: candidate.status };
 }
 
+/**
+ * `runOnce` / `runConcurrent` の DI から exhaustion notify 関数を組み立てる。
+ *
+ * - `notifyFailureExhausted` を直接渡されたらそれを使う (テスト用)
+ * - そうでなくて `runGh` だけ渡されたら module の default を `runGh` / `projectsClient` で bind
+ * - どちらも未指定なら undefined を返す = 配線無し (= `philharmonic run` 互換)
+ */
+function resolveNotifyFailureExhausted(
+  deps: Pick<RunOnceDeps, 'runGh' | 'notifyFailureExhausted' | 'projectsClient'>,
+  logger: Logger,
+): NotifyFailureExhaustedFn | undefined {
+  if (deps.notifyFailureExhausted !== undefined) return deps.notifyFailureExhausted;
+  if (deps.runGh === undefined) return undefined;
+  const runGh = deps.runGh;
+  const projectsClient = deps.projectsClient;
+  return (input) =>
+    defaultNotifyFailureExhausted(input, {
+      runGh,
+      projectsClient,
+      logger,
+    });
+}
+
 type ContinuationCandidatesResolver = () => Promise<readonly Candidate[] | null>;
 
 /**
@@ -1277,6 +1331,11 @@ type ProcessDispatchResultDeps = {
   resolveWorkspacePath: (task: DispatchTask) => string;
   /** continuation 判定用の最新 Project candidates を memoize 経由で返す resolver */
   resolveContinuationCandidates: ContinuationCandidatesResolver;
+  /**
+   * `kind=failure` の exhaustion で Project Status を `Failed` に倒し Issue にコメントする
+   * safety-net (ADR-0010 / #103)。未指定なら no-op (= `philharmonic run` 互換)
+   */
+  notifyFailureExhausted?: NotifyFailureExhaustedFn;
 };
 
 /**
@@ -1309,6 +1368,7 @@ async function processDispatchFailureForRetry(deps: ProcessDispatchResultDeps): 
   const nextAttempt = nextAttemptForKind(task, 'failure');
   if (nextAttempt > maxRetryAttempts) {
     retryQueue.remove(task.candidate.issueNumber);
+    const exhaustedAt = clock();
     const failureSummaryPath = await emitFailureSummaryArtifact(
       {
         runnerLogsRoot: deps.runnerLogsRoot,
@@ -1320,7 +1380,7 @@ async function processDispatchFailureForRetry(deps: ProcessDispatchResultDeps): 
         branch,
         workspacePath,
         errorSummary: result.errorSummary,
-        exhaustedAt: clock(),
+        exhaustedAt,
       },
       logger,
     );
@@ -1337,6 +1397,35 @@ async function processDispatchFailureForRetry(deps: ProcessDispatchResultDeps): 
       streamPath: `.philharmonic/runs/${result.runId}/stream.jsonl`,
       stderrPath: `.philharmonic/runs/${result.runId}/stderr.log`,
     });
+    if (deps.notifyFailureExhausted !== undefined) {
+      try {
+        await deps.notifyFailureExhausted({
+          owner: deps.config.owner,
+          projectNumber: deps.config.projectNumber,
+          statusFieldName: deps.config.statusField,
+          failedStatus: deps.config.statusTransitions.failed,
+          issueNumber: task.candidate.issueNumber,
+          repository: { owner: task.repository.owner, name: task.repository.name },
+          itemId: task.candidate.itemId,
+          attempt: task.retryAttempt,
+          maxAttempts: maxRetryAttempts,
+          failureReason: result.reason,
+          runId: result.runId,
+          branch,
+          workspacePath,
+          errorSummary: result.errorSummary,
+          failureSummaryPath,
+          runnerLogsRoot: deps.runnerLogsRoot,
+          exhaustedAt,
+        });
+      } catch (error) {
+        logger.warn('exhaustion notify threw', {
+          issueNumber: task.candidate.issueNumber,
+          runId: result.runId,
+          error: describeError(error),
+        });
+      }
+    }
     return;
   }
 

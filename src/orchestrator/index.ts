@@ -5,6 +5,15 @@ export {
 } from './dependency-filter.js';
 export { BootstrapError, type BootstrapErrorReason, type FailureReason } from './errors.js';
 export {
+  buildMarker as buildExhaustionMarker,
+  notifyFailureExhausted,
+  renderExhaustionComment,
+  resolveCommentBodyPath as resolveExhaustionCommentBodyPath,
+  type ExhaustionNotifyDeps,
+  type ExhaustionNotifyInput,
+  type ExhaustionNotifyResult,
+} from './exhaustion-notify.js';
+export {
   renderFailureSummary,
   resolveFailureSummaryPath,
   writeFailureSummary,
@@ -24,6 +33,7 @@ export {
   runOnce,
   type ConcurrentDispatchOutcome,
   type DispatchSelectedDeps,
+  type NotifyFailureExhaustedFn,
   type RunConcurrentDeps,
   type RunOnceClock,
   type RunOnceDeps,
