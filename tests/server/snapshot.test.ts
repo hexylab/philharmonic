@@ -51,6 +51,7 @@ describe('buildStateSnapshot', () => {
         interval_ms: 30_000,
         last_tick_at: '2026-05-09T00:00:30.000Z',
       },
+      agent: { stall_timeout_ms: 0 },
       running: [
         {
           run_id: 'run-2',
@@ -58,6 +59,8 @@ describe('buildStateSnapshot', () => {
           branch: 'feature/7-bar',
           started_at: '2026-05-09T00:00:20.000Z',
           slot: null,
+          last_activity_at: '2026-05-09T00:00:20.000Z',
+          retry_attempt: null,
         },
         {
           run_id: 'run-1',
@@ -65,6 +68,8 @@ describe('buildStateSnapshot', () => {
           branch: 'feature/42-foo',
           started_at: '2026-05-09T00:00:10.000Z',
           slot: 1,
+          last_activity_at: '2026-05-09T00:00:10.000Z',
+          retry_attempt: null,
         },
       ],
       totals: {
@@ -198,6 +203,8 @@ describe('buildStateSnapshot', () => {
           failure_reason: 'runner_error',
           last_run_id: 'last-run',
           last_error_summary: 'claude exited with code 1',
+          branch: 'feature/42-foo',
+          workspace_path: '/tmp/issue-42',
         },
         {
           kind: 'continuation',
@@ -208,8 +215,56 @@ describe('buildStateSnapshot', () => {
           failure_reason: null,
           last_run_id: 'cont-run',
           last_error_summary: null,
+          branch: 'feature/43-bar',
+          workspace_path: '/tmp/issue-43',
         },
       ],
+    });
+  });
+
+  it('agent.stall_timeout_ms を snapshot に含める (#87)', async () => {
+    const tracker = createRunTracker({ startedAt: new Date('2026-05-09T00:00:00Z') });
+    const snapshot = await buildStateSnapshot({
+      tracker,
+      intervalMs: 30_000,
+      stallTimeoutMs: 300_000,
+      now: new Date('2026-05-09T00:01:00Z'),
+    });
+    expect(snapshot.agent).toEqual({ stall_timeout_ms: 300_000 });
+  });
+
+  it('stallTimeoutMs が 0 / 不正値なら 0 を返す (#87)', async () => {
+    const tracker = createRunTracker({ startedAt: new Date('2026-05-09T00:00:00Z') });
+    const snapshot = await buildStateSnapshot({
+      tracker,
+      intervalMs: 30_000,
+      stallTimeoutMs: 0,
+      now: new Date('2026-05-09T00:01:00Z'),
+    });
+    expect(snapshot.agent).toEqual({ stall_timeout_ms: 0 });
+  });
+
+  it('running entry の last_activity_at は recordActivity で更新される (#87)', async () => {
+    const tracker = createRunTracker({ startedAt: new Date('2026-05-09T00:00:00Z') });
+    tracker.runStarted({
+      runId: 'r-1',
+      issueNumber: 9,
+      branch: 'feature/9-foo',
+      startedAt: new Date('2026-05-09T00:00:10Z'),
+      retryAttempt: { kind: 'continuation', attempt: 3 },
+    });
+    tracker.recordActivity('r-1', new Date('2026-05-09T00:00:55Z'));
+
+    const snapshot = await buildStateSnapshot({
+      tracker,
+      intervalMs: 30_000,
+      stallTimeoutMs: 60_000,
+      now: new Date('2026-05-09T00:01:00Z'),
+    });
+    expect(snapshot.running[0]).toMatchObject({
+      run_id: 'r-1',
+      last_activity_at: '2026-05-09T00:00:55.000Z',
+      retry_attempt: { kind: 'continuation', attempt: 3 },
     });
   });
 
@@ -274,6 +329,8 @@ describe('buildIssueSnapshot', () => {
         branch: 'b',
         started_at: '2026-05-09T00:00:00.000Z',
         slot: 0,
+        last_activity_at: '2026-05-09T00:00:00.000Z',
+        retry_attempt: null,
       },
     });
   });

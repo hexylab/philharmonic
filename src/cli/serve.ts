@@ -333,6 +333,7 @@ async function runServeCommand(
             buildStateSnapshot({
               tracker: runTracker,
               intervalMs: config.polling.intervalMs,
+              stallTimeoutMs: config.agent.stallTimeoutMs,
               dependencyTracker,
               retryQueue,
               retryConfig: {

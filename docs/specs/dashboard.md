@@ -8,9 +8,9 @@
 
 ## 関連
 
-- 関連 Issue: #31 (Refs: #30)
+- 関連 Issue: #31 (Refs: #30), #87 (Retry Queue / Stalled section 追加)
 - 設計判断: [ADR-0006 TUI dashboard は Ink で実装する](../adr/0006-tui-dashboard.md), [ADR-0004 Snapshot HTTP API は loopback 固定](../adr/0004-snapshot-http-api.md)
-- 関連 spec: [snapshot-api.md](./snapshot-api.md), [serve-daemon.md](./serve-daemon.md), [config-schema.md](./config-schema.md)
+- 関連 spec: [snapshot-api.md](./snapshot-api.md), [serve-daemon.md](./serve-daemon.md), [config-schema.md](./config-schema.md), [retry-queue.md](./retry-queue.md)
 
 ## 要件
 
@@ -78,9 +78,10 @@ stdout に以下のような human-readable text を出して exit 0。Snapshot 
 host=127.0.0.1 port=4000
 started_at=2026-05-09T00:00:00.000Z uptime=1h00m00s
 polling.interval_ms=30000 polling.last_tick_at=2026-05-09T00:00:30.000Z
+agent.stall_timeout_ms=300000
 
 running:
-  #42 branch=feature/42-foo started_at=2026-05-09T00:00:10.000Z slot=0
+  #42 branch=feature/42-foo started_at=2026-05-09T00:00:10.000Z slot=0 retry=- last_activity_at=2026-05-09T00:00:25.000Z stall=in 4m35s
 
 totals:
   runs_completed=12 runs_succeeded=10 runs_failed=2 total_cost_usd=4.32
@@ -92,44 +93,56 @@ scheduler: last_evaluated_at=2026-05-09T00:00:30.000Z
   cycles (1):
     [#201, #202]
   invalid (0)
+
+retry_queue (1): max_attempts=5 max_backoff_ms=300000
+  #42 kind=failure attempt=2 reason=runner_error due_at=2026-05-09T00:00:50.000Z (in 20s) branch=feature/42-foo workspace_path=/home/user/.philharmonic/worktrees/issue-42 last_run_id=0190ce80-...
 ```
 
 `running` が空のときは `running: (none)` と書く。`polling.last_tick_at` が `null` のときは `(never)` と書く。
 
+`running` の各行は `retry=<kind>#<attempt>` (retry 起源でなければ `-`)、`last_activity_at=<ISO>`、`stall=<状態>` を末尾に追加する (#87)。`stall` の表記は: `agent.stall_timeout_ms` が 0 / 不正値なら `disabled`、残時間内なら `in <短縮表記>`、超過なら `STALLED+<超過時間>`。
+
 `scheduler` が `null` (現行 serve だがまだ評価していない) のときは `scheduler: (not evaluated yet)` と 1 行だけ書く。`scheduler` が `undefined` (古い serve に接続していてフィールドそのものが無い) のときは `scheduler: (not provided by daemon)` と 1 行だけ書いて、API 未対応であることを明示する。
+
+`retry_queue` も同じパターン (#87): `undefined` (古い serve) は `retry_queue: (not provided by daemon)`、`null` (`agent.max_retry_attempts == 0`) は `retry_queue: (disabled)`、entries が空なら `retry_queue (0): max_attempts=N max_backoff_ms=N` のヘッダのみ。
 
 エラー時 (接続失敗 / HTTP エラー / JSON parse 失敗) は stderr に `dashboard: <理由>` を 1 行出して exit 1。
 
 ### TUI レイアウト (概念図)
 
 ```
-┌────────────────────────────────────────────────────┐
-│ Philharmonic Dashboard                             │
-│ http://127.0.0.1:4000   refresh=30000ms            │
-├────────────────────────────────────────────────────┤
-│ started 2026-05-09T00:00:00.000Z   uptime 1h00m00s │
-│ polling 30000ms   last tick 2026-05-09T00:00:30.000Z│
-├────────────────────────────────────────────────────┤
-│ Running (1)                                        │
-│   #42  feature/42-foo  slot=0  started 00:00:10    │
-├────────────────────────────────────────────────────┤
-│ Totals                                             │
-│   completed=12  succeeded=10  failed=2  cost=$4.32 │
-├────────────────────────────────────────────────────┤
-│ Scheduler  last evaluated 2026-05-09T00:00:30.000Z │
-│   Ready (2)   #104, #105                           │
-│   Blocked (1)                                      │
-│     #102 ← #101                                    │
-│   Cycle (1)                                        │
-│     [#201, #202]                                   │
-│   Invalid (0)                                      │
-├────────────────────────────────────────────────────┤
-│ q quit  r refresh  R wake-and-refresh              │
-│ last fetch ok @ 13:00:42                           │
-└────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│ Philharmonic Dashboard                                             │
+│ http://127.0.0.1:4000   refresh=30000ms                            │
+├────────────────────────────────────────────────────────────────────┤
+│ started 2026-05-09T00:00:00.000Z   uptime 1h00m00s                 │
+│ polling 30000ms   last tick 2026-05-09T00:00:30.000Z                │
+├────────────────────────────────────────────────────────────────────┤
+│ Running (1)  stall_timeout=300000ms                                │
+│   #42  feature/42-foo  slot=0  retry=failure#1  started ...        │
+│      last_activity 2026-05-09T00:00:25.000Z  stall in 4m35s        │
+├────────────────────────────────────────────────────────────────────┤
+│ Totals                                                             │
+│   completed=12  succeeded=10  failed=2  cost=$4.32                 │
+├────────────────────────────────────────────────────────────────────┤
+│ Scheduler  last evaluated 2026-05-09T00:00:30.000Z                 │
+│   Ready (2)   #104, #105                                           │
+│   Blocked (1)                                                      │
+│     #102 ← #101                                                    │
+│   Cycle (1)                                                        │
+│     [#201, #202]                                                   │
+│   Invalid (0)                                                      │
+├────────────────────────────────────────────────────────────────────┤
+│ Retry Queue (1)  max_attempts=5 max_backoff_ms=300000              │
+│   #42  failure  attempt=2  reason=runner_error  in 20s             │
+│      due 2026-05-09T00:00:50.000Z  branch=feature/42-foo           │
+├────────────────────────────────────────────────────────────────────┤
+│ q quit  r refresh  R wake-and-refresh                              │
+│ last fetch ok @ 13:00:42                                           │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
-幅の自動調整は Ink/Yoga が行う。色は最小限 (running 件数 / エラーメッセージのみ強調)。
+幅の自動調整は Ink/Yoga が行う。色は最小限 (running 件数 / エラーメッセージ / retry kind / stalled 状態のみ強調)。
 
 ### Scheduler section の表示ルール
 
@@ -140,6 +153,23 @@ scheduler: last_evaluated_at=2026-05-09T00:00:30.000Z
   - `Blocked (n)` の各行は `#<issueNumber> ← #X, #Y` (blocking 番号)
   - `Cycle (n)` の各行は `[#A, #B, ...]`
   - `Invalid (n)` は件数のみ (entries 詳細は `--once` でのみ書く。TUI で出すと幅を取りすぎる)
+
+### Running section の追加表示ルール (#87)
+
+- 各行のヘッダ右端に `stall_timeout=<ms>ms` または `stall_timeout=off` を表示する (`agent.stall_timeout_ms` が 0 / 不正値なら off)
+- 各 entry に 2 行目を追加し、`last_activity <ISO>` と stall 残時間 (または `STALLED+<超過>`) を表示する
+- entry が retry 起源 (`retry_attempt !== null`) のときのみ 1 行目に `retry=<kind>#<attempt>` を表示する
+- 残時間表示は `stall in 4m35s` (live) / `STALLED+30s` (超過) / `stall=off` (無効) のいずれか
+
+### Retry Queue section の表示ルール (#87)
+
+- `retry_queue === undefined` (古い serve に接続している): `Retry Queue (no data — older serve)` と 1 行だけ表示する
+- `retry_queue === null` (`agent.max_retry_attempts == 0`): `Retry Queue (disabled — agent.max_retry_attempts=0)` と 1 行だけ表示する
+- それ以外:
+  - ヘッダ行に `Retry Queue (n)  max_attempts=N max_backoff_ms=N` を表示する
+  - entries が空のときは ` (none)` の 1 行だけ
+  - 各 entry は 2 行構成。1 行目 `#<issue>  <kind>  attempt=N  reason=<reason>  <due 表記>`、2 行目 `due <ISO>  branch=<branch>` (kind=continuation のとき reason は `-`)
+  - due 表記は `in 20s` (まだ来てない) / `overdue 30s` (超過済み) / `unknown` (parse 失敗)。color は overdue=red / live=cyan
 
 ### Snapshot API との関係
 

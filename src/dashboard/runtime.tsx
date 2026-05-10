@@ -1,14 +1,17 @@
 import { Box, Text, useApp, useInput } from 'ink';
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 
-import type { SchedulerStateJson, StateSnapshot } from '../server/index.js';
+import type { RetryQueueStateJson, SchedulerStateJson, StateSnapshot } from '../server/index.js';
 
 import { describeFetchError, type DashboardClient } from './client.js';
 import {
   READY_ISSUES_DISPLAY_LIMIT,
+  describeStallStatus,
+  formatDurationMsShort,
   formatRunningRow,
   formatTotalCost,
   formatUptimeMs,
+  type StallStatus,
 } from './format.js';
 
 /**
@@ -120,9 +123,10 @@ export function DashboardApp({ client, intervalMs, now }: DashboardAppProps): Re
       ) : (
         <>
           <DaemonSection snapshot={snapshot} />
-          <RunningSection snapshot={snapshot} />
+          <RunningSection snapshot={snapshot} clock={clock} />
           <TotalsSection snapshot={snapshot} />
           <SchedulerSection scheduler={snapshot.scheduler} />
+          <RetrySection retryQueue={snapshot.retry_queue} clock={clock} />
         </>
       )}
       <Footer state={state} errorMessage={errorMessage} refreshNotice={refreshNotice} />
@@ -173,29 +177,143 @@ function DaemonSection({ snapshot }: { snapshot: StateSnapshot }): ReactElement 
   );
 }
 
-function RunningSection({ snapshot }: { snapshot: StateSnapshot }): ReactElement {
+function RunningSection({
+  snapshot,
+  clock,
+}: {
+  snapshot: StateSnapshot;
+  clock: () => Date;
+}): ReactElement {
   const count = snapshot.running.length;
+  const stallTimeoutMs = snapshot.agent?.stall_timeout_ms ?? 0;
+  const now = clock();
   return (
     <Box paddingX={1} borderStyle="round" borderColor="gray" flexDirection="column">
       <Text>
         Running <Text color={count > 0 ? 'green' : 'gray'}>({count})</Text>
+        {'  '}
+        <Text color="gray">stall_timeout={stallTimeoutMs > 0 ? `${stallTimeoutMs}ms` : 'off'}</Text>
       </Text>
       {count === 0 ? (
         <Text color="gray"> (none)</Text>
       ) : (
         snapshot.running.map((entry) => {
           const row = formatRunningRow(entry);
+          const stall = describeStallStatus({
+            lastActivityAt: entry.last_activity_at,
+            stallTimeoutMs,
+            now,
+          });
           return (
-            <Text key={entry.run_id}>
-              {'  '}
-              <Text color="green">{row.issue}</Text>
-              {'  '}
-              <Text>{row.branch}</Text>
-              {'  '}
-              <Text color="gray">slot={row.slot}</Text>
-              {'  '}
-              <Text color="gray">started {row.startedAt}</Text>
-            </Text>
+            <Box key={entry.run_id} flexDirection="column">
+              <Text>
+                {'  '}
+                <Text color="green">{row.issue}</Text>
+                {'  '}
+                <Text>{row.branch}</Text>
+                {'  '}
+                <Text color="gray">slot={row.slot}</Text>
+                {entry.retry_attempt !== null ? (
+                  <>
+                    {'  '}
+                    <Text color="yellow">retry={row.retryAttempt}</Text>
+                  </>
+                ) : null}
+                {'  '}
+                <Text color="gray">started {row.startedAt}</Text>
+              </Text>
+              <Text>
+                {'    '}
+                <Text color="gray">last_activity {row.lastActivityAt}</Text>
+                {'  '}
+                <StallText stall={stall} />
+              </Text>
+            </Box>
+          );
+        })
+      )}
+    </Box>
+  );
+}
+
+function StallText({ stall }: { stall: StallStatus }): ReactElement {
+  if (stall.kind === 'disabled') return <Text color="gray">stall=off</Text>;
+  if (stall.kind === 'stalled') {
+    return <Text color="red">STALLED+{formatDurationMsShort(stall.overdueMs)}</Text>;
+  }
+  return <Text color="cyan">stall in {formatDurationMsShort(stall.remainingMs)}</Text>;
+}
+
+function RetrySection({
+  retryQueue,
+  clock,
+}: {
+  retryQueue: RetryQueueStateJson | null | undefined;
+  clock: () => Date;
+}): ReactElement {
+  if (retryQueue === undefined) {
+    return (
+      <Box paddingX={1} borderStyle="round" borderColor="gray" flexDirection="column">
+        <Text>Retry Queue</Text>
+        <Text color="yellow"> (no data — older serve)</Text>
+      </Box>
+    );
+  }
+  if (retryQueue === null) {
+    return (
+      <Box paddingX={1} borderStyle="round" borderColor="gray" flexDirection="column">
+        <Text>Retry Queue</Text>
+        <Text color="gray"> (disabled — agent.max_retry_attempts=0)</Text>
+      </Box>
+    );
+  }
+  const now = clock();
+  return (
+    <Box paddingX={1} borderStyle="round" borderColor="gray" flexDirection="column">
+      <Text>
+        Retry Queue <Text color={retryQueue.size > 0 ? 'yellow' : 'gray'}>({retryQueue.size})</Text>
+        {'  '}
+        <Text color="gray">
+          max_attempts={retryQueue.max_attempts} max_backoff_ms={retryQueue.max_backoff_ms}
+        </Text>
+      </Text>
+      {retryQueue.entries.length === 0 ? (
+        <Text color="gray"> (none)</Text>
+      ) : (
+        retryQueue.entries.map((entry) => {
+          const dueMs = Date.parse(entry.due_at);
+          const diffMs = Number.isFinite(dueMs) ? dueMs - now.getTime() : NaN;
+          const dueDescription = !Number.isFinite(diffMs)
+            ? 'unknown'
+            : diffMs <= 0
+              ? `overdue ${formatDurationMsShort(-diffMs)}`
+              : `in ${formatDurationMsShort(diffMs)}`;
+          const dueColor = !Number.isFinite(diffMs) ? 'gray' : diffMs <= 0 ? 'red' : 'cyan';
+          const reasonText = entry.failure_reason ?? '-';
+          return (
+            <Box
+              key={`${entry.issue_number}-${entry.attempt}-${entry.kind}`}
+              flexDirection="column"
+            >
+              <Text>
+                {'  '}
+                <Text color="yellow">#{entry.issue_number}</Text>
+                {'  '}
+                <Text color={entry.kind === 'failure' ? 'red' : 'cyan'}>{entry.kind}</Text>
+                {'  '}
+                <Text>attempt={entry.attempt}</Text>
+                {'  '}
+                <Text color="gray">reason={reasonText}</Text>
+                {'  '}
+                <Text color={dueColor}>{dueDescription}</Text>
+              </Text>
+              <Text>
+                {'    '}
+                <Text color="gray">due {entry.due_at}</Text>
+                {'  '}
+                <Text color="gray">branch={entry.branch}</Text>
+              </Text>
+            </Box>
           );
         })
       )}
