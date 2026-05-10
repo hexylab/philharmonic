@@ -10,6 +10,7 @@
 | `philharmonic projects list` | Project Item のうち Issue に紐づいたものを一覧表示する (dispatch 候補が見えているか確認)                |
 | `philharmonic run`           | 1 ターン分の orchestration を実行する (1 件処理して exit)                                               |
 | `philharmonic serve`         | 一定間隔でポーリングして候補があれば run を回す常駐デーモン (SIGTERM/SIGINT で graceful shutdown)       |
+| `philharmonic retry <n>`     | 指定 Issue の Project Status を dispatch 対象状態に戻し、stale な worktree を cleanup する (手動再実行) |
 | `philharmonic clean`         | retention 経過済みの `issue-*` worktree とローカルブランチを掃除する (失敗 worktree のクリーンアップ用) |
 | `philharmonic dashboard`     | `philharmonic serve` の Snapshot HTTP API を購読する read-only TUI dashboard を起動する                 |
 
@@ -125,6 +126,43 @@ retry の進行は構造化ログ (`retry scheduled` / `retry due` / `retry skip
 `permission_mode: bypass` を `serve` で使う場合は、長時間稼働で `--dangerously-skip-permissions` が連続発火することへの opt-in が必要です。`philharmonic.yaml` で `safety.allow_bypass_in_serve: true` を設定するか (推奨)、環境変数 `PHILHARMONIC_ALLOW_BYPASS_IN_SERVE=1` を明示してください。両方未設定だと起動を拒否します。
 
 詳細仕様 (lock file / signal handling / 並列 dispatch / Tracker recovery) は [`docs/specs/serve-daemon.md`](../specs/serve-daemon.md)。
+
+## `philharmonic retry <issue-number>` — 手動再実行
+
+自動 retry queue (`agent.max_retry_attempts`) で復旧できなかった Issue や、恒久原因を修正したあとに人間が明示的に再実行したい Issue を、単一コマンドで安全に再 dispatch 可能な状態へ戻すための **fallback コマンド** です。Project Status を dispatch 対象状態に戻し、stale な worktree を cleanup します。
+
+```sh
+# まずは plan を確認 (副作用ゼロ)
+philharmonic retry 42 --dry-run
+
+# 実行: worktree cleanup → Status を Todo に書き戻し
+philharmonic retry 42
+
+# Status の書き戻し先を上書き (default: dispatch_statuses[0]、通常 Todo)
+philharmonic retry 42 --target-status "Ready for Agent"
+
+# open PR が紐付いていても続行する (default は abort)
+philharmonic retry 42 --force
+```
+
+何が起こるか:
+
+1. **対象 Issue を Project Item から特定** — Project に居ないなら exit 1
+2. **Issue が close 済みなら abort** (再実行しても意味がないため)
+3. **`feature/<issue番号>-` で始まる open PR を確認** — 1 件でもあれば default で abort (`--force` で続行可能)
+4. **worktree cleanup** — `<workspace_root>/issue-<番号>/` が残っていれば `WorkspaceManager.cleanupWorkspace` で削除。`feature/<issue番号>-` パターンに一致するローカルブランチも併せて削除します
+5. **Project Status 書き戻し** — 既存 Status と target が違うときだけ `gh project item-edit` で書き戻し (idempotent)
+6. **serve daemon が動いていれば次 tick で再 pick** — Status と worktree が dispatch 可能な状態に戻っているため
+
+`--dry-run` は **副作用ゼロ** で plan を表示するだけです。`gh project item-edit` も `cleanupWorkspace` も呼ばないので、慣れないうちは `--dry-run` で確認してから本実行する運用を推奨します。
+
+> **自動 retry queue (in-memory) との関係**: `philharmonic serve` の retry queue は daemon プロセス内 in-memory で、`philharmonic retry` (別プロセス) からは触れません。同 Issue の retry entry が serve に残っていれば、`dueAt` 到来時の `drainRetryQueue` が新しい Status (= 本コマンドが書き戻した値) を見て普通に dispatch します。CLI から in-memory queue を即時 evict する手段は提供していません (queue は serve 停止 / 再起動で消えます)。
+
+> **動作中の serve との race**: 対象 Issue が **まさに in-flight** な場合 (`philharmonic serve` の dispatch が runner 起動中) に `philharmonic retry` を実行すると、`cleanupWorkspace` が **動作中の runner の worktree を `--force` で吹き飛ばす** 可能性があります。spec 上 retry CLI は「自動 retry で復旧できなかった fallback」想定ですが、足元で in-flight な可能性を防ぐためには、実行前に `philharmonic dashboard` または `curl -s http://127.0.0.1:<port>/api/v1/<issue-number> | jq` で対象 Issue が `running[]` に居ないことを確認してから実行してください。`server.port` を未設定なら `philharmonic serve` の構造化ログの `dispatch success` / `run completed successfully` を grep する運用でも代替できます。
+
+> **Status 書き戻しの経路**: 本コマンドは agent と同様 `gh project item-edit` を subprocess で呼びます。orchestrator は GraphQL の write 系を持ちません ([ADR-0005](../adr/0005-thin-orchestrator-agent-delegation.md) の境界を維持)。`gh` の認証は env (`GITHUB_TOKEN` / `GH_TOKEN`) または host の `gh auth login` を使います (既存の `github.token_source` 経路と同じ前提)。
+
+詳細仕様 (plan 構造 / エラーハンドリング) は [`docs/specs/manual-retry.md`](../specs/manual-retry.md) を参照。
 
 ## `philharmonic clean` — 失敗 worktree の掃除
 
@@ -434,7 +472,7 @@ ServeLockHeldError: another `philharmonic serve` is running on this repo
 2. `failureSummaryPath` が示す `.philharmonic/runs/<run-id>/failure-summary.md` を開いて、failure reason / 直近 error / branch / worktree path / 関連 run artifact (`summary.md` / `stream.jsonl` / `stderr.log`) の場所を確認する
 3. `summary.md` (Claude の最終応答) と `stderr.log` から原因を特定する
 4. 必要なら `worktree path` の worktree を `git worktree remove --force <path>` で掃除するか、`philharmonic clean` で retention 経過後にまとめて掃除する
-5. 再実行する場合は **Project Status を `Todo` 等の `dispatch_statuses` に戻す** — orchestrator は次 tick で再 dispatch します。`In Progress` のままだと recovery 経路でも拾われますが、worktree が残っている場合は cleanup → 再作成として動きます
+5. 再実行する場合は **`philharmonic retry <issue-number>`** で Status を `dispatch_statuses` に戻し、stale な worktree を cleanup します (詳細: [手動再実行](#philharmonic-retry-issue-number--手動再実行))。手動でやる場合は GitHub UI で Status を戻したうえで `git worktree remove --force <path>` (または `philharmonic clean --retention-days 0`) で worktree を消してください (`philharmonic clean` の default は `clean_retention_days` 経過後のみ削除するため、retry 直後の worktree は基本残ります)。orchestrator は次 tick で再 dispatch します
 
 > orchestrator は ADR-0005 の方針 ([thin-orchestrator-agent-delegation](../adr/0005-thin-orchestrator-agent-delegation.md)) に従い、**Issue comment や Project Status の自動更新は行いません** (失敗時も含む)。failure summary は file + 構造化ログのみです。Issue comment 投稿 / `Failed` 自動遷移を将来的に opt-in 機能として追加する案は spec のオープンクエスチョン ([retry-queue.md](../specs/retry-queue.md#オープンクエスチョン)) に挙げています。
 
