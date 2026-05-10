@@ -22,7 +22,7 @@ stateDiagram-v2
 
 ## なぜ Philharmonic を使うのか
 
-- **チケットを積むだけで自動 dispatch**: `philharmonic serve` を常駐させると、Project の Todo に Issue が積まれた瞬間 (次の polling tick) に候補選定 → worktree 作成 → Claude Code 起動 まで自動でやり切る。以降の commit / push / PR 作成 / Status 遷移 / 必要に応じた Issue コメントは agent (Claude Code + `gh` CLI) が prompt 指示に従って完結する ([ADR-0005](./docs/adr/0005-thin-orchestrator-agent-delegation.md))
+- **チケットを積むだけで自動 dispatch**: `philharmonic serve` を常駐させると、Project の Todo に Issue が積まれた瞬間 (次の polling tick) に候補選定 → worktree 作成 → Claude Code 起動 まで自動でやり切る。以降の commit / push / PR 作成 / Status 遷移 / 必要に応じた Issue コメントは agent (Claude Code + `gh` CLI) が prompt 指示に従って完結する
 - **Issue 本文は自由フォーマット**: `## Goal` / `## Constraints` / `## Acceptance Criteria` の必須セクション制約は撤廃。本文はそのまま agent に渡される
 - **タスクごとに git worktree で隔離**: 作業は `.philharmonic/worktrees/issue-<番号>/` の中だけ。ホスト環境を汚さず、複数タスクを並行して試せる
 - **daemon 運用に必要なものが揃っている**: SIGTERM で in-flight 完了待ちの graceful shutdown、起動時に `In Progress` を引き取る recovery、`max_concurrent_agents` で並列 dispatch、二重起動を防ぐ lock file、`localhost` の Snapshot HTTP API (`/api/v1/state`) で dashboard 連携も可能
@@ -46,7 +46,7 @@ gh auth login                              # 推奨経路
 # CI / systemd / cron など非対話環境では env を使う:
 # export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 
-# 3) 動かしたい先のリポジトリで philharmonic init を実行 (#66 / #67)
+# 3) 動かしたい先のリポジトリで philharmonic init を実行
 cd /path/to/your-repo
 philharmonic init
 # 対話で owner / project_number / permission_mode: bypass / .gitignore 追記が訊かれます。
@@ -54,7 +54,7 @@ philharmonic init
 # 非対話で完走したいときは:
 #   philharmonic init --yes --owner your-github-login --project 1
 
-# 4) serve で bypass を使うための opt-in を有効にする (#68)
+# 4) serve で bypass を使うための opt-in を有効にする
 # .philharmonic/philharmonic.yaml の `safety:` ブロックの # を外して true にするか、
 # env で代替できます:
 # export PHILHARMONIC_ALLOW_BYPASS_IN_SERVE=1

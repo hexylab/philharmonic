@@ -159,7 +159,7 @@ async function runInit(options: InitOptions, deps: Required<InitCommandDeps>): P
       `warning: legacy ${LEGACY_PHILHARMONIC_YAML_FILE} が repo root に存在します: ${legacyYamlPath}\n`,
     );
     deps.stderr.write(
-      `  起動時の fallback で当面読み込まれますが、\`mkdir -p .philharmonic && git mv ${LEGACY_PHILHARMONIC_YAML_FILE} ${PHILHARMONIC_YAML_FILE}\` で移行することを推奨します (#67)\n`,
+      `  起動時の fallback で当面読み込まれますが、\`mkdir -p .philharmonic && git mv ${LEGACY_PHILHARMONIC_YAML_FILE} ${PHILHARMONIC_YAML_FILE}\` で移行することを推奨します\n`,
     );
   }
 
@@ -203,7 +203,7 @@ async function runInit(options: InitOptions, deps: Required<InitCommandDeps>): P
   const permissionModeBypass = interactive
     ? await confirm(
         deps.prompt,
-        'permission_mode を bypass にしますか? (ADR-0005 により agent 委譲には実用上必須)',
+        'permission_mode を bypass にしますか? (agent が gh / git push を実行して PR を作るために実用上必須)',
         true,
       )
     : false;
@@ -277,12 +277,11 @@ export function renderConfigYaml(input: {
   const ownerLine = yaml.dump({ owner }).trimEnd();
   const projectLine = yaml.dump({ project_number: projectNumber }).trimEnd();
   const permissionModeLine = permissionModeBypass
-    ? 'permission_mode: bypass  # ADR-0005: agent (gh / git push) を機能させるため bypass を採用'
-    : '# permission_mode: auto  # ADR-0005: agent 委譲を機能させるには bypass が実用上必須';
+    ? 'permission_mode: bypass  # agent が gh / git push を実行して PR を作るために必要'
+    : '# permission_mode: auto  # agent に PR 作成まで任せるなら bypass を有効化する';
 
   return `# Philharmonic configuration
 # 詳細は docs/guide/configuration.md を参照
-# 全フィールドの真実は docs/specs/config-schema.md
 #
 # このファイルは \`philharmonic init\` が生成しています。コメントアウトされた行は
 # default 値の参考表示で、有効化したい行のみ \`#\` を外してください (strict 検証なので

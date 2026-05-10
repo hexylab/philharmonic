@@ -45,7 +45,7 @@ export async function resolveWorkflowPath(
   const legacyPath = path.resolve(input.repoRoot, LEGACY_WORKFLOW_FILE);
   if (await pathExists(legacyPath)) {
     input.logger?.warn(
-      'legacy `WORKFLOW.md` を repo root から読み込みました。`.philharmonic/WORKFLOW.md` への移動を推奨します (#67)',
+      'repo root の legacy `WORKFLOW.md` を読み込みました。今後は `.philharmonic/WORKFLOW.md` に移動してください',
       { legacyPath, expectedPath: primaryPath },
     );
     return { workflowPath: legacyPath, fallbackOnMissing: true };
