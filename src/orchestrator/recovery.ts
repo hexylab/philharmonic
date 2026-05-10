@@ -9,8 +9,15 @@ import type { RunTracker } from '../server/index.js';
 import type { WorkflowSource } from '../workflow/index.js';
 import type { GitRunner, WorkspaceManager } from '../workspace/index.js';
 
+import { type FailureReason } from './errors.js';
 import { parseRepositoryNameWithOwner } from './repository.js';
-import { dispatchSelected, type RunOnceClock, type RunOnceResult } from './run.js';
+import {
+  dispatchSelected,
+  isRetryEligibleReason,
+  type RunOnceClock,
+  type RunOnceResult,
+} from './run.js';
+import { type RetryQueue } from './retry-queue.js';
 import { isAcceptableIssue } from './select.js';
 import { buildIssueSlug } from './slug.js';
 
@@ -37,6 +44,14 @@ export type RecoveryDeps = {
   pathExists?: (target: string) => Promise<boolean>;
   /** snapshot HTTP API (#30) 用の in-memory tracker。recovery 経路の dispatch も tracker に乗せる */
   runTracker?: RunTracker;
+  /**
+   * 失敗時に retry queue に schedule するための queue (#84 / ADR-0008)。未指定なら schedule しない。
+   */
+  retryQueue?: RetryQueue;
+  /** retry 上限 (1 つの Issue が retry queue に積み直される最大回数)。default 0 (= 機能 off) */
+  maxRetryAttempts?: number;
+  /** retry backoff の clamp 上限 (ms)。default 0 (= computeRetryDelayMs が 0 を返すため retry 0s) */
+  maxRetryBackoffMs?: number;
 };
 
 export type RecoverySummary = {
@@ -230,8 +245,26 @@ export async function recoverInProgress(deps: RecoveryDeps): Promise<RecoverySum
       });
       summary.processed += 1;
       logRunResult(logger, candidate, result);
-      if (result.kind === 'success') summary.succeeded += 1;
-      else summary.failed += 1;
+      if (result.kind === 'success') {
+        summary.succeeded += 1;
+        deps.retryQueue?.remove(candidate.issueNumber);
+      } else {
+        summary.failed += 1;
+        scheduleRetryAfterRecovery({
+          retryQueue: deps.retryQueue,
+          maxRetryAttempts: deps.maxRetryAttempts ?? 0,
+          maxRetryBackoffMs: deps.maxRetryBackoffMs ?? 0,
+          issueNumber: candidate.issueNumber,
+          repository,
+          branch: result.branch ?? '(unknown)',
+          workspacePath,
+          reason: result.reason,
+          runId: result.runId,
+          errorSummary: result.errorSummary,
+          logger,
+          clock: deps.clock ?? (() => new Date()),
+        });
+      }
     } catch (error) {
       summary.processed += 1;
       summary.failed += 1;
@@ -277,4 +310,54 @@ async function defaultPathExists(target: string): Promise<boolean> {
 function describeError(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+type ScheduleRetryAfterRecoveryDeps = {
+  retryQueue?: RetryQueue;
+  maxRetryAttempts: number;
+  maxRetryBackoffMs: number;
+  issueNumber: number;
+  repository: { owner: string; name: string };
+  branch: string;
+  workspacePath: string;
+  reason: FailureReason;
+  runId: string;
+  errorSummary: string | null;
+  logger: Logger;
+  clock: () => Date;
+};
+
+/**
+ * recovery 経路で `dispatchSelected` が failed を返した場合の retry queue 連携。
+ *
+ * spec: docs/specs/retry-queue.md
+ */
+function scheduleRetryAfterRecovery(deps: ScheduleRetryAfterRecoveryDeps): void {
+  if (deps.retryQueue === undefined) return;
+  if (deps.maxRetryAttempts <= 0) return;
+  if (!isRetryEligibleReason(deps.reason)) return;
+
+  const nextAttempt = 1;
+  const now = deps.clock();
+  const entry = deps.retryQueue.schedule({
+    issueNumber: deps.issueNumber,
+    repository: deps.repository,
+    branch: deps.branch,
+    workspacePath: deps.workspacePath,
+    attempt: nextAttempt,
+    failureReason: deps.reason,
+    lastRunId: deps.runId,
+    lastErrorSummary: deps.errorSummary,
+    now,
+    maxBackoffMs: deps.maxRetryBackoffMs,
+  });
+  deps.logger.info('retry scheduled', {
+    issueNumber: entry.issueNumber,
+    attempt: entry.attempt,
+    delayMs: entry.dueAt.getTime() - now.getTime(),
+    dueAt: entry.dueAt.toISOString(),
+    failureReason: entry.failureReason,
+    lastRunId: entry.lastRunId,
+    via: 'recovery',
+  });
 }

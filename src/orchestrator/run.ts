@@ -37,6 +37,7 @@ import { type FailureReason } from './errors.js';
 import { fetchBaseBranch } from './git.js';
 import { dispatchPool } from './pool.js';
 import { parseRepositoryNameWithOwner, type Repository } from './repository.js';
+import { type RetryEntry, type RetryQueue } from './retry-queue.js';
 import {
   checkDispatchGuard,
   DEFAULT_DISPATCH_STATUSES,
@@ -85,6 +86,15 @@ export type RunOnceDeps = {
    * `evaluateDependencyDag` の結果を per-tick で 1 度だけ差し替える。未指定なら no-op。
    */
   dependencyTracker?: DependencyTracker;
+  /**
+   * 失敗 / stalled run を指数バックオフで自動再 dispatch する in-memory queue (#84 / ADR-0008)。
+   * 未指定なら retry 機能 off。`maxRetryAttempts == 0` でも実質 off になる
+   */
+  retryQueue?: RetryQueue;
+  /** retry 上限 (1 つの Issue が retry queue に積み直される最大回数)。default 0 (= 機能 off) */
+  maxRetryAttempts?: number;
+  /** retry backoff の clamp 上限 (ms)。default 300_000 */
+  maxRetryBackoffMs?: number;
 };
 
 export type RunOnceResult =
@@ -101,6 +111,11 @@ export type RunOnceResult =
       issueNumber: number;
       reason: FailureReason;
       branch: string | null;
+      /**
+       * 失敗時のエラー詳細 (先頭 500 文字)。retry queue / snapshot の `last_error_summary` で使う。
+       * 構造化ログには `markFailed` が `detail` field として既に出している。
+       */
+      errorSummary: string | null;
     };
 
 const noopLogger: Logger = {
@@ -135,7 +150,54 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     isRunning: (issueNumber) => tracker.getRunningByIssue(issueNumber) !== null,
   };
 
-  // 1. Candidate Selection (orchestration-mvp.md「Candidate Selection Rule」)
+  // 1. Retry queue drain (#84 / ADR-0008): due な entry を 1 件だけ取り出して dispatch する。
+  const retryTasks = await drainRetryQueue({
+    retryQueue: deps.retryQueue,
+    limit: 1,
+    githubClient: deps.githubClient,
+    projectsClient: deps.projectsClient,
+    workspaceManager: deps.workspaceManager,
+    config: deps.config,
+    dispatchStatuses,
+    runTracker: tracker,
+    logger: baseLogger,
+    clock,
+  });
+
+  if (retryTasks.length > 0) {
+    const task = retryTasks[0]!;
+    const result = await dispatchSelected({
+      config: deps.config,
+      repoRoot: deps.repoRoot,
+      candidate: task.candidate,
+      issue: task.issue,
+      repository: task.repository,
+      workspaceManager: deps.workspaceManager,
+      workflowSource: deps.workflowSource,
+      runnerLogsRoot: deps.runnerLogsRoot,
+      runClaude: deps.runClaude,
+      gitRunner: deps.gitRunner,
+      remote: deps.remote,
+      baseLogger,
+      clock,
+      generateRunId: deps.generateRunId,
+      runTracker: tracker,
+    });
+    handleDispatchResultForRetry({
+      task,
+      result,
+      retryQueue: deps.retryQueue,
+      maxRetryAttempts: deps.maxRetryAttempts ?? 0,
+      maxRetryBackoffMs: deps.maxRetryBackoffMs ?? 0,
+      logger: baseLogger,
+      clock,
+      resolveWorkspacePath: (t) =>
+        deps.workspaceManager.resolveWorkspacePath(`issue-${t.candidate.issueNumber}`),
+    });
+    return result;
+  }
+
+  // 2. Candidate Selection (orchestration-mvp.md「Candidate Selection Rule」)
   const candidates = await deps.projectsClient.fetchProjectCandidates({
     owner: deps.config.owner,
     projectNumber: deps.config.projectNumber,
@@ -157,7 +219,7 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     return { kind: 'no_candidate' };
   }
 
-  return await dispatchSelected({
+  const result = await dispatchSelected({
     config: deps.config,
     repoRoot: deps.repoRoot,
     candidate: selected.candidate,
@@ -174,6 +236,24 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     generateRunId: deps.generateRunId,
     runTracker: tracker,
   });
+  handleDispatchResultForRetry({
+    task: {
+      candidate: selected.candidate,
+      issue: selected.issue,
+      repository: selected.repository,
+      retryAttempt: 0,
+      retryFrom: null,
+    },
+    result,
+    retryQueue: deps.retryQueue,
+    maxRetryAttempts: deps.maxRetryAttempts ?? 0,
+    maxRetryBackoffMs: deps.maxRetryBackoffMs ?? 0,
+    logger: baseLogger,
+    clock,
+    resolveWorkspacePath: (t) =>
+      deps.workspaceManager.resolveWorkspacePath(`issue-${t.candidate.issueNumber}`),
+  });
+  return result;
 }
 
 export type RunConcurrentDeps = RunOnceDeps & {
@@ -209,37 +289,71 @@ export async function runConcurrent(deps: RunConcurrentDeps): Promise<Concurrent
     isRunning: (issueNumber) => tracker.getRunningByIssue(issueNumber) !== null,
   };
 
-  const candidates = await deps.projectsClient.fetchProjectCandidates({
-    owner: deps.config.owner,
-    projectNumber: deps.config.projectNumber,
-    statusFieldName: deps.config.statusField,
-  });
-  const selected = await selectAcceptableCandidates({
-    candidates,
-    dispatchStatuses,
-    githubClient: deps.githubClient,
-    agentUserLogin: deps.config.agentUserLogin,
-    logger: baseLogger,
-    guard,
+  // 1. Retry queue drain (#84 / ADR-0008): due な entry を最大 maxConcurrent 件まで先に消費する。
+  const retryTasks = await drainRetryQueue({
+    retryQueue: deps.retryQueue,
     limit: maxConcurrent,
-    fetchDependencyIssue: deps.fetchDependencyIssue,
-    dependencyTracker: deps.dependencyTracker,
+    githubClient: deps.githubClient,
+    projectsClient: deps.projectsClient,
+    workspaceManager: deps.workspaceManager,
+    config: deps.config,
+    dispatchStatuses,
+    runTracker: tracker,
+    logger: baseLogger,
     clock,
   });
-  if (selected.length === 0) {
+
+  // 2. 通常 candidate selection (retry で埋まり切らなかった残り slot 分のみ)
+  const freshSlots = Math.max(0, maxConcurrent - retryTasks.length);
+  let freshTasks: SelectResult[] = [];
+  if (freshSlots > 0) {
+    const candidates = await deps.projectsClient.fetchProjectCandidates({
+      owner: deps.config.owner,
+      projectNumber: deps.config.projectNumber,
+      statusFieldName: deps.config.statusField,
+    });
+    freshTasks = await selectAcceptableCandidates({
+      candidates,
+      dispatchStatuses,
+      githubClient: deps.githubClient,
+      agentUserLogin: deps.config.agentUserLogin,
+      logger: baseLogger,
+      guard,
+      limit: freshSlots,
+      fetchDependencyIssue: deps.fetchDependencyIssue,
+      dependencyTracker: deps.dependencyTracker,
+      clock,
+    });
+  }
+
+  const tasks: DispatchTask[] = [
+    ...retryTasks,
+    ...freshTasks.map<DispatchTask>((s) => ({
+      candidate: s.candidate,
+      issue: s.issue,
+      repository: s.repository,
+      retryAttempt: 0,
+      retryFrom: null,
+    })),
+  ];
+
+  if (tasks.length === 0) {
     baseLogger.info('no candidate', { dispatchStatuses });
     return [];
   }
 
   baseLogger.info('concurrent tick', {
     maxConcurrent,
-    dispatched: selected.length,
+    dispatched: tasks.length,
+    retries: retryTasks.length,
   });
 
-  return await dispatchPool({
-    tasks: selected,
+  type ConcurrentInternalOutcome = ConcurrentDispatchOutcome & { task: DispatchTask };
+
+  const outcomes = await dispatchPool({
+    tasks,
     maxConcurrent,
-    worker: async (task, slot): Promise<ConcurrentDispatchOutcome> => {
+    worker: async (task, slot): Promise<ConcurrentInternalOutcome> => {
       try {
         const result = await dispatchSelected({
           config: deps.config,
@@ -259,7 +373,7 @@ export async function runConcurrent(deps: RunConcurrentDeps): Promise<Concurrent
           runTracker: tracker,
           slot,
         });
-        return { slot, result };
+        return { slot, result, task };
       } catch (error) {
         baseLogger.warn('dispatch error', {
           slot,
@@ -274,11 +388,29 @@ export async function runConcurrent(deps: RunConcurrentDeps): Promise<Concurrent
             issueNumber: task.candidate.issueNumber,
             reason: 'runner_error',
             branch: null,
+            errorSummary: truncateErrorSummary(describeError(error)),
           },
+          task,
         };
       }
     },
   });
+
+  for (const { task, result } of outcomes) {
+    handleDispatchResultForRetry({
+      task,
+      result,
+      retryQueue: deps.retryQueue,
+      maxRetryAttempts: deps.maxRetryAttempts ?? 0,
+      maxRetryBackoffMs: deps.maxRetryBackoffMs ?? 0,
+      logger: baseLogger,
+      clock,
+      resolveWorkspacePath: (t) =>
+        deps.workspaceManager.resolveWorkspacePath(`issue-${t.candidate.issueNumber}`),
+    });
+  }
+
+  return outcomes.map(({ slot, result }) => ({ slot, result }));
 }
 
 export type DispatchSelectedDeps = {
@@ -552,6 +684,8 @@ async function markFailed(
   const durationMs = run?.durationMs ?? finishedAt.getTime() - ctx.startedAt.getTime();
   const totalCostUsd = run?.totalCostUsd ?? null;
   const detail = error !== undefined && error !== null ? describeError(error) : null;
+  const stderrTail = run?.rawStderrTail ?? null;
+  const errorSummary = truncateErrorSummary(detail ?? (stderrTail !== '' ? stderrTail : null));
 
   ctx.logger.error('run failed', {
     reason,
@@ -582,7 +716,16 @@ async function markFailed(
     issueNumber: ctx.candidate.issueNumber,
     reason,
     branch: ctx.branch,
+    errorSummary,
   };
+}
+
+const ERROR_SUMMARY_MAX_LEN = 500;
+
+function truncateErrorSummary(value: string | null): string | null {
+  if (value === null) return null;
+  if (value.length <= ERROR_SUMMARY_MAX_LEN) return value;
+  return value.slice(0, ERROR_SUMMARY_MAX_LEN);
 }
 
 type PersistInput = {
@@ -775,3 +918,298 @@ async function runAfterRunHooksSafely(
     });
   }
 }
+
+// ─── Retry queue 連携 (#84 / ADR-0008) ───
+
+/** 1 tick で dispatch する単位。retry 起源かどうかを `retryAttempt` / `retryFrom` で表す */
+export type DispatchTask = {
+  candidate: Candidate;
+  issue: Issue;
+  repository: Repository;
+  /** 0: fresh candidate (初回 dispatch)。1+: retry queue 起源 (= 直前に失敗した attempt 番号) */
+  retryAttempt: number;
+  retryFrom: RetryEntry | null;
+};
+
+const RETRY_RESCHEDULE_DELAY_MS = 10_000;
+
+/**
+ * `dispatchSelected` の `failureReason` のうち、retry queue の対象とするものを判定する。
+ *
+ * 現状は全 `FailureReason` を retry 対象とする (ADR-0008 §1)。failureReason 別の細粒度な on/off
+ * は spec の Open Question として保留。
+ */
+export function isRetryEligibleReason(reason: FailureReason): boolean {
+  switch (reason) {
+    case 'workspace_provisioning':
+    case 'runner_error':
+    case 'timeout':
+    case 'stalled':
+    case 'hook_failed':
+      return true;
+  }
+}
+
+type DrainRetryQueueDeps = {
+  retryQueue?: RetryQueue;
+  limit: number;
+  githubClient: GitHubClient;
+  projectsClient: ProjectsClient;
+  workspaceManager: WorkspaceManager;
+  config: Config;
+  dispatchStatuses: readonly string[];
+  runTracker: RunTracker;
+  logger: Logger;
+  clock: () => Date;
+};
+
+/**
+ * retry queue から dueAt <= now の entry を取り出して dispatch 可能な task に変換する。
+ *
+ * - 各 entry について Issue / Project Status を再取得して active 判定 (spec retry-queue.md §Status 再取得)
+ * - active なら `cleanupWorkspace` で worktree を force reset (ADR-0008 §5)
+ * - inactive / closed / fetch failure は queue から除外して `retry skipped` ログ
+ * - in-flight tracker に居るときは entry を 10s 後に再 schedule して当 tick からは除外
+ */
+async function drainRetryQueue(deps: DrainRetryQueueDeps): Promise<DispatchTask[]> {
+  if (deps.retryQueue === undefined) return [];
+  const drained = deps.retryQueue.drainDue(deps.clock());
+  if (drained.length === 0) return [];
+
+  const tasks: DispatchTask[] = [];
+  let candidatesCache: readonly Candidate[] | null = null;
+
+  for (const entry of drained) {
+    if (tasks.length >= deps.limit) {
+      // 上限超過分はそのまま queue に戻して次 tick へ送る
+      deps.retryQueue.schedule({
+        issueNumber: entry.issueNumber,
+        repository: entry.repository,
+        branch: entry.branch,
+        workspacePath: entry.workspacePath,
+        attempt: entry.attempt,
+        failureReason: entry.failureReason,
+        lastRunId: entry.lastRunId,
+        lastErrorSummary: entry.lastErrorSummary,
+        now: deps.clock(),
+        maxBackoffMs: 0,
+      });
+      continue;
+    }
+
+    if (deps.runTracker.getRunningByIssue(entry.issueNumber) !== null) {
+      // drainDue で既に queue から外れているため、attempt は据え置きで 10s 後に積み直す。
+      // computeRetryDelayMs は maxBackoffMs を上限 clamp に使うため、ここでは 10s を上限にして
+      // attempt 値に関わらず常に 10s 遅延を得る。
+      deps.retryQueue.schedule({
+        issueNumber: entry.issueNumber,
+        repository: entry.repository,
+        branch: entry.branch,
+        workspacePath: entry.workspacePath,
+        attempt: entry.attempt,
+        failureReason: entry.failureReason,
+        lastRunId: entry.lastRunId,
+        lastErrorSummary: entry.lastErrorSummary,
+        now: deps.clock(),
+        maxBackoffMs: RETRY_RESCHEDULE_DELAY_MS,
+      });
+      deps.logger.info('retry skipped', {
+        issueNumber: entry.issueNumber,
+        attempt: entry.attempt,
+        reason: 'tracker_in_flight',
+      });
+      continue;
+    }
+
+    deps.logger.info('retry due', {
+      issueNumber: entry.issueNumber,
+      attempt: entry.attempt,
+      lastRunId: entry.lastRunId,
+    });
+
+    let issue: Issue;
+    try {
+      issue = await deps.githubClient.getIssue({
+        owner: entry.repository.owner,
+        repo: entry.repository.name,
+        issueNumber: entry.issueNumber,
+      });
+    } catch (error) {
+      deps.logger.info('retry skipped', {
+        issueNumber: entry.issueNumber,
+        attempt: entry.attempt,
+        reason: 'fetch_error',
+        error: describeError(error),
+      });
+      continue;
+    }
+
+    if (issue.state !== 'open') {
+      deps.logger.info('retry skipped', {
+        issueNumber: entry.issueNumber,
+        attempt: entry.attempt,
+        reason: 'closed',
+      });
+      continue;
+    }
+
+    if (candidatesCache === null) {
+      try {
+        candidatesCache = await deps.projectsClient.fetchProjectCandidates({
+          owner: deps.config.owner,
+          projectNumber: deps.config.projectNumber,
+          statusFieldName: deps.config.statusField,
+        });
+      } catch (error) {
+        deps.logger.warn('retry drain error', { error: describeError(error) });
+        // 取得失敗時は当 tick の retry をすべて諦める。残りの drained entry も queue に戻す
+        for (const remaining of drained.slice(drained.indexOf(entry))) {
+          deps.retryQueue.schedule({
+            issueNumber: remaining.issueNumber,
+            repository: remaining.repository,
+            branch: remaining.branch,
+            workspacePath: remaining.workspacePath,
+            attempt: remaining.attempt,
+            failureReason: remaining.failureReason,
+            lastRunId: remaining.lastRunId,
+            lastErrorSummary: remaining.lastErrorSummary,
+            now: deps.clock(),
+            maxBackoffMs: RETRY_RESCHEDULE_DELAY_MS,
+          });
+        }
+        return tasks;
+      }
+    }
+
+    const candidate = candidatesCache.find((c) => c.issueNumber === entry.issueNumber);
+    if (candidate === undefined) {
+      deps.logger.info('retry skipped', {
+        issueNumber: entry.issueNumber,
+        attempt: entry.attempt,
+        reason: 'inactive_status',
+      });
+      continue;
+    }
+
+    const allowedStatuses = new Set<string>([
+      ...deps.dispatchStatuses,
+      deps.config.statusTransitions.inProgress,
+    ]);
+    if (candidate.status === null || !allowedStatuses.has(candidate.status)) {
+      const isTerminal =
+        candidate.status === deps.config.statusTransitions.inReview ||
+        candidate.status === deps.config.statusTransitions.failed;
+      deps.logger.info('retry skipped', {
+        issueNumber: entry.issueNumber,
+        attempt: entry.attempt,
+        reason: isTerminal ? 'terminal_status' : 'inactive_status',
+        status: candidate.status,
+      });
+      continue;
+    }
+
+    try {
+      await deps.workspaceManager.cleanupWorkspace({
+        taskKey: `issue-${entry.issueNumber}`,
+        branch: entry.branch,
+        deleteBranch: true,
+      });
+    } catch (error) {
+      deps.logger.warn('retry workspace cleanup failed', {
+        issueNumber: entry.issueNumber,
+        attempt: entry.attempt,
+        error: describeError(error),
+      });
+      // cleanup 失敗でも dispatchSelected が衝突 fail で `workspace_provisioning` として
+      // 落ちるだけなので task に積んで続行する
+    }
+
+    const repository = parseRepositoryNameWithOwner(candidate.repositoryNameWithOwner);
+    tasks.push({
+      candidate,
+      issue,
+      repository,
+      retryAttempt: entry.attempt,
+      retryFrom: entry,
+    });
+  }
+
+  return tasks;
+}
+
+type HandleDispatchResultForRetryDeps = {
+  task: DispatchTask;
+  result: Extract<RunOnceResult, { kind: 'success' | 'failed' }>;
+  retryQueue?: RetryQueue;
+  maxRetryAttempts: number;
+  maxRetryBackoffMs: number;
+  logger: Logger;
+  clock: () => Date;
+  /** fresh candidate の retry を schedule する際に workspacePath を解決する関数 */
+  resolveWorkspacePath: (task: DispatchTask) => string;
+};
+
+/**
+ * 1 件の dispatch 結果に対して retry queue を更新する。
+ *
+ * - success: queue から落とす (retry 中だった entry も clear)
+ * - failed (retry-eligible) で next attempt が上限内: schedule
+ * - failed (retry-eligible) で next attempt が上限超: drop + `retry exhausted` warn
+ * - failed (retry 対象外) / queue 未注入 / max_retry_attempts == 0: 何もしない
+ */
+function handleDispatchResultForRetry(deps: HandleDispatchResultForRetryDeps): void {
+  const { task, result, retryQueue, maxRetryAttempts, maxRetryBackoffMs, logger, clock } = deps;
+
+  if (retryQueue === undefined) return;
+
+  if (result.kind === 'success') {
+    retryQueue.remove(task.candidate.issueNumber);
+    return;
+  }
+
+  if (!isRetryEligibleReason(result.reason)) {
+    return;
+  }
+  if (maxRetryAttempts <= 0) return;
+
+  const nextAttempt = task.retryAttempt + 1;
+  if (nextAttempt > maxRetryAttempts) {
+    retryQueue.remove(task.candidate.issueNumber);
+    logger.warn('retry exhausted', {
+      issueNumber: task.candidate.issueNumber,
+      attempt: task.retryAttempt,
+      failureReason: result.reason,
+      lastRunId: result.runId,
+    });
+    return;
+  }
+
+  const branch = result.branch ?? task.retryFrom?.branch ?? '(unknown)';
+  const workspacePath = task.retryFrom?.workspacePath ?? deps.resolveWorkspacePath(task);
+  const now = clock();
+  const entry = retryQueue.schedule({
+    issueNumber: task.candidate.issueNumber,
+    repository: { owner: task.repository.owner, name: task.repository.name },
+    branch,
+    workspacePath,
+    attempt: nextAttempt,
+    failureReason: result.reason,
+    lastRunId: result.runId,
+    lastErrorSummary: result.errorSummary,
+    now,
+    maxBackoffMs: maxRetryBackoffMs,
+  });
+  logger.info('retry scheduled', {
+    issueNumber: entry.issueNumber,
+    attempt: entry.attempt,
+    delayMs: entry.dueAt.getTime() - now.getTime(),
+    dueAt: entry.dueAt.toISOString(),
+    failureReason: entry.failureReason,
+    lastRunId: entry.lastRunId,
+  });
+}
+
+export {
+  drainRetryQueue as drainRetryQueueForTest,
+  handleDispatchResultForRetry as handleDispatchResultForRetryForTest,
+};

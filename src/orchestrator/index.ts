@@ -24,6 +24,14 @@ export {
 } from './run.js';
 export { recoverInProgress, type RecoveryDeps, type RecoverySummary } from './recovery.js';
 export {
+  computeRetryDelayMs,
+  createRetryQueue,
+  type RescheduleInput as RetryQueueRescheduleInput,
+  type RetryEntry,
+  type RetryQueue,
+  type ScheduleInput as RetryQueueScheduleInput,
+} from './retry-queue.js';
+export {
   abortableSleep,
   serveLoop,
   type ServeLoopDeps,

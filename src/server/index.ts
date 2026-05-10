@@ -11,6 +11,7 @@ export {
   type BuildIssueSnapshotDeps,
   type BuildStateSnapshotDeps,
   type IssueSnapshot,
+  type RetryQueueStateJson,
   type SchedulerStateJson,
   type StateSnapshot,
 } from './snapshot.js';

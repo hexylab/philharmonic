@@ -24,11 +24,13 @@ import {
 } from '../github/index.js';
 import { createLogger, type Logger } from '../logger/index.js';
 import {
+  createRetryQueue,
   recoverInProgress,
   runConcurrent,
   runOnce,
   serveLoop,
   type ConcurrentDispatchOutcome,
+  type RetryQueue,
   type RunOnceResult,
 } from '../orchestrator/index.js';
 import { createProjectsClient, type ProjectsClient } from '../projects/index.js';
@@ -115,6 +117,7 @@ export type ServeCommandDeps = {
   createRunTracker?: (options?: { startedAt?: Date }) => RunTracker;
   createWakeController?: () => WakeController;
   createDependencyTracker?: () => DependencyTracker;
+  createRetryQueue?: () => RetryQueue;
 };
 
 const DEFAULT_DEPS: Required<ServeCommandDeps> = {
@@ -143,6 +146,7 @@ const DEFAULT_DEPS: Required<ServeCommandDeps> = {
   createRunTracker: (options) => createRunTracker(options),
   createWakeController,
   createDependencyTracker,
+  createRetryQueue,
 };
 
 export function createServeCommand(deps: ServeCommandDeps = {}): Command {
@@ -317,6 +321,7 @@ async function runServeCommand(
   const runTracker = deps.createRunTracker({ startedAt: new Date() });
   const wakeController = deps.createWakeController();
   const dependencyTracker = deps.createDependencyTracker();
+  const retryQueue = deps.createRetryQueue();
   let apiServer: SnapshotApiServer | null = null;
   if (config.server != null) {
     try {
@@ -329,6 +334,11 @@ async function runServeCommand(
               tracker: runTracker,
               intervalMs: config.polling.intervalMs,
               dependencyTracker,
+              retryQueue,
+              retryConfig: {
+                maxAttempts: config.agent.maxRetryAttempts,
+                maxBackoffMs: config.agent.maxRetryBackoffMs,
+              },
             }),
           getIssue: async (issueNumber) => {
             const snapshot = await buildIssueSnapshot({
@@ -399,6 +409,9 @@ async function runServeCommand(
         logger,
         runTracker,
         dependencyTracker,
+        retryQueue,
+        maxRetryAttempts: config.agent.maxRetryAttempts,
+        maxRetryBackoffMs: config.agent.maxRetryBackoffMs,
       });
     }
 
@@ -415,6 +428,9 @@ async function runServeCommand(
       maxConcurrent,
       runTracker,
       dependencyTracker,
+      retryQueue,
+      maxRetryAttempts: config.agent.maxRetryAttempts,
+      maxRetryBackoffMs: config.agent.maxRetryBackoffMs,
     });
     if (outcomes.length === 0) {
       logger.info('no candidate');
@@ -440,6 +456,9 @@ async function runServeCommand(
           signal: controller.signal,
           logger,
           runTracker,
+          retryQueue,
+          maxRetryAttempts: config.agent.maxRetryAttempts,
+          maxRetryBackoffMs: config.agent.maxRetryBackoffMs,
         });
       } catch (error) {
         logger.warn('recovery aborted', { error: describeError(error) });

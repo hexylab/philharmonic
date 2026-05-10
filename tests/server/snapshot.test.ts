@@ -74,6 +74,7 @@ describe('buildStateSnapshot', () => {
         total_cost_usd: 0,
       },
       scheduler: null,
+      retry_queue: null,
     });
   });
 
@@ -142,6 +143,65 @@ describe('buildStateSnapshot', () => {
         },
       ],
     });
+  });
+
+  it('retryQueue が渡されると retry_queue field を返す (#84 / ADR-0008)', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue();
+    queue.schedule({
+      issueNumber: 42,
+      repository: { owner: 'hexylab', name: 'philharmonic' },
+      branch: 'feature/42-foo',
+      workspacePath: '/tmp/issue-42',
+      attempt: 2,
+      failureReason: 'runner_error',
+      lastRunId: 'last-run',
+      lastErrorSummary: 'claude exited with code 1',
+      now: new Date('2026-05-09T00:00:30Z'),
+      maxBackoffMs: 300_000,
+    });
+
+    const tracker = createRunTracker({ startedAt: new Date('2026-05-09T00:00:00Z') });
+    const snapshot = await buildStateSnapshot({
+      tracker,
+      intervalMs: 30_000,
+      now: new Date('2026-05-09T00:01:00Z'),
+      retryQueue: queue,
+      retryConfig: { maxAttempts: 5, maxBackoffMs: 300_000 },
+    });
+
+    expect(snapshot.retry_queue).toEqual({
+      size: 1,
+      max_attempts: 5,
+      max_backoff_ms: 300_000,
+      entries: [
+        {
+          issue_number: 42,
+          attempt: 2,
+          due_at: '2026-05-09T00:00:50.000Z',
+          scheduled_at: '2026-05-09T00:00:30.000Z',
+          failure_reason: 'runner_error',
+          last_run_id: 'last-run',
+          last_error_summary: 'claude exited with code 1',
+        },
+      ],
+    });
+  });
+
+  it('retry_queue は max_attempts == 0 のとき null', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue();
+
+    const tracker = createRunTracker({ startedAt: new Date('2026-05-09T00:00:00Z') });
+    const snapshot = await buildStateSnapshot({
+      tracker,
+      intervalMs: 30_000,
+      now: new Date('2026-05-09T00:01:00Z'),
+      retryQueue: queue,
+      retryConfig: { maxAttempts: 0, maxBackoffMs: 300_000 },
+    });
+
+    expect(snapshot.retry_queue).toBeNull();
   });
 
   it('totals は runStarted → runFinished のペアでカウントされる', async () => {
