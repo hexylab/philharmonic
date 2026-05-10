@@ -102,7 +102,75 @@ describe('formatSnapshotForOnce', () => {
     expect(text).toContain('polling.interval_ms=30000 polling.last_tick_at=(never)');
     expect(text).toContain('running: (none)');
     expect(text).toContain('runs_completed=0 runs_succeeded=0 runs_failed=0 total_cost_usd=0');
+    expect(text).toContain('scheduler: (not provided by daemon)');
     expect(text.endsWith('\n')).toBe(true);
+  });
+
+  it('scheduler が null なら "not evaluated yet"', () => {
+    const text = formatSnapshotForOnce({
+      host: '127.0.0.1',
+      port: 4000,
+      snapshot: snapshot({ scheduler: null }),
+    });
+    expect(text).toContain('scheduler: (not evaluated yet)');
+  });
+
+  it('scheduler が空 evaluation のときは各 section を (0) で出す', () => {
+    const text = formatSnapshotForOnce({
+      host: '127.0.0.1',
+      port: 4000,
+      snapshot: snapshot({
+        scheduler: {
+          last_evaluated_at: '2026-05-09T00:00:30.000Z',
+          ready: [],
+          blocked: [],
+          cycles: [],
+          invalid_dependencies: [],
+        },
+      }),
+    });
+    expect(text).toContain('scheduler: last_evaluated_at=2026-05-09T00:00:30.000Z');
+    expect(text).toContain('  ready (0)');
+    expect(text).toContain('  blocked (0)');
+    expect(text).toContain('  cycles (0)');
+    expect(text).toContain('  invalid (0)');
+  });
+
+  it('scheduler に ready / blocked / cycle / invalid が居ればそれぞれ列挙する', () => {
+    const text = formatSnapshotForOnce({
+      host: '127.0.0.1',
+      port: 4000,
+      snapshot: snapshot({
+        scheduler: {
+          last_evaluated_at: '2026-05-09T00:00:30.000Z',
+          ready: [
+            { issue_number: 104, title: 'a' },
+            { issue_number: 105, title: 'b' },
+          ],
+          blocked: [{ issue_number: 102, title: 'b', blocked_by: [101, 200] }],
+          cycles: [{ issue_numbers: [201, 202] }],
+          invalid_dependencies: [
+            {
+              issue_number: 103,
+              title: 'c',
+              entries: [
+                { raw: 'owner/repo#1', issue_number: null, reason: 'parse_invalid' },
+                { raw: '#999', issue_number: 999, reason: 'fetch_error', message: 'boom' },
+              ],
+            },
+          ],
+        },
+      }),
+    });
+    expect(text).toContain('  ready (2): #104, #105');
+    expect(text).toContain('  blocked (1):');
+    expect(text).toContain('    #102 blocked_by=#101, #200');
+    expect(text).toContain('  cycles (1):');
+    expect(text).toContain('    [#201, #202]');
+    expect(text).toContain('  invalid (1):');
+    expect(text).toContain('    #103');
+    expect(text).toContain('      raw=owner/repo#1 reason=parse_invalid');
+    expect(text).toContain('      raw=#999 reason=fetch_error message=boom');
   });
 
   it('running が居る場合は #issue と branch / slot を出す', () => {

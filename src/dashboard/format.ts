@@ -1,4 +1,4 @@
-import type { StateSnapshot } from '../server/index.js';
+import type { SchedulerStateJson, StateSnapshot } from '../server/index.js';
 
 /**
  * Snapshot を表示用文字列へ変換する pure helper。
@@ -6,6 +6,9 @@ import type { StateSnapshot } from '../server/index.js';
  *
  * spec: docs/specs/dashboard.md
  */
+
+/** TUI で `Ready (n) #a, #b, ...` 行に並べる issue 番号の上限 */
+export const READY_ISSUES_DISPLAY_LIMIT = 10;
 
 export function formatUptimeMs(uptimeMs: number): string {
   if (!Number.isFinite(uptimeMs) || uptimeMs <= 0) return '0s';
@@ -83,7 +86,66 @@ export function formatSnapshotForOnce(input: {
     `  runs_completed=${snapshot.totals.runs_completed} runs_succeeded=${snapshot.totals.runs_succeeded} runs_failed=${snapshot.totals.runs_failed} total_cost_usd=${snapshot.totals.total_cost_usd}`,
   );
 
+  lines.push('');
+  appendSchedulerLines(lines, snapshot.scheduler);
+
   return `${lines.join('\n')}\n`;
+}
+
+function appendSchedulerLines(
+  lines: string[],
+  scheduler: SchedulerStateJson | null | undefined,
+): void {
+  if (scheduler === undefined) {
+    lines.push('scheduler: (not provided by daemon)');
+    return;
+  }
+  if (scheduler === null) {
+    lines.push('scheduler: (not evaluated yet)');
+    return;
+  }
+
+  lines.push(`scheduler: last_evaluated_at=${scheduler.last_evaluated_at}`);
+  if (scheduler.ready.length === 0) {
+    lines.push('  ready (0)');
+  } else {
+    lines.push(
+      `  ready (${scheduler.ready.length}): ${scheduler.ready.map((r) => `#${r.issue_number}`).join(', ')}`,
+    );
+  }
+
+  if (scheduler.blocked.length === 0) {
+    lines.push('  blocked (0)');
+  } else {
+    lines.push(`  blocked (${scheduler.blocked.length}):`);
+    for (const b of scheduler.blocked) {
+      const by = b.blocked_by.map((n) => `#${n}`).join(', ');
+      lines.push(`    #${b.issue_number} blocked_by=${by}`);
+    }
+  }
+
+  if (scheduler.cycles.length === 0) {
+    lines.push('  cycles (0)');
+  } else {
+    lines.push(`  cycles (${scheduler.cycles.length}):`);
+    for (const c of scheduler.cycles) {
+      const items = c.issue_numbers.map((n) => `#${n}`).join(', ');
+      lines.push(`    [${items}]`);
+    }
+  }
+
+  if (scheduler.invalid_dependencies.length === 0) {
+    lines.push('  invalid (0)');
+  } else {
+    lines.push(`  invalid (${scheduler.invalid_dependencies.length}):`);
+    for (const d of scheduler.invalid_dependencies) {
+      lines.push(`    #${d.issue_number}`);
+      for (const e of d.entries) {
+        const tail = e.message !== undefined ? ` message=${e.message}` : '';
+        lines.push(`      raw=${e.raw} reason=${e.reason}${tail}`);
+      }
+    }
+  }
 }
 
 function pad2(n: number): string {

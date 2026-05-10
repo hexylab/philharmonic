@@ -22,6 +22,7 @@ import type { LogFields, Logger } from '../../src/logger/index.js';
 import { runConcurrent, runOnce, type RunOnceResult } from '../../src/orchestrator/index.js';
 import type { Candidate, ProjectsClient } from '../../src/projects/index.js';
 import type { RunResult } from '../../src/runner/index.js';
+import { createDependencyTracker } from '../../src/server/dependency-tracker.js';
 import type { WorkflowSource } from '../../src/workflow/index.js';
 import type {
   CreateWorkspaceInput,
@@ -555,6 +556,80 @@ describe('runConcurrent: dependency filter integration (ADR-0007)', () => {
 
     expect(outcomes).toEqual([]);
     expect(runClaudeMock).not.toHaveBeenCalled();
+  });
+
+  it('dependencyTracker に最新 evaluation が記録される (#80)', async () => {
+    const a = makeCandidate({ itemId: 'A', issueNumber: 701, issueTitle: 'A blocked' });
+    const b = makeCandidate({ itemId: 'B', issueNumber: 702, issueTitle: 'B ready' });
+    const issues = new Map<number, Issue>([
+      [701, makeIssue(701, 'Depends-On: #999')],
+      [702, makeIssue(702, '## Goal\n')],
+      [999, makeIssue(999, '', { state: 'open' })],
+    ]);
+    const projects: ProjectsClient = {
+      fetchProjectCandidates: vi.fn(async () => [a, b]),
+    };
+    const github = makeGitHubMock(issues);
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const dependencyTracker = createDependencyTracker();
+
+    await runConcurrent({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: vi.fn(async () => makeRunResult()),
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:30Z'),
+      pathExists: async () => false,
+      maxConcurrent: 1,
+      dependencyTracker,
+    });
+
+    const snapshot = dependencyTracker.getSnapshot();
+    expect(snapshot).not.toBeNull();
+    expect(snapshot?.lastEvaluatedAt).toBe('2026-05-09T00:00:30.000Z');
+    expect(snapshot?.ready).toEqual([{ issueNumber: 702, title: 'B ready' }]);
+    expect(snapshot?.blocked).toEqual([{ issueNumber: 701, title: 'A blocked', blockedBy: [999] }]);
+  });
+
+  it('candidate が 0 件でも tracker は空 evaluation で更新される (古い評価が残らない)', async () => {
+    const projects: ProjectsClient = {
+      fetchProjectCandidates: vi.fn(async () => []),
+    };
+    const github = makeGitHubMock(new Map());
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const dependencyTracker = createDependencyTracker();
+
+    await runConcurrent({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: vi.fn(),
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:30Z'),
+      pathExists: async () => false,
+      maxConcurrent: 2,
+      dependencyTracker,
+    });
+
+    const snapshot = dependencyTracker.getSnapshot();
+    expect(snapshot).toEqual({
+      lastEvaluatedAt: '2026-05-09T00:00:30.000Z',
+      ready: [],
+      blocked: [],
+      cycles: [],
+      invalidDependencies: [],
+    });
   });
 
   it('candidate 内の依存関係 (A → B、B が同一 batch にいて open) は B が ready として通り、A は blocked', async () => {

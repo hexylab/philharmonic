@@ -1,7 +1,23 @@
 import { describe, expect, it } from 'vitest';
 
+import type { EvaluatedCandidate } from '../../src/dependency/index.js';
+import type { Candidate } from '../../src/projects/index.js';
+import { createDependencyTracker } from '../../src/server/dependency-tracker.js';
 import { buildIssueSnapshot, buildStateSnapshot } from '../../src/server/snapshot.js';
 import { createRunTracker } from '../../src/server/tracker.js';
+
+function makeCandidate(overrides: Partial<Candidate> = {}): Candidate {
+  return {
+    itemId: 'PVTI_x',
+    issueNumber: 100,
+    issueTitle: 'sample title',
+    issueUrl: 'https://github.com/hexylab/philharmonic/issues/100',
+    issueState: 'OPEN',
+    repositoryNameWithOwner: 'hexylab/philharmonic',
+    status: 'Todo',
+    ...overrides,
+  };
+}
 
 describe('buildStateSnapshot', () => {
   it('running / totals を組み合わせて snake_case payload を返す', async () => {
@@ -57,6 +73,74 @@ describe('buildStateSnapshot', () => {
         runs_failed: 0,
         total_cost_usd: 0,
       },
+      scheduler: null,
+    });
+  });
+
+  it('dependencyTracker が未指定なら scheduler は null', async () => {
+    const tracker = createRunTracker({ startedAt: new Date('2026-05-09T00:00:00Z') });
+    const snapshot = await buildStateSnapshot({
+      tracker,
+      intervalMs: 30_000,
+      now: new Date('2026-05-09T00:00:01Z'),
+    });
+    expect(snapshot.scheduler).toBeNull();
+  });
+
+  it('dependencyTracker の評価結果を snake_case で scheduler フィールドに乗せる', async () => {
+    const runTracker = createRunTracker({ startedAt: new Date('2026-05-09T00:00:00Z') });
+    const dependencyTracker = createDependencyTracker();
+
+    const ready = makeCandidate({ issueNumber: 104, issueTitle: 'Add foo handler' });
+    const blocked = makeCandidate({ issueNumber: 102, issueTitle: 'Switch to async API' });
+    const invalid = makeCandidate({ issueNumber: 103, issueTitle: 'Migrate legacy endpoint' });
+    const cycle = makeCandidate({ issueNumber: 201, issueTitle: 'Cycle a' });
+    const evaluations: EvaluatedCandidate[] = [
+      { state: 'ready', candidate: ready },
+      { state: 'blocked', candidate: blocked, blockingIssueNumbers: [101] },
+      {
+        state: 'invalid_dependency',
+        candidate: invalid,
+        invalidEntries: [
+          { raw: 'owner/repo#1', issueNumber: null, reason: 'parse_invalid' },
+          { raw: '#999', issueNumber: 999, reason: 'fetch_error', message: 'boom' },
+        ],
+      },
+      { state: 'cycle', candidate: cycle, cycleIssueNumbers: [201, 202] },
+    ];
+    dependencyTracker.recordEvaluation({
+      evaluations,
+      at: new Date('2026-05-09T00:00:30Z'),
+    });
+
+    const snapshot = await buildStateSnapshot({
+      tracker: runTracker,
+      intervalMs: 30_000,
+      now: new Date('2026-05-09T00:01:00Z'),
+      dependencyTracker,
+    });
+
+    expect(snapshot.scheduler).toEqual({
+      last_evaluated_at: '2026-05-09T00:00:30.000Z',
+      ready: [{ issue_number: 104, title: 'Add foo handler' }],
+      blocked: [
+        {
+          issue_number: 102,
+          title: 'Switch to async API',
+          blocked_by: [101],
+        },
+      ],
+      cycles: [{ issue_numbers: [201, 202] }],
+      invalid_dependencies: [
+        {
+          issue_number: 103,
+          title: 'Migrate legacy endpoint',
+          entries: [
+            { raw: 'owner/repo#1', issue_number: null, reason: 'parse_invalid' },
+            { raw: '#999', issue_number: 999, reason: 'fetch_error', message: 'boom' },
+          ],
+        },
+      ],
     });
   });
 

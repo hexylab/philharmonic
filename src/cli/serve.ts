@@ -42,9 +42,11 @@ import {
 import {
   buildIssueSnapshot,
   buildStateSnapshot,
+  createDependencyTracker,
   createRunTracker,
   createWakeController,
   startSnapshotApiServer,
+  type DependencyTracker,
   type RunTracker,
   type SnapshotApiServer,
   type SnapshotApiServerOptions,
@@ -112,6 +114,7 @@ export type ServeCommandDeps = {
   startSnapshotApiServer?: (options: SnapshotApiServerOptions) => Promise<SnapshotApiServer>;
   createRunTracker?: (options?: { startedAt?: Date }) => RunTracker;
   createWakeController?: () => WakeController;
+  createDependencyTracker?: () => DependencyTracker;
 };
 
 const DEFAULT_DEPS: Required<ServeCommandDeps> = {
@@ -139,6 +142,7 @@ const DEFAULT_DEPS: Required<ServeCommandDeps> = {
   startSnapshotApiServer,
   createRunTracker: (options) => createRunTracker(options),
   createWakeController,
+  createDependencyTracker,
 };
 
 export function createServeCommand(deps: ServeCommandDeps = {}): Command {
@@ -312,6 +316,7 @@ async function runServeCommand(
 
   const runTracker = deps.createRunTracker({ startedAt: new Date() });
   const wakeController = deps.createWakeController();
+  const dependencyTracker = deps.createDependencyTracker();
   let apiServer: SnapshotApiServer | null = null;
   if (config.server != null) {
     try {
@@ -323,6 +328,7 @@ async function runServeCommand(
             buildStateSnapshot({
               tracker: runTracker,
               intervalMs: config.polling.intervalMs,
+              dependencyTracker,
             }),
           getIssue: async (issueNumber) => {
             const snapshot = await buildIssueSnapshot({
@@ -392,6 +398,7 @@ async function runServeCommand(
         dispatchStatuses: config.dispatchStatuses,
         logger,
         runTracker,
+        dependencyTracker,
       });
     }
 
@@ -407,6 +414,7 @@ async function runServeCommand(
       logger,
       maxConcurrent,
       runTracker,
+      dependencyTracker,
     });
     if (outcomes.length === 0) {
       logger.info('no candidate');

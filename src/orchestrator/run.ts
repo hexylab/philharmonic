@@ -20,6 +20,7 @@ import {
   type RunLogStatus,
 } from '../runlog/index.js';
 import { runClaude, type RunResult } from '../runner/index.js';
+import { noopDependencyTracker, type DependencyTracker } from '../server/dependency-tracker.js';
 import { noopRunTracker, type RunTracker } from '../server/tracker.js';
 import type { WorkflowSource } from '../workflow/index.js';
 import {
@@ -79,6 +80,11 @@ export type RunOnceDeps = {
    * (cross-repo 依存は parser-invalid で弾かれる前提のため、最初の acceptable candidate の repo を流用)。
    */
   fetchDependencyIssue?: FetchDependencyIssue;
+  /**
+   * Snapshot HTTP API (#80) 用の DAG-aware scheduler tracker。
+   * `evaluateDependencyDag` の結果を per-tick で 1 度だけ差し替える。未指定なら no-op。
+   */
+  dependencyTracker?: DependencyTracker;
 };
 
 export type RunOnceResult =
@@ -143,6 +149,8 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     logger: baseLogger,
     guard,
     fetchDependencyIssue: deps.fetchDependencyIssue,
+    dependencyTracker: deps.dependencyTracker,
+    clock,
   });
   if (selected === null) {
     baseLogger.info('no candidate', { dispatchStatuses });
@@ -215,6 +223,8 @@ export async function runConcurrent(deps: RunConcurrentDeps): Promise<Concurrent
     guard,
     limit: maxConcurrent,
     fetchDependencyIssue: deps.fetchDependencyIssue,
+    dependencyTracker: deps.dependencyTracker,
+    clock,
   });
   if (selected.length === 0) {
     baseLogger.info('no candidate', { dispatchStatuses });
@@ -618,6 +628,10 @@ type SelectInput = {
   guard: DispatchGuard;
   /** ADR-0007: dependency filter で candidate body 外の依存先 Issue を取得する fetcher */
   fetchDependencyIssue?: FetchDependencyIssue;
+  /** Issue #80: 直近 evaluation を保持する scheduler tracker (Snapshot API 用) */
+  dependencyTracker?: DependencyTracker;
+  /** evaluation 時刻のソース。`recordEvaluation` の `at` に使う */
+  clock?: RunOnceClock;
 };
 
 type SelectResult = {
@@ -644,7 +658,13 @@ async function selectAcceptableCandidates(
   input: SelectInput & { limit: number },
 ): Promise<SelectResult[]> {
   const acceptable = await collectAcceptableCandidates(input);
-  if (acceptable.length === 0) return [];
+  const tracker = input.dependencyTracker ?? noopDependencyTracker;
+  const evaluatedAt = (input.clock ?? (() => new Date()))();
+
+  if (acceptable.length === 0) {
+    tracker.recordEvaluation({ evaluations: [], at: evaluatedAt });
+    return [];
+  }
 
   const fetchIssue =
     input.fetchDependencyIssue ??
@@ -657,6 +677,8 @@ async function selectAcceptableCandidates(
     candidates: acceptable.map((s) => ({ candidate: s.candidate, body: s.issue.body })),
     fetchIssue,
   });
+
+  tracker.recordEvaluation({ evaluations, at: evaluatedAt });
 
   const readyIssueNumbers = new Set<number>();
   for (const evaluation of evaluations) {

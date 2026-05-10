@@ -11,6 +11,7 @@ export {
   type BuildIssueSnapshotDeps,
   type BuildStateSnapshotDeps,
   type IssueSnapshot,
+  type SchedulerStateJson,
   type StateSnapshot,
 } from './snapshot.js';
 export {
@@ -26,3 +27,15 @@ export {
   type Totals,
 } from './tracker.js';
 export { createWakeController, type WakeController } from './wake.js';
+export {
+  createDependencyTracker,
+  noopDependencyTracker,
+  type DependencyTracker,
+  type RecordEvaluationInput,
+  type SchedulerBlockedEntry,
+  type SchedulerCycleEntry,
+  type SchedulerInvalidCandidate,
+  type SchedulerInvalidEntry,
+  type SchedulerReadyEntry,
+  type SchedulerSnapshot,
+} from './dependency-tracker.js';

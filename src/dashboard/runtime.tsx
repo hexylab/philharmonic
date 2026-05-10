@@ -1,10 +1,15 @@
 import { Box, Text, useApp, useInput } from 'ink';
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 
-import type { StateSnapshot } from '../server/index.js';
+import type { SchedulerStateJson, StateSnapshot } from '../server/index.js';
 
 import { describeFetchError, type DashboardClient } from './client.js';
-import { formatRunningRow, formatTotalCost, formatUptimeMs } from './format.js';
+import {
+  READY_ISSUES_DISPLAY_LIMIT,
+  formatRunningRow,
+  formatTotalCost,
+  formatUptimeMs,
+} from './format.js';
 
 /**
  * `philharmonic dashboard` の TUI runtime (Ink/React)。
@@ -117,6 +122,7 @@ export function DashboardApp({ client, intervalMs, now }: DashboardAppProps): Re
           <DaemonSection snapshot={snapshot} />
           <RunningSection snapshot={snapshot} />
           <TotalsSection snapshot={snapshot} />
+          <SchedulerSection scheduler={snapshot.scheduler} />
         </>
       )}
       <Footer state={state} errorMessage={errorMessage} refreshNotice={refreshNotice} />
@@ -193,6 +199,84 @@ function RunningSection({ snapshot }: { snapshot: StateSnapshot }): ReactElement
           );
         })
       )}
+    </Box>
+  );
+}
+
+function SchedulerSection({
+  scheduler,
+}: {
+  scheduler: SchedulerStateJson | null | undefined;
+}): ReactElement {
+  if (scheduler === undefined) {
+    return (
+      <Box paddingX={1} borderStyle="round" borderColor="gray" flexDirection="column">
+        <Text>Scheduler</Text>
+        <Text color="yellow"> (no data — older serve)</Text>
+      </Box>
+    );
+  }
+  if (scheduler === null) {
+    return (
+      <Box paddingX={1} borderStyle="round" borderColor="gray" flexDirection="column">
+        <Text>Scheduler</Text>
+        <Text color="gray"> (not evaluated yet)</Text>
+      </Box>
+    );
+  }
+
+  const readyHead = scheduler.ready.slice(0, READY_ISSUES_DISPLAY_LIMIT);
+  const readyTail = scheduler.ready.length - readyHead.length;
+  const readyText =
+    readyHead.length === 0
+      ? '(none)'
+      : readyHead.map((r) => `#${r.issue_number}`).join(', ') +
+        (readyTail > 0 ? `  …+${readyTail}` : '');
+
+  return (
+    <Box paddingX={1} borderStyle="round" borderColor="gray" flexDirection="column">
+      <Text>
+        Scheduler <Text color="gray">last evaluated {scheduler.last_evaluated_at}</Text>
+      </Text>
+      <Text>
+        {'  '}Ready{' '}
+        <Text color={scheduler.ready.length > 0 ? 'green' : 'gray'}>
+          ({scheduler.ready.length})
+        </Text>
+        {'  '}
+        <Text>{readyText}</Text>
+      </Text>
+      <Text>
+        {'  '}Blocked{' '}
+        <Text color={scheduler.blocked.length > 0 ? 'yellow' : 'gray'}>
+          ({scheduler.blocked.length})
+        </Text>
+      </Text>
+      {scheduler.blocked.map((b) => (
+        <Text key={`blocked-${b.issue_number}`}>
+          {'    '}
+          <Text color="yellow">#{b.issue_number}</Text>
+          {' ← '}
+          <Text>{b.blocked_by.map((n) => `#${n}`).join(', ')}</Text>
+        </Text>
+      ))}
+      <Text>
+        {'  '}Cycle{' '}
+        <Text color={scheduler.cycles.length > 0 ? 'red' : 'gray'}>
+          ({scheduler.cycles.length})
+        </Text>
+      </Text>
+      {scheduler.cycles.map((c, idx) => (
+        <Text key={`cycle-${idx}-${c.issue_numbers.join(',')}`}>
+          {'    '}[{c.issue_numbers.map((n) => `#${n}`).join(', ')}]
+        </Text>
+      ))}
+      <Text>
+        {'  '}Invalid{' '}
+        <Text color={scheduler.invalid_dependencies.length > 0 ? 'red' : 'gray'}>
+          ({scheduler.invalid_dependencies.length})
+        </Text>
+      </Text>
     </Box>
   );
 }
