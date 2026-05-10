@@ -84,9 +84,19 @@ running:
 
 totals:
   runs_completed=12 runs_succeeded=10 runs_failed=2 total_cost_usd=4.32
+
+scheduler: last_evaluated_at=2026-05-09T00:00:30.000Z
+  ready (2): #104, #105
+  blocked (1):
+    #102 blocked_by=#101
+  cycles (1):
+    [#201, #202]
+  invalid (0)
 ```
 
 `running` が空のときは `running: (none)` と書く。`polling.last_tick_at` が `null` のときは `(never)` と書く。
+
+`scheduler` が `null` (現行 serve だがまだ評価していない) のときは `scheduler: (not evaluated yet)` と 1 行だけ書く。`scheduler` が `undefined` (古い serve に接続していてフィールドそのものが無い) のときは `scheduler: (not provided by daemon)` と 1 行だけ書いて、API 未対応であることを明示する。
 
 エラー時 (接続失敗 / HTTP エラー / JSON parse 失敗) は stderr に `dashboard: <理由>` を 1 行出して exit 1。
 
@@ -106,12 +116,30 @@ totals:
 │ Totals                                             │
 │   completed=12  succeeded=10  failed=2  cost=$4.32 │
 ├────────────────────────────────────────────────────┤
+│ Scheduler  last evaluated 2026-05-09T00:00:30.000Z │
+│   Ready (2)   #104, #105                           │
+│   Blocked (1)                                      │
+│     #102 ← #101                                    │
+│   Cycle (1)                                        │
+│     [#201, #202]                                   │
+│   Invalid (0)                                      │
+├────────────────────────────────────────────────────┤
 │ q quit  r refresh  R wake-and-refresh              │
 │ last fetch ok @ 13:00:42                           │
 └────────────────────────────────────────────────────┘
 ```
 
 幅の自動調整は Ink/Yoga が行う。色は最小限 (running 件数 / エラーメッセージのみ強調)。
+
+### Scheduler section の表示ルール
+
+- `scheduler === undefined` (古い serve に接続している): `Scheduler (no data — older serve)` と 1 行だけ表示する。「daemon が `scheduler` フィールドを返していない」と運用者に明示する
+- `scheduler === null` (現行 serve だがまだ評価していない): `Scheduler (not evaluated yet)` と 1 行だけ表示する
+- それ以外:
+  - `Ready (n)` 行に issue 番号をカンマ区切り (上限を超えたら `…+remaining` で省略 — 上限は実装で 10 件目安)
+  - `Blocked (n)` の各行は `#<issueNumber> ← #X, #Y` (blocking 番号)
+  - `Cycle (n)` の各行は `[#A, #B, ...]`
+  - `Invalid (n)` は件数のみ (entries 詳細は `--once` でのみ書く。TUI で出すと幅を取りすぎる)
 
 ### Snapshot API との関係
 

@@ -63,6 +63,39 @@ type Totals = {
 
 `/api/v1/refresh` 用。serveLoop の sleep に渡す AbortSignal を 1 つ提供し、`wake()` で abort する。abort 後は新しい AbortController に差し替える (次 tick の sleep には fresh な signal を渡せる)。
 
+### in-memory `DependencyTracker` (ADR-0007)
+
+ADR-0007 の DAG-aware scheduler が、各 tick の candidate 評価結果を保持する in-memory tracker。`philharmonic serve` プロセス起動時に 1 つ生成し、daemon の lifetime と一致する (再起動で消える)。
+
+```ts
+type SchedulerSnapshot = {
+  lastEvaluatedAt: string; // ISO 8601
+  ready: ReadonlyArray<{ issueNumber: number; title: string }>;
+  blocked: ReadonlyArray<{
+    issueNumber: number;
+    title: string;
+    blockedBy: readonly number[];
+  }>;
+  cycles: ReadonlyArray<{ issueNumbers: readonly number[] }>;
+  invalidDependencies: ReadonlyArray<{
+    issueNumber: number;
+    title: string;
+    entries: ReadonlyArray<{
+      raw: string;
+      issueNumber: number | null;
+      reason: 'parse_invalid' | 'not_found' | 'forbidden' | 'fetch_error';
+      message?: string;
+    }>;
+  }>;
+};
+```
+
+- candidate selection (`selectAcceptableCandidates`) が `evaluateDependencyDag` を呼んだ直後に **per-tick で 1 度だけ** `recordEvaluation` でまるごと差し替える。per-candidate に append しない (古い tick の評価が残らないようにするため)
+- `cycles[]` は同じ SCC が複数 candidate から重複しないように、SCC member の sorted set で dedup する
+- 配列は `evaluateDependencyDag` の入力順 (= board 順 = ready 優先順位) を保持する。`cycles[]` だけは dedup の都合で sorted SCC member 順
+
+`getSnapshot()` は `recordEvaluation` が 1 度も呼ばれていなければ `null` を返す (= API は `scheduler: null` を返し、TUI 側で「まだ評価していない」と表示する)。recovery 経路では candidate selection を通らないため、recovery のみで poll tick が来ていない瞬間は `null` のままになる。
+
 ## API / インターフェース
 
 ### `GET /api/v1/state`
@@ -93,6 +126,22 @@ type Totals = {
     "runs_succeeded": 10,
     "runs_failed": 2,
     "total_cost_usd": 4.32
+  },
+  "scheduler": {
+    "last_evaluated_at": "2026-05-09T00:00:30.000Z",
+    "ready": [
+      { "issue_number": 104, "title": "Add foo handler" },
+      { "issue_number": 105, "title": "Wire bar adapter" }
+    ],
+    "blocked": [{ "issue_number": 102, "title": "Switch to async API", "blocked_by": [101] }],
+    "cycles": [{ "issue_numbers": [201, 202] }],
+    "invalid_dependencies": [
+      {
+        "issue_number": 103,
+        "title": "Migrate legacy endpoint",
+        "entries": [{ "raw": "owner/repo#123", "issue_number": null, "reason": "parse_invalid" }]
+      }
+    ]
   }
 }
 ```
@@ -113,8 +162,40 @@ type Totals = {
 | `totals.runs_succeeded`  | integer          | 成功した run 数                                                                     |
 | `totals.runs_failed`     | integer          | 失敗した run 数                                                                     |
 | `totals.total_cost_usd`  | number           | runner からの `total_cost_usd` の総和 (null は 0 として扱う)                        |
+| `scheduler`              | object \| null   | DAG-aware scheduler の最新 evaluation (詳細は次節)。1 度も評価していなければ null   |
 
 `retrying` 配列は ADR-0005 で撤廃。PR 番号 (`pr_number`) は orchestrator が知れなくなったため `running` entry にも含めない。
+
+#### `scheduler` フィールド (ADR-0007)
+
+candidate selection の dependency filter (`evaluateDependencyDag`) が直近 tick で出力した結果のサマリ。`philharmonic serve` は **request ごとに GitHub API を叩かない**。tracker に保持された最新 evaluation をそのまま返すだけ。
+
+| フィールド                                      | 型              | 説明                                                                      |
+| ----------------------------------------------- | --------------- | ------------------------------------------------------------------------- |
+| `last_evaluated_at`                             | ISO 8601        | 最後に candidate selection が走った時刻                                   |
+| `ready[]`                                       | array           | dispatch 可能な candidate (board 順)                                      |
+| `ready[].issue_number`                          | integer         | Issue 番号                                                                |
+| `ready[].title`                                 | string          | Issue タイトル                                                            |
+| `blocked[]`                                     | array           | 1 件以上の依存先が open のため dispatch されなかった candidate (board 順) |
+| `blocked[].issue_number`                        | integer         | Issue 番号                                                                |
+| `blocked[].title`                               | string          | Issue タイトル                                                            |
+| `blocked[].blocked_by`                          | array<integer>  | 開いている依存先 Issue 番号 (`Depends-On:` の出現順、重複なし)            |
+| `cycles[]`                                      | array           | 依存グラフに循環がある candidate が属する SCC (重複は dedup)              |
+| `cycles[].issue_numbers`                        | array<integer>  | SCC のメンバ (issue_number 昇順)                                          |
+| `invalid_dependencies[]`                        | array           | parse 不能 / 取得失敗な依存先を持つ candidate                             |
+| `invalid_dependencies[].issue_number`           | integer         | candidate 自身の Issue 番号                                               |
+| `invalid_dependencies[].title`                  | string          | candidate 自身のタイトル                                                  |
+| `invalid_dependencies[].entries[]`              | array           | 1 件以上の invalid 依存先詳細                                             |
+| `invalid_dependencies[].entries[].raw`          | string          | 元の文字列。parse 失敗時は entry の原文、fetch 失敗時は `#<number>`       |
+| `invalid_dependencies[].entries[].issue_number` | integer \| null | parse 成功した Issue 番号 (parse-invalid のときのみ null)                 |
+| `invalid_dependencies[].entries[].reason`       | string          | `parse_invalid` / `not_found` / `forbidden` / `fetch_error`               |
+| `invalid_dependencies[].entries[].message`      | string          | `fetch_error` のときのみ含まれる元例外文言                                |
+
+**precedence**: 1 candidate は最大 1 つの section にしか出ない。`cycle` > `invalid_dependency` > `blocked` > `ready` の順で分類される (ADR-0007 §2 と同じ)。`ready` candidate であっても `running` (dispatch 中) なら top-level `running` 配列に既に出るため、scheduler に出すかどうかは「直近 tick の dependency 評価結果」基準で判定する (= dispatch 中 candidate は `ready` から除かれていない可能性がある — `ready` は「dependency 上 dispatch 可能だった」事実を表す)。
+
+**サイズ制約**: candidate 1 件あたり `issue_number + title (+ blocked_by/entries)` のみ。Issue body や label 一覧は含めない (Snapshot 全体の payload を抑える)。
+
+**初期状態**: `philharmonic serve` 起動直後で、まだ poll tick が 1 度も走っていない (= recovery のみ走った瞬間も含む) なら `scheduler: null`。古い (本フィールドを実装していない) serve に対して TUI が安全に fall back できるよう、フィールド自体を欠落させる代わりに **null を明示的に返す**。
 
 **累計の集計範囲**: 「daemon プロセス起動以降」のみを保証する。再起動を跨いだ全期間累計は本 API の範囲外 (詳細: ADR-0004 「daemon-lifetime の in-memory tracker を新設する」)。
 
@@ -209,6 +290,7 @@ type Totals = {
 - Node.js 標準 `http` モジュール (フレームワーク追加なし — ADR-0004)
 - 既存 `RetryScheduler` の `listEntries` / `getEntry` (本 Issue で追加)
 - 既存 `serveLoop` (`acquireWakeSignal` / `onPollTick` を本 Issue で追加)
+- 既存 `evaluateDependencyDag` (ADR-0007 split 2) — DependencyTracker は candidate selection 経由でその出力を保持するだけ
 
 ## オープンクエスチョン
 
