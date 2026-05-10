@@ -34,6 +34,11 @@ import {
 
 import { createDependencyIssueFetcher, logDependencyEvaluation } from './dependency-filter.js';
 import { type FailureReason } from './errors.js';
+import {
+  resolveFailureSummaryPath,
+  writeFailureSummary,
+  type FailureSummaryInput,
+} from './failure-summary.js';
 import { fetchBaseBranch } from './git.js';
 import { dispatchPool } from './pool.js';
 import { parseRepositoryNameWithOwner, type Repository } from './repository.js';
@@ -199,6 +204,7 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
       retryQueue: deps.retryQueue,
       maxRetryAttempts: deps.maxRetryAttempts ?? 0,
       maxRetryBackoffMs: deps.maxRetryBackoffMs ?? 0,
+      runnerLogsRoot: deps.runnerLogsRoot,
       config: deps.config,
       dispatchStatuses,
       logger: baseLogger,
@@ -262,6 +268,7 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     retryQueue: deps.retryQueue,
     maxRetryAttempts: deps.maxRetryAttempts ?? 0,
     maxRetryBackoffMs: deps.maxRetryBackoffMs ?? 0,
+    runnerLogsRoot: deps.runnerLogsRoot,
     config: deps.config,
     dispatchStatuses,
     logger: baseLogger,
@@ -430,6 +437,7 @@ export async function runConcurrent(deps: RunConcurrentDeps): Promise<Concurrent
       retryQueue: deps.retryQueue,
       maxRetryAttempts: deps.maxRetryAttempts ?? 0,
       maxRetryBackoffMs: deps.maxRetryBackoffMs ?? 0,
+      runnerLogsRoot: deps.runnerLogsRoot,
       config: deps.config,
       dispatchStatuses,
       logger: baseLogger,
@@ -1259,6 +1267,8 @@ type ProcessDispatchResultDeps = {
   retryQueue?: RetryQueue;
   maxRetryAttempts: number;
   maxRetryBackoffMs: number;
+  /** failure exhaustion 時に `<runnerLogsRoot>/<runId>/failure-summary.md` を書き出すために使う */
+  runnerLogsRoot: string;
   config: Config;
   dispatchStatuses: readonly string[];
   logger: Logger;
@@ -1282,10 +1292,10 @@ async function processDispatchResultForRetry(deps: ProcessDispatchResultDeps): P
     await processDispatchSuccessForContinuation(deps);
     return;
   }
-  processDispatchFailureForRetry(deps);
+  await processDispatchFailureForRetry(deps);
 }
 
-function processDispatchFailureForRetry(deps: ProcessDispatchResultDeps): void {
+async function processDispatchFailureForRetry(deps: ProcessDispatchResultDeps): Promise<void> {
   const { task, result, retryQueue, maxRetryAttempts, maxRetryBackoffMs, logger, clock } = deps;
   if (retryQueue === undefined) return;
   if (result.kind !== 'failed') return;
@@ -1293,21 +1303,43 @@ function processDispatchFailureForRetry(deps: ProcessDispatchResultDeps): void {
   if (!isRetryEligibleReason(result.reason)) return;
   if (maxRetryAttempts <= 0) return;
 
+  const branch = result.branch ?? task.retryFrom?.branch ?? '(unknown)';
+  const workspacePath = task.retryFrom?.workspacePath ?? deps.resolveWorkspacePath(task);
+
   const nextAttempt = nextAttemptForKind(task, 'failure');
   if (nextAttempt > maxRetryAttempts) {
     retryQueue.remove(task.candidate.issueNumber);
+    const failureSummaryPath = await emitFailureSummaryArtifact(
+      {
+        runnerLogsRoot: deps.runnerLogsRoot,
+        runId: result.runId,
+        issueNumber: task.candidate.issueNumber,
+        attempt: task.retryAttempt,
+        maxAttempts: maxRetryAttempts,
+        failureReason: result.reason,
+        branch,
+        workspacePath,
+        errorSummary: result.errorSummary,
+        exhaustedAt: clock(),
+      },
+      logger,
+    );
     logger.warn('retry exhausted', {
       kind: 'failure',
       issueNumber: task.candidate.issueNumber,
       attempt: task.retryAttempt,
       failureReason: result.reason,
       lastRunId: result.runId,
+      branch,
+      workspacePath,
+      failureSummaryPath,
+      summaryPath: `.philharmonic/runs/${result.runId}/summary.md`,
+      streamPath: `.philharmonic/runs/${result.runId}/stream.jsonl`,
+      stderrPath: `.philharmonic/runs/${result.runId}/stderr.log`,
     });
     return;
   }
 
-  const branch = result.branch ?? task.retryFrom?.branch ?? '(unknown)';
-  const workspacePath = task.retryFrom?.workspacePath ?? deps.resolveWorkspacePath(task);
   const now = clock();
   const entry = retryQueue.schedule({
     kind: 'failure',
@@ -1438,6 +1470,31 @@ function nextAttemptForKind(task: DispatchTask, newKind: RetryKind): number {
   if (task.retryFrom === null) return 1;
   if (task.retryFrom.kind === newKind) return task.retryAttempt + 1;
   return 1;
+}
+
+/**
+ * `kind=failure` の retry 上限到達時に運用者向け failure-summary.md を書き出す。
+ *
+ * 書き込み失敗 (disk full / 権限不足) で orchestrator 本体が落ちないように catch し、
+ * 失敗時は warn ログを残して `failureSummaryPath = null` を返す (Issue #86 完了条件)。
+ */
+async function emitFailureSummaryArtifact(
+  input: FailureSummaryInput,
+  logger: Logger,
+): Promise<string | null> {
+  try {
+    const { path: filePath } = await writeFailureSummary(input);
+    return filePath;
+  } catch (error) {
+    logger.warn('failure summary write failed', {
+      issueNumber: input.issueNumber,
+      runId: input.runId,
+      attempt: input.attempt,
+      path: resolveFailureSummaryPath(input.runnerLogsRoot, input.runId),
+      error: describeError(error),
+    });
+    return null;
+  }
 }
 
 export {

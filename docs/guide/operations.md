@@ -116,6 +116,8 @@ agent:
 
 retry の進行は構造化ログ (`retry scheduled` / `retry due` / `retry skipped` / `retry exhausted` / `continuation released`、いずれも `kind` field 付き) と Snapshot HTTP API (`/api/v1/state` の `retry_queue.entries[].kind` field) で観測できます。retry queue は **永続化されません** (daemon 再起動で消える)。失われた retry は次回 `serve` 起動時の Tracker-driven recovery (`In Progress` 引き取り) が代替で拾います。
 
+`kind=failure` で上限に到達した場合は `.philharmonic/runs/<run-id>/failure-summary.md` に運用者向け Markdown サマリ (issue / final attempt / failure reason / log path / 手動復旧手順) を残します。発生時の手順は [自動 retry が上限に到達した](#自動-retry-が上限に到達した-retry-exhausted-kindfailure) を参照してください。
+
 詳細仕様は [`docs/specs/retry-queue.md`](../specs/retry-queue.md) を参照。
 
 > 旧仕様の **永続 / Status 駆動な** retry-state (`retry.*`) は復活させていません。in-memory な retry queue (上記) で daemon プロセス内に閉じた retry を実装しています。`Failed` flip 後の再実行は引き続き人手 / agent の判断で `Todo` に戻すか別 Issue を起票します。
@@ -418,6 +420,25 @@ ServeLockHeldError: another `philharmonic serve` is running on this repo
 ### Failed worktree が溜まっている
 
 → `philharmonic clean --dry-run` で削除候補を見て、問題なければ `philharmonic clean` を実行。あるいは個別に `git worktree remove --force <path>` で削除してから `git branch -D <branch>` でローカルブランチも掃除。
+
+### 自動 retry が上限に到達した (`retry exhausted kind=failure`)
+
+`agent.max_retry_attempts` (default 5) まで再試行しても回復しなかった Issue は、retry queue から落ち、`retry exhausted` warn ログと **failure summary** を残します。発生時の手順:
+
+1. 構造化ログから `retry exhausted` (`kind=failure`) の行を見つけ、`failureSummaryPath` フィールドを開く
+
+   ```sh
+   philharmonic serve 2>&1 | jq -c 'select(.msg=="retry exhausted" and .kind=="failure")'
+   ```
+
+2. `failureSummaryPath` が示す `.philharmonic/runs/<run-id>/failure-summary.md` を開いて、failure reason / 直近 error / branch / worktree path / 関連 run artifact (`summary.md` / `stream.jsonl` / `stderr.log`) の場所を確認する
+3. `summary.md` (Claude の最終応答) と `stderr.log` から原因を特定する
+4. 必要なら `worktree path` の worktree を `git worktree remove --force <path>` で掃除するか、`philharmonic clean` で retention 経過後にまとめて掃除する
+5. 再実行する場合は **Project Status を `Todo` 等の `dispatch_statuses` に戻す** — orchestrator は次 tick で再 dispatch します。`In Progress` のままだと recovery 経路でも拾われますが、worktree が残っている場合は cleanup → 再作成として動きます
+
+> orchestrator は ADR-0005 の方針 ([thin-orchestrator-agent-delegation](../adr/0005-thin-orchestrator-agent-delegation.md)) に従い、**Issue comment や Project Status の自動更新は行いません** (失敗時も含む)。failure summary は file + 構造化ログのみです。Issue comment 投稿 / `Failed` 自動遷移を将来的に opt-in 機能として追加する案は spec のオープンクエスチョン ([retry-queue.md](../specs/retry-queue.md#オープンクエスチョン)) に挙げています。
+
+continuation retry (`kind=continuation`) の exhaustion は「agent が exit 0 だが Status を flip しないまま上限到達」した状態であり、failure ではないため failure summary は出しません (warn ログのみ)。Status を見て手動で `In Review` / `Failed` / `Done` に動かしてください。
 
 ### `Depends-On:` を書いた Issue が永遠に dispatch されない
 
