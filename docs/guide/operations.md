@@ -70,15 +70,39 @@ philharmonic serve --config ./path/to/.philharmonic/philharmonic.yaml
 
 主な違い (`philharmonic run` との比較):
 
-| 項目              | `run`           | `serve`                                                   |
-| ----------------- | --------------- | --------------------------------------------------------- |
-| 実行回数          | 1 ターンで exit | ポーリング loop で繰り返す                                |
-| 並列 dispatch     | 無し            | `agent.max_concurrent_agents` で 1 tick 内に複数 dispatch |
-| Tracker recovery  | 無し            | 起動時に `In Progress` の Issue を引き取る                |
-| Snapshot HTTP API | 起動しない      | `server.port` 指定時に `127.0.0.1` で起動                 |
-| 二重起動防止      | 無し            | `.philharmonic/serve.lock` で同一 repo の二重起動を弾く   |
+| 項目              | `run`           | `serve`                                                     |
+| ----------------- | --------------- | ----------------------------------------------------------- |
+| 実行回数          | 1 ターンで exit | ポーリング loop で繰り返す                                  |
+| 並列 dispatch     | 無し            | `agent.max_concurrent_agents` で 1 tick 内に複数 dispatch   |
+| Tracker recovery  | 無し            | 起動時に `In Progress` の Issue を引き取る                  |
+| 自動 retry queue  | 無し            | `agent.max_retry_attempts` で in-memory に再 dispatch (#84) |
+| Snapshot HTTP API | 起動しない      | `server.port` 指定時に `127.0.0.1` で起動                   |
+| 二重起動防止      | 無し            | `.philharmonic/serve.lock` で同一 repo の二重起動を弾く     |
 
-> 自動 retry (`retry.*`) はサポートしていません。Failed の再実行は人手で `Todo` に戻すか別 Issue で起票します。
+### 自動 retry queue (`agent.max_retry_attempts`)
+
+`philharmonic serve` は daemon プロセス内に **in-memory な retry queue** を持ち、以下の orchestrator 起源の失敗を最大 `agent.max_retry_attempts` 回 (default 5) まで自動再 dispatch します (Issue #84 / [ADR-0008](../adr/0008-in-memory-retry-queue.md))。
+
+- `workspace_provisioning`: worktree 作成 / git fetch の一過性失敗
+- `runner_error`: claude subprocess の異常終了
+- `timeout`: 30 分の subprocess timeout
+- `stalled`: stdout 無音が `agent.stall_timeout_ms` を超過
+- `hook_failed`: `before_run` / `after_run` / `before_remove` hook の失敗
+
+backoff は `min(10s * 2^(attempt-1), agent.max_retry_backoff_ms)` (default `300_000` ms = 5 分で頭打ち)。
+
+機能を **off** にしたい場合は config で `agent.max_retry_attempts: 0` を指定します:
+
+```yaml
+agent:
+  max_retry_attempts: 0
+```
+
+retry の進行は構造化ログ (`retry scheduled` / `retry due` / `retry skipped` / `retry exhausted`) と Snapshot HTTP API (`/api/v1/state` の `retry_queue` field) で観測できます。retry queue は **永続化されません** (daemon 再起動で消える)。失われた retry は次回 `serve` 起動時の Tracker-driven recovery (`In Progress` 引き取り) が代替で拾います。
+
+詳細仕様は [`docs/specs/retry-queue.md`](../specs/retry-queue.md) を参照。
+
+> 旧仕様の **永続 / Status 駆動な** retry-state (`retry.*`) は復活させていません。in-memory な retry queue (上記) で daemon プロセス内に閉じた retry を実装しています。`Failed` flip 後の再実行は引き続き人手 / agent の判断で `Todo` に戻すか別 Issue を起票します。
 
 `permission_mode: bypass` を `serve` で使う場合は、長時間稼働で `--dangerously-skip-permissions` が連続発火することへの opt-in が必要です。`philharmonic.yaml` で `safety.allow_bypass_in_serve: true` を設定するか (推奨)、環境変数 `PHILHARMONIC_ALLOW_BYPASS_IN_SERVE=1` を明示してください。両方未設定だと起動を拒否します。
 
@@ -151,7 +175,7 @@ server:
 
 | エンドポイント           | method | 用途                                                                                |
 | ------------------------ | ------ | ----------------------------------------------------------------------------------- |
-| `/api/v1/state`          | GET    | 全体 snapshot (進行中の run / 累計コスト 等)                                        |
+| `/api/v1/state`          | GET    | 全体 snapshot (進行中の run / 累計コスト / DAG scheduler / retry queue 等)          |
 | `/api/v1/<issue_number>` | GET    | 指定 Issue の snapshot (in-flight があれば返す、なければ 404)                       |
 | `/api/v1/refresh`        | POST   | 次 tick の sleep を起こす (in-flight 中は no-op、`{"woken": true \| false}` を返す) |
 

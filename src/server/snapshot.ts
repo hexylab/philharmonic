@@ -1,3 +1,5 @@
+import type { RetryEntry, RetryQueue } from '../orchestrator/retry-queue.js';
+
 import {
   noopDependencyTracker,
   type DependencyTracker,
@@ -38,6 +40,28 @@ export type StateSnapshot = {
    * できるよう、TypeScript 上は optional として扱う。現行 serve は常に key を返す。
    */
   scheduler?: SchedulerStateJson | null;
+  /**
+   * In-memory retry queue の状態 (ADR-0008 / Issue #84)。
+   * `agent.max_retry_attempts == 0` または queue 未注入なら null。
+   *
+   * 古い serve に対する dashboard / 外部 client の互換のため optional。
+   */
+  retry_queue?: RetryQueueStateJson | null;
+};
+
+export type RetryQueueStateJson = {
+  size: number;
+  max_attempts: number;
+  max_backoff_ms: number;
+  entries: Array<{
+    issue_number: number;
+    attempt: number;
+    due_at: string;
+    scheduled_at: string;
+    failure_reason: string;
+    last_run_id: string;
+    last_error_summary: string | null;
+  }>;
 };
 
 export type SchedulerStateJson = {
@@ -72,6 +96,13 @@ export type BuildStateSnapshotDeps = {
   now?: Date;
   /** ADR-0007 の DependencyTracker。未指定なら `scheduler: null` を返す */
   dependencyTracker?: DependencyTracker;
+  /** ADR-0008 の RetryQueue。未指定なら `retry_queue: null` を返す */
+  retryQueue?: RetryQueue;
+  /** retry queue の運用パラメータ (snapshot 表示用) */
+  retryConfig?: {
+    maxAttempts: number;
+    maxBackoffMs: number;
+  };
 };
 
 export async function buildStateSnapshot(deps: BuildStateSnapshotDeps): Promise<StateSnapshot> {
@@ -84,6 +115,7 @@ export async function buildStateSnapshot(deps: BuildStateSnapshotDeps): Promise<
   const totals = totalsToJson(deps.tracker.getTotals());
   const dependencyTracker = deps.dependencyTracker ?? noopDependencyTracker;
   const scheduler = schedulerToJson(dependencyTracker.getSnapshot());
+  const retryQueue = retryQueueToJson(deps.retryQueue, deps.retryConfig);
 
   return {
     started_at: startedAt,
@@ -95,6 +127,33 @@ export async function buildStateSnapshot(deps: BuildStateSnapshotDeps): Promise<
     running,
     totals,
     scheduler,
+    retry_queue: retryQueue,
+  };
+}
+
+function retryQueueToJson(
+  queue: RetryQueue | undefined,
+  config: BuildStateSnapshotDeps['retryConfig'],
+): RetryQueueStateJson | null {
+  if (queue === undefined || config === undefined) return null;
+  if (config.maxAttempts <= 0) return null;
+  return {
+    size: queue.size(),
+    max_attempts: config.maxAttempts,
+    max_backoff_ms: config.maxBackoffMs,
+    entries: queue.list().map(toRetryEntryJson),
+  };
+}
+
+function toRetryEntryJson(entry: RetryEntry): RetryQueueStateJson['entries'][number] {
+  return {
+    issue_number: entry.issueNumber,
+    attempt: entry.attempt,
+    due_at: entry.dueAt.toISOString(),
+    scheduled_at: entry.scheduledAt.toISOString(),
+    failure_reason: entry.failureReason,
+    last_run_id: entry.lastRunId,
+    last_error_summary: entry.lastErrorSummary,
   };
 }
 

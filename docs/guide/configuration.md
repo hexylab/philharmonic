@@ -76,13 +76,15 @@ philharmonic init --dry-run --owner foo --project 1         # 書かずに内容
 
 ### `philharmonic serve` (常駐デーモン)
 
-| キー                          | 既定            | 何が変わるか                                                                                                                                                                                                                                                                                  |
-| ----------------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `polling.interval_ms`         | `30000` (30 秒) | 1 tick 終了後の sleep 時間。**下限 1000ms**。1000〜4999ms は起動時に warning が出る                                                                                                                                                                                                           |
-| `agent.max_concurrent_agents` | `1`             | 1 tick で並列 dispatch する Issue 件数。DAG filter (`Depends-On:` の解決) で `ready` 判定された候補のうち board 順で先頭 N 件が並列 dispatch される。`1` で逐次 (MVP 互換)。詳細: [operations.md `agent.max_concurrent_agents` との関係](./operations.md#agentmax_concurrent_agents-との関係) |
-| `server.port`                 | -               | Snapshot HTTP API の listen port。**未指定なら API 自体を起動しない**。指定時は `127.0.0.1` 固定で bind。`philharmonic dashboard` が default で繋ぐ port もここを見ます (`--port` で上書き可)                                                                                                 |
+| キー                          | 既定            | 何が変わるか                                                                                                                                                                                                                                                                                                                                    |
+| ----------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `polling.interval_ms`         | `30000` (30 秒) | 1 tick 終了後の sleep 時間。**下限 1000ms**。1000〜4999ms は起動時に warning が出る                                                                                                                                                                                                                                                             |
+| `agent.max_concurrent_agents` | `1`             | 1 tick で並列 dispatch する Issue 件数。DAG filter (`Depends-On:` の解決) で `ready` 判定された候補のうち board 順で先頭 N 件が並列 dispatch される。`1` で逐次 (MVP 互換)。詳細: [operations.md `agent.max_concurrent_agents` との関係](./operations.md#agentmax_concurrent_agents-との関係)                                                   |
+| `agent.max_retry_attempts`    | `5`             | `serve` daemon の in-memory retry queue (#84) で 1 つの Issue を retry する最大回数。`0` で機能 off。`runner_error` / `timeout` / `stalled` / `hook_failed` / `workspace_provisioning` を `10s * 2^(attempt-1)` の指数バックオフで再 dispatch。詳細: [operations.md 自動 retry queue](./operations.md#自動-retry-queue-agentmax_retry_attempts) |
+| `agent.max_retry_backoff_ms`  | `300000` (5 分) | retry queue の指数バックオフの clamp 上限 (ms)。default で attempt 6 以降は 5 分で頭打ち                                                                                                                                                                                                                                                        |
+| `server.port`                 | -               | Snapshot HTTP API の listen port。**未指定なら API 自体を起動しない**。指定時は `127.0.0.1` 固定で bind。`philharmonic dashboard` が default で繋ぐ port もここを見ます (`--port` で上書き可)                                                                                                                                                   |
 
-> 自動 retry はサポートしていません。Failed を再実行する場合は人手で `Todo` に戻すか、別 Issue で起票しなおします。
+> 永続 retry-state を伴う Status 駆動の旧 retry は ADR-0005 で撤廃したまま復活させていません。daemon 内 in-memory な retry queue (上記 `agent.max_retry_*`) でカバーされない `Failed` 状態の再実行は引き続き人手 / agent の判断で `Todo` に戻すか別 Issue を起票します。
 
 ### GitHub 認証
 
@@ -138,6 +140,8 @@ polling:
   interval_ms: 30000
 agent:
   max_concurrent_agents: 1
+  max_retry_attempts: 5 # 一過性失敗を 10s, 20s, 40s, 80s, 160s で再 dispatch
+  max_retry_backoff_ms: 300000 # attempt 6 以降は 5 分で頭打ち
 server:
   port: 4000
 

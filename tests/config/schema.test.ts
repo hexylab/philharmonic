@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   configSchema,
   DEFAULT_AGENT_MAX_CONCURRENT_AGENTS,
+  DEFAULT_AGENT_MAX_RETRY_ATTEMPTS,
+  DEFAULT_AGENT_MAX_RETRY_BACKOFF_MS,
   DEFAULT_AGENT_MAX_TURNS,
   DEFAULT_AGENT_STALL_TIMEOUT_MS,
   DEFAULT_BASE_BRANCH,
@@ -51,6 +53,8 @@ describe('configSchema', () => {
         maxConcurrentAgents: DEFAULT_AGENT_MAX_CONCURRENT_AGENTS,
         maxTurns: DEFAULT_AGENT_MAX_TURNS,
         stallTimeoutMs: DEFAULT_AGENT_STALL_TIMEOUT_MS,
+        maxRetryAttempts: DEFAULT_AGENT_MAX_RETRY_ATTEMPTS,
+        maxRetryBackoffMs: DEFAULT_AGENT_MAX_RETRY_BACKOFF_MS,
       },
       hooks: {
         afterCreate: [],
@@ -390,12 +394,14 @@ describe('configSchema', () => {
     expect(result.success).toBe(false);
   });
 
-  it('agent キーが完全に未指定でもデフォルト値が補完される (#24 / #25)', () => {
+  it('agent キーが完全に未指定でもデフォルト値が補完される (#24 / #25 / #84)', () => {
     const parsed = configSchema.parse({ owner: 'hexylab', project_number: 1 });
     expect(parsed.agent).toEqual({
       maxConcurrentAgents: DEFAULT_AGENT_MAX_CONCURRENT_AGENTS,
       maxTurns: DEFAULT_AGENT_MAX_TURNS,
       stallTimeoutMs: DEFAULT_AGENT_STALL_TIMEOUT_MS,
+      maxRetryAttempts: DEFAULT_AGENT_MAX_RETRY_ATTEMPTS,
+      maxRetryBackoffMs: DEFAULT_AGENT_MAX_RETRY_BACKOFF_MS,
     });
   });
 
@@ -409,6 +415,8 @@ describe('configSchema', () => {
       maxConcurrentAgents: DEFAULT_AGENT_MAX_CONCURRENT_AGENTS,
       maxTurns: DEFAULT_AGENT_MAX_TURNS,
       stallTimeoutMs: DEFAULT_AGENT_STALL_TIMEOUT_MS,
+      maxRetryAttempts: DEFAULT_AGENT_MAX_RETRY_ATTEMPTS,
+      maxRetryBackoffMs: DEFAULT_AGENT_MAX_RETRY_BACKOFF_MS,
     });
   });
 
@@ -422,7 +430,48 @@ describe('configSchema', () => {
       maxConcurrentAgents: 5,
       maxTurns: DEFAULT_AGENT_MAX_TURNS,
       stallTimeoutMs: DEFAULT_AGENT_STALL_TIMEOUT_MS,
+      maxRetryAttempts: DEFAULT_AGENT_MAX_RETRY_ATTEMPTS,
+      maxRetryBackoffMs: DEFAULT_AGENT_MAX_RETRY_BACKOFF_MS,
     });
+  });
+
+  it('agent.max_retry_attempts / agent.max_retry_backoff_ms を camelCase で取り出せる (#84)', () => {
+    const parsed = configSchema.parse({
+      owner: 'hexylab',
+      project_number: 1,
+      agent: { max_retry_attempts: 0, max_retry_backoff_ms: 60_000 },
+    });
+    expect(parsed.agent.maxRetryAttempts).toBe(0);
+    expect(parsed.agent.maxRetryBackoffMs).toBe(60_000);
+  });
+
+  it('agent.max_retry_attempts が負数だと検証エラーになる (#84)', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      agent: { max_retry_attempts: -1 },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]?.path).toEqual(['agent', 'max_retry_attempts']);
+    }
+  });
+
+  it('agent.max_retry_backoff_ms は 0 / 負数を許さない (#84)', () => {
+    expect(
+      configSchema.safeParse({
+        owner: 'hexylab',
+        project_number: 1,
+        agent: { max_retry_backoff_ms: 0 },
+      }).success,
+    ).toBe(false);
+    expect(
+      configSchema.safeParse({
+        owner: 'hexylab',
+        project_number: 1,
+        agent: { max_retry_backoff_ms: -100 },
+      }).success,
+    ).toBe(false);
   });
 
   it('agent.max_turns / agent.stall_timeout_ms を camelCase で取り出せる (#25)', () => {

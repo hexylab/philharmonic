@@ -41,7 +41,13 @@ function fakeConfig(overrides: Partial<Config> = {}): Config {
     cleanRetentionDays: 7,
     logLevel: 'info',
     polling: { intervalMs: 30_000 },
-    agent: { maxConcurrentAgents: 1, maxTurns: 1, stallTimeoutMs: 300_000 },
+    agent: {
+      maxConcurrentAgents: 1,
+      maxTurns: 1,
+      stallTimeoutMs: 300_000,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+    },
     hooks: { afterCreate: [], beforeRun: [], afterRun: [], beforeRemove: [] },
     server: null,
     github: { tokenSource: 'auto' },
@@ -845,7 +851,15 @@ describe('philharmonic serve CLI コマンド', () => {
       cwd: () => '/tmp/repo',
       resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () =>
-        fakeConfig({ agent: { maxConcurrentAgents: 3, maxTurns: 1, stallTimeoutMs: 300_000 } }),
+        fakeConfig({
+          agent: {
+            maxConcurrentAgents: 3,
+            maxTurns: 1,
+            stallTimeoutMs: 300_000,
+            maxRetryAttempts: 5,
+            maxRetryBackoffMs: 300_000,
+          },
+        }),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
       createWorkspaceManager: () => fakeWorkspace,
@@ -911,7 +925,15 @@ describe('philharmonic serve CLI コマンド', () => {
       cwd: () => '/tmp/repo',
       resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () =>
-        fakeConfig({ agent: { maxConcurrentAgents: 2, maxTurns: 1, stallTimeoutMs: 300_000 } }),
+        fakeConfig({
+          agent: {
+            maxConcurrentAgents: 2,
+            maxTurns: 1,
+            stallTimeoutMs: 300_000,
+            maxRetryAttempts: 5,
+            maxRetryBackoffMs: 300_000,
+          },
+        }),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
       createWorkspaceManager: () => fakeWorkspace,

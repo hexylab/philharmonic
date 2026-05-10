@@ -57,7 +57,13 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     cleanRetentionDays: 7,
     logLevel: 'info',
     polling: { intervalMs: 30_000 },
-    agent: { maxConcurrentAgents: 1, maxTurns: 1, stallTimeoutMs: 300_000 },
+    agent: {
+      maxConcurrentAgents: 1,
+      maxTurns: 1,
+      stallTimeoutMs: 300_000,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+    },
     hooks: { afterCreate: [], beforeRun: [], afterRun: [], beforeRemove: [] },
     server: null,
     ...overrides,
@@ -458,5 +464,45 @@ describe('recoverInProgress (ADR-0005: agent 委譲)', () => {
     expect(workspace.createWorkspace).not.toHaveBeenCalled();
     const skipLog = logger.info.mock.calls.find((c) => c[0] === 'recovery skip (issue closed)');
     expect(skipLog).toBeDefined();
+  });
+
+  it('dispatchSelected が failed を返したら retryQueue に attempt=1 で schedule する (#84 / ADR-0008)', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue();
+
+    const candidate = makeCandidate();
+    const projects = makeProjectsMock([candidate]);
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt-recovery'));
+    const runClaudeMock = vi.fn(async () => makeRunResult({ status: 'stalled' }));
+    const logger = makeLogger();
+
+    const summary = await recoverInProgress({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      signal: new AbortController().signal,
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      logger,
+      pathExists: async () => false,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+    });
+
+    expect(summary.failed).toBe(1);
+    expect(queue.size()).toBe(1);
+    const entry = queue.list()[0]!;
+    expect(entry.issueNumber).toBe(candidate.issueNumber);
+    expect(entry.attempt).toBe(1);
+    expect(entry.failureReason).toBe('stalled');
+    expect(entry.dueAt.toISOString()).toBe('2026-05-09T00:00:10.000Z');
   });
 });
