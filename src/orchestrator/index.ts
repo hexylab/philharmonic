@@ -1,3 +1,8 @@
+export {
+  createDependencyIssueFetcher,
+  logDependencyEvaluation,
+  type DependencyIssueFetcherDeps,
+} from './dependency-filter.js';
 export { BootstrapError, type BootstrapErrorReason, type FailureReason } from './errors.js';
 export { fetchBaseBranch } from './git.js';
 export {

@@ -8,6 +8,12 @@ export type SelectCandidateInput = {
   dispatchStatuses?: readonly string[];
 };
 
+/**
+ * Status / OPEN フィルタの第 1 段階を判定する utility predicate。
+ *
+ * `runOnce` / `runConcurrent` 本体は ADR-0007 の dependency filter と組み合わせるため
+ * 直接利用しないが、Status fallback 等の一発判定が必要な caller (テスト含む) のために公開を維持する。
+ */
 export function selectFirstByStatus(input: SelectCandidateInput): Candidate | null {
   const statuses = input.dispatchStatuses ?? DEFAULT_DISPATCH_STATUSES;
   for (const c of input.candidates) {

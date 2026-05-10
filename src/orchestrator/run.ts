@@ -3,6 +3,11 @@ import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { Config } from '../config/index.js';
+import {
+  evaluateDependencyDag,
+  type EvaluatedCandidate,
+  type FetchDependencyIssue,
+} from '../dependency/index.js';
 import type { GitHubClient, Issue } from '../github/index.js';
 import type { Logger } from '../logger/index.js';
 import type { Candidate, ProjectsClient } from '../projects/index.js';
@@ -26,6 +31,7 @@ import {
   type WorkspaceManager,
 } from '../workspace/index.js';
 
+import { createDependencyIssueFetcher, logDependencyEvaluation } from './dependency-filter.js';
 import { type FailureReason } from './errors.js';
 import { fetchBaseBranch } from './git.js';
 import { dispatchPool } from './pool.js';
@@ -34,7 +40,6 @@ import {
   checkDispatchGuard,
   DEFAULT_DISPATCH_STATUSES,
   isAcceptableIssue,
-  selectFirstByStatus,
   type DispatchGuard,
   type DispatchGuardSkipReason,
 } from './select.js';
@@ -67,6 +72,13 @@ export type RunOnceDeps = {
    * 二重 dispatch ガードに使う path 存在判定 (テストで差し替え可能)。未指定なら fs.stat。
    */
   pathExists?: (target: string) => Promise<boolean>;
+  /**
+   * dependency filter (ADR-0007) で candidate body 外の依存先 Issue を取得する fetcher。
+   *
+   * 未指定なら GitHubClient を使った default 実装を `selectAcceptableCandidates` 内で組み立てる
+   * (cross-repo 依存は parser-invalid で弾かれる前提のため、最初の acceptable candidate の repo を流用)。
+   */
+  fetchDependencyIssue?: FetchDependencyIssue;
 };
 
 export type RunOnceResult =
@@ -130,6 +142,7 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     agentUserLogin: deps.config.agentUserLogin,
     logger: baseLogger,
     guard,
+    fetchDependencyIssue: deps.fetchDependencyIssue,
   });
   if (selected === null) {
     baseLogger.info('no candidate', { dispatchStatuses });
@@ -201,6 +214,7 @@ export async function runConcurrent(deps: RunConcurrentDeps): Promise<Concurrent
     logger: baseLogger,
     guard,
     limit: maxConcurrent,
+    fetchDependencyIssue: deps.fetchDependencyIssue,
   });
   if (selected.length === 0) {
     baseLogger.info('no candidate', { dispatchStatuses });
@@ -602,6 +616,8 @@ type SelectInput = {
   agentUserLogin: string | null;
   logger: Logger;
   guard: DispatchGuard;
+  /** ADR-0007: dependency filter で candidate body 外の依存先 Issue を取得する fetcher */
+  fetchDependencyIssue?: FetchDependencyIssue;
 };
 
 type SelectResult = {
@@ -615,47 +631,87 @@ async function selectAcceptableCandidate(input: SelectInput): Promise<SelectResu
   return results[0] ?? null;
 }
 
+/**
+ * status / assignee / `agent:skip` / worktree / in-flight の既存 filter を全件適用したのち、
+ * ADR-0007 の dependency filter を最終段に挿入し、`ready` candidate のみ board 順で `limit` 件返す。
+ *
+ * dependency filter の都合で、limit に達するかに関わらず candidates 全件を 1 周走査する点が
+ * 旧実装からの差分。これは ADR-0007 §4 の擬似コードに従う。tick あたりの GitHub API 呼び出しは
+ * 旧実装比で「acceptable な候補数」分まで増えるが、`getIssue` で取った body はそのまま依存解決に
+ * 流用するため、追加 fetch は Project items 外の依存先のみに限定される (ADR-0007 §6)。
+ */
 async function selectAcceptableCandidates(
   input: SelectInput & { limit: number },
 ): Promise<SelectResult[]> {
-  const acceptable: SelectResult[] = [];
-  let remaining: readonly Candidate[] = input.candidates;
-  while (remaining.length > 0 && acceptable.length < input.limit) {
-    const candidate = selectFirstByStatus({
-      candidates: remaining,
-      dispatchStatuses: input.dispatchStatuses,
+  const acceptable = await collectAcceptableCandidates(input);
+  if (acceptable.length === 0) return [];
+
+  const fetchIssue =
+    input.fetchDependencyIssue ??
+    createDependencyIssueFetcher({
+      githubClient: input.githubClient,
+      defaultRepository: acceptable[0]!.repository,
     });
-    if (candidate === null) break;
+
+  const evaluations: EvaluatedCandidate[] = await evaluateDependencyDag({
+    candidates: acceptable.map((s) => ({ candidate: s.candidate, body: s.issue.body })),
+    fetchIssue,
+  });
+
+  const readyIssueNumbers = new Set<number>();
+  for (const evaluation of evaluations) {
+    logDependencyEvaluation(input.logger, evaluation);
+    if (evaluation.state === 'ready') {
+      readyIssueNumbers.add(evaluation.candidate.issueNumber);
+    }
+  }
+
+  const ready = acceptable.filter((s) => readyIssueNumbers.has(s.candidate.issueNumber));
+  return ready.slice(0, input.limit);
+}
+
+/**
+ * status / assignee / `agent:skip` / worktree / in-flight を pass した acceptable candidate を
+ * board 順で全件返す (limit を適用する前段階)。Issue body は `getIssue` の戻りを保持し、
+ * 後段の dependency filter で再利用する。
+ */
+async function collectAcceptableCandidates(input: SelectInput): Promise<SelectResult[]> {
+  const acceptable: SelectResult[] = [];
+  for (const candidate of input.candidates) {
+    if (candidate.issueState !== 'OPEN') continue;
+    if (candidate.status === null) continue;
+    if (!input.dispatchStatuses.includes(candidate.status)) continue;
+
     const repository = parseRepositoryNameWithOwner(candidate.repositoryNameWithOwner);
     const issue = await input.githubClient.getIssue({
       owner: repository.owner,
       repo: repository.name,
       issueNumber: candidate.issueNumber,
     });
-    if (issue.state === 'open') {
-      const result = isAcceptableIssue({
-        labels: issue.labels,
-        assignees: issue.assignees,
-        agentUserLogin: input.agentUserLogin,
-      });
-      if (result.ok) {
-        const guardResult = await checkDispatchGuard(input.guard, candidate.issueNumber);
-        if (guardResult.ok) {
-          acceptable.push({ candidate, issue, repository });
-        } else {
-          logSkipReason(input.logger, candidate.issueNumber, guardResult.reason);
-        }
-      } else {
-        input.logger.info(`skip candidate (${result.reason})`, {
-          issueNumber: candidate.issueNumber,
-        });
-      }
-    } else {
+
+    if (issue.state !== 'open') {
       input.logger.info('skip candidate (issue closed)', {
         issueNumber: candidate.issueNumber,
       });
+      continue;
     }
-    remaining = remaining.filter((c) => c.itemId !== candidate.itemId);
+    const result = isAcceptableIssue({
+      labels: issue.labels,
+      assignees: issue.assignees,
+      agentUserLogin: input.agentUserLogin,
+    });
+    if (!result.ok) {
+      input.logger.info(`skip candidate (${result.reason})`, {
+        issueNumber: candidate.issueNumber,
+      });
+      continue;
+    }
+    const guardResult = await checkDispatchGuard(input.guard, candidate.issueNumber);
+    if (!guardResult.ok) {
+      logSkipReason(input.logger, candidate.issueNumber, guardResult.reason);
+      continue;
+    }
+    acceptable.push({ candidate, issue, repository });
   }
   return acceptable;
 }
