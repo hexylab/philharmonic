@@ -70,18 +70,22 @@ philharmonic serve --config ./path/to/.philharmonic/philharmonic.yaml
 
 主な違い (`philharmonic run` との比較):
 
-| 項目              | `run`           | `serve`                                                     |
-| ----------------- | --------------- | ----------------------------------------------------------- |
-| 実行回数          | 1 ターンで exit | ポーリング loop で繰り返す                                  |
-| 並列 dispatch     | 無し            | `agent.max_concurrent_agents` で 1 tick 内に複数 dispatch   |
-| Tracker recovery  | 無し            | 起動時に `In Progress` の Issue を引き取る                  |
-| 自動 retry queue  | 無し            | `agent.max_retry_attempts` で in-memory に再 dispatch (#84) |
-| Snapshot HTTP API | 起動しない      | `server.port` 指定時に `127.0.0.1` で起動                   |
-| 二重起動防止      | 無し            | `.philharmonic/serve.lock` で同一 repo の二重起動を弾く     |
+| 項目              | `run`           | `serve`                                                                                         |
+| ----------------- | --------------- | ----------------------------------------------------------------------------------------------- |
+| 実行回数          | 1 ターンで exit | ポーリング loop で繰り返す                                                                      |
+| 並列 dispatch     | 無し            | `agent.max_concurrent_agents` で 1 tick 内に複数 dispatch                                       |
+| Tracker recovery  | 無し            | 起動時に `In Progress` の Issue を引き取る                                                      |
+| 自動 retry queue  | 無し            | `agent.max_retry_attempts` で failure / continuation 両方を in-memory に再 dispatch (#84 / #85) |
+| Snapshot HTTP API | 起動しない      | `server.port` 指定時に `127.0.0.1` で起動                                                       |
+| 二重起動防止      | 無し            | `.philharmonic/serve.lock` で同一 repo の二重起動を弾く                                         |
 
 ### 自動 retry queue (`agent.max_retry_attempts`)
 
-`philharmonic serve` は daemon プロセス内に **in-memory な retry queue** を持ち、以下の orchestrator 起源の失敗を最大 `agent.max_retry_attempts` 回 (default 5) まで自動再 dispatch します (Issue #84 / [ADR-0008](../adr/0008-in-memory-retry-queue.md))。
+`philharmonic serve` は daemon プロセス内に **in-memory な retry queue** を持ち、以下 2 種類の自動再 dispatch を 1 本の queue で扱います。最大 `agent.max_retry_attempts` 回 (default 5) まで再試行し、kind ごとに独立にカウントします (Issue #84 / [ADR-0008](../adr/0008-in-memory-retry-queue.md), Issue #85 / [ADR-0009](../adr/0009-continuation-retry-after-success.md))。
+
+#### kind=`failure` — 失敗の指数バックオフ retry
+
+orchestrator 起源の失敗を再 dispatch:
 
 - `workspace_provisioning`: worktree 作成 / git fetch の一過性失敗
 - `runner_error`: claude subprocess の異常終了
@@ -91,14 +95,26 @@ philharmonic serve --config ./path/to/.philharmonic/philharmonic.yaml
 
 backoff は `min(10s * 2^(attempt-1), agent.max_retry_backoff_ms)` (default `300_000` ms = 5 分で頭打ち)。
 
-機能を **off** にしたい場合は config で `agent.max_retry_attempts: 0` を指定します:
+#### kind=`continuation` — 正常終了後の Status 再確認
+
+agent が exit 0 で終わったが Project Status を `In Review` / `Failed` に flip し損ねたケース (max_turns 到達 / prompt 漏れ / `gh` API 一過性エラー) を救済します。
+
+- `dispatchSelected` が success を返した直後に `fetchProjectCandidates` で Status を再取得
+- Status が `dispatch_statuses` または `status_transitions.in_progress` (= active) のままなら、**10 秒後** に再 dispatch する continuation entry を schedule
+- Status が `In Review` / `Failed` / `Done` / Issue closed なら queue に積まずに release
+
+delay は **固定 10 秒** で指数バックオフは使いません (config 化していません)。
+
+#### 機能の on / off
+
+両 kind とも `agent.max_retry_attempts` で制御します。off にしたい場合:
 
 ```yaml
 agent:
   max_retry_attempts: 0
 ```
 
-retry の進行は構造化ログ (`retry scheduled` / `retry due` / `retry skipped` / `retry exhausted`) と Snapshot HTTP API (`/api/v1/state` の `retry_queue` field) で観測できます。retry queue は **永続化されません** (daemon 再起動で消える)。失われた retry は次回 `serve` 起動時の Tracker-driven recovery (`In Progress` 引き取り) が代替で拾います。
+retry の進行は構造化ログ (`retry scheduled` / `retry due` / `retry skipped` / `retry exhausted` / `continuation released`、いずれも `kind` field 付き) と Snapshot HTTP API (`/api/v1/state` の `retry_queue.entries[].kind` field) で観測できます。retry queue は **永続化されません** (daemon 再起動で消える)。失われた retry は次回 `serve` 起動時の Tracker-driven recovery (`In Progress` 引き取り) が代替で拾います。
 
 詳細仕様は [`docs/specs/retry-queue.md`](../specs/retry-queue.md) を参照。
 

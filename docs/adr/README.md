@@ -68,3 +68,4 @@
 - [ADR-0006: TUI dashboard は Ink で実装し、`philharmonic dashboard` として提供する](./0006-tui-dashboard.md) (Accepted)
 - [ADR-0007: Issue 依存関係を `Depends-On:` 行で表現する DAG-aware scheduler を導入する](./0007-dependency-dag-aware-scheduler.md) (Accepted)
 - [ADR-0008: 失敗 / stalled run を指数バックオフで再 dispatch する in-memory retry queue を導入する](./0008-in-memory-retry-queue.md) (Accepted)
+- [ADR-0009: agent run の正常終了後に Issue が active のままなら continuation retry で再確認する](./0009-continuation-retry-after-success.md) (Accepted)

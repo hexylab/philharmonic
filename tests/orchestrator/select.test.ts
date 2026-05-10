@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { isAcceptableIssue, selectFirstByStatus } from '../../src/orchestrator/select.js';
+import {
+  checkDispatchGuard,
+  isAcceptableIssue,
+  selectFirstByStatus,
+  type DispatchGuard,
+} from '../../src/orchestrator/select.js';
 import type { Candidate } from '../../src/projects/index.js';
 
 function makeCandidate(overrides: Partial<Candidate> = {}): Candidate {
@@ -98,5 +103,48 @@ describe('isAcceptableIssue', () => {
       agentUserLogin: 'philharmonic-bot',
     });
     expect(result).toEqual({ ok: false, reason: 'assignee_mismatch' });
+  });
+});
+
+describe('checkDispatchGuard', () => {
+  function makeGuard(overrides: Partial<DispatchGuard> = {}): DispatchGuard {
+    return {
+      workspaceExists: async () => false,
+      isRunning: () => false,
+      inRetryQueue: () => false,
+      ...overrides,
+    };
+  }
+
+  it('全ガード OK なら ok=true', async () => {
+    expect(await checkDispatchGuard(makeGuard(), 1)).toEqual({ ok: true });
+  });
+
+  it('isRunning が true なら tracker_in_flight', async () => {
+    const guard = makeGuard({ isRunning: () => true });
+    expect(await checkDispatchGuard(guard, 1)).toEqual({
+      ok: false,
+      reason: 'tracker_in_flight',
+    });
+  });
+
+  it('inRetryQueue が true なら retry_queued (workspace チェックより前段で skip; ADR-0009 §5)', async () => {
+    const guard = makeGuard({
+      inRetryQueue: () => true,
+      // workspace 存在 / not 存在いずれでも retry_queued が優先される
+      workspaceExists: async () => true,
+    });
+    expect(await checkDispatchGuard(guard, 1)).toEqual({
+      ok: false,
+      reason: 'retry_queued',
+    });
+  });
+
+  it('workspaceExists のみ true なら workspace_exists', async () => {
+    const guard = makeGuard({ workspaceExists: async () => true });
+    expect(await checkDispatchGuard(guard, 1)).toEqual({
+      ok: false,
+      reason: 'workspace_exists',
+    });
   });
 });

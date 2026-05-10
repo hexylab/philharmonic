@@ -466,7 +466,7 @@ describe('recoverInProgress (ADR-0005: agent 委譲)', () => {
     expect(skipLog).toBeDefined();
   });
 
-  it('dispatchSelected が failed を返したら retryQueue に attempt=1 で schedule する (#84 / ADR-0008)', async () => {
+  it('dispatchSelected が failed を返したら retryQueue に kind=failure attempt=1 で schedule する (#84 / ADR-0008)', async () => {
     const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
     const queue = createRetryQueue();
 
@@ -500,9 +500,102 @@ describe('recoverInProgress (ADR-0005: agent 委譲)', () => {
     expect(summary.failed).toBe(1);
     expect(queue.size()).toBe(1);
     const entry = queue.list()[0]!;
+    expect(entry.kind).toBe('failure');
     expect(entry.issueNumber).toBe(candidate.issueNumber);
     expect(entry.attempt).toBe(1);
     expect(entry.failureReason).toBe('stalled');
     expect(entry.dueAt.toISOString()).toBe('2026-05-09T00:00:10.000Z');
+  });
+
+  it('dispatchSelected が success を返し Issue が active なら kind=continuation を schedule する (#85 / ADR-0009)', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue();
+
+    const candidate = makeCandidate(); // Status: 'In Progress' (recovery 経路の active)
+    // recovery 内で fetchProjectCandidates は 1 回 (`In Progress` 抽出用)。
+    // 加えて scheduleContinuationAfterRecovery が再 fetch する → 2 回返せるよう設定。
+    const projects: ProjectsMock = {
+      fetchProjectCandidates: vi
+        .fn()
+        .mockResolvedValueOnce([candidate])
+        .mockResolvedValueOnce([candidate]),
+    };
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt-recovery-cont'));
+    const runClaudeMock = vi.fn(async () => makeRunResult()); // success
+    const logger = makeLogger();
+
+    const summary = await recoverInProgress({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      signal: new AbortController().signal,
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      logger,
+      pathExists: async () => false,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+    });
+
+    expect(summary.succeeded).toBe(1);
+    expect(queue.size()).toBe(1);
+    const entry = queue.list()[0]!;
+    expect(entry.kind).toBe('continuation');
+    expect(entry.attempt).toBe(1);
+    expect(entry.failureReason).toBeNull();
+    expect(entry.dueAt.toISOString()).toBe('2026-05-09T00:00:10.000Z');
+  });
+
+  it('dispatchSelected が success を返し Status が In Review (terminal) なら release する (#85 / ADR-0009)', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue();
+
+    const inProgressCandidate = makeCandidate();
+    const inReviewCandidate = makeCandidate({ status: 'In Review' });
+    const projects: ProjectsMock = {
+      fetchProjectCandidates: vi
+        .fn()
+        .mockResolvedValueOnce([inProgressCandidate])
+        .mockResolvedValueOnce([inReviewCandidate]),
+    };
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt-recovery-rel'));
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+    const logger = makeLogger();
+
+    await recoverInProgress({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      signal: new AbortController().signal,
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      logger,
+      pathExists: async () => false,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+    });
+
+    expect(queue.size()).toBe(0);
+    const released = logger.info.mock.calls.find((c) => c[0] === 'continuation released');
+    expect(released?.[1]).toMatchObject({
+      reason: 'terminal_status',
+      status: 'In Review',
+    });
   });
 });

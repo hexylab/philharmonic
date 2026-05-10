@@ -37,7 +37,7 @@ import { type FailureReason } from './errors.js';
 import { fetchBaseBranch } from './git.js';
 import { dispatchPool } from './pool.js';
 import { parseRepositoryNameWithOwner, type Repository } from './repository.js';
-import { type RetryEntry, type RetryQueue } from './retry-queue.js';
+import { type RetryEntry, type RetryKind, type RetryQueue } from './retry-queue.js';
 import {
   checkDispatchGuard,
   DEFAULT_DISPATCH_STATUSES,
@@ -148,6 +148,7 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     workspaceExists: async (issueNumber) =>
       pathExists(deps.workspaceManager.resolveWorkspacePath(`issue-${issueNumber}`)),
     isRunning: (issueNumber) => tracker.getRunningByIssue(issueNumber) !== null,
+    inRetryQueue: (issueNumber) => deps.retryQueue?.has(issueNumber) ?? false,
   };
 
   // 1. Retry queue drain (#84 / ADR-0008): due な entry を 1 件だけ取り出して dispatch する。
@@ -162,6 +163,14 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     runTracker: tracker,
     logger: baseLogger,
     clock,
+  });
+
+  // single-task success continuation 用に candidates を 1 度だけ取得する resolver。
+  // memoize しないと runOnce 内では 1 回しか呼ばれないため単純な closure で十分。
+  const resolveContinuationCandidates = makeContinuationCandidatesResolver({
+    projectsClient: deps.projectsClient,
+    config: deps.config,
+    logger: baseLogger,
   });
 
   if (retryTasks.length > 0) {
@@ -183,16 +192,19 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
       generateRunId: deps.generateRunId,
       runTracker: tracker,
     });
-    handleDispatchResultForRetry({
+    await processDispatchResultForRetry({
       task,
       result,
       retryQueue: deps.retryQueue,
       maxRetryAttempts: deps.maxRetryAttempts ?? 0,
       maxRetryBackoffMs: deps.maxRetryBackoffMs ?? 0,
+      config: deps.config,
+      dispatchStatuses,
       logger: baseLogger,
       clock,
       resolveWorkspacePath: (t) =>
         deps.workspaceManager.resolveWorkspacePath(`issue-${t.candidate.issueNumber}`),
+      resolveContinuationCandidates,
     });
     return result;
   }
@@ -236,7 +248,7 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     generateRunId: deps.generateRunId,
     runTracker: tracker,
   });
-  handleDispatchResultForRetry({
+  await processDispatchResultForRetry({
     task: {
       candidate: selected.candidate,
       issue: selected.issue,
@@ -248,10 +260,13 @@ export async function runOnce(deps: RunOnceDeps): Promise<RunOnceResult> {
     retryQueue: deps.retryQueue,
     maxRetryAttempts: deps.maxRetryAttempts ?? 0,
     maxRetryBackoffMs: deps.maxRetryBackoffMs ?? 0,
+    config: deps.config,
+    dispatchStatuses,
     logger: baseLogger,
     clock,
     resolveWorkspacePath: (t) =>
       deps.workspaceManager.resolveWorkspacePath(`issue-${t.candidate.issueNumber}`),
+    resolveContinuationCandidates,
   });
   return result;
 }
@@ -287,6 +302,7 @@ export async function runConcurrent(deps: RunConcurrentDeps): Promise<Concurrent
     workspaceExists: async (issueNumber) =>
       pathExists(deps.workspaceManager.resolveWorkspacePath(`issue-${issueNumber}`)),
     isRunning: (issueNumber) => tracker.getRunningByIssue(issueNumber) !== null,
+    inRetryQueue: (issueNumber) => deps.retryQueue?.has(issueNumber) ?? false,
   };
 
   // 1. Retry queue drain (#84 / ADR-0008): due な entry を最大 maxConcurrent 件まで先に消費する。
@@ -396,17 +412,28 @@ export async function runConcurrent(deps: RunConcurrentDeps): Promise<Concurrent
     },
   });
 
+  // 同 tick 内の複数 success 全件で fetchProjectCandidates を 1 回に共有する
+  // (continuation の Status 再確認が outcome 件数だけ呼び出されるのを防ぐ)。
+  const resolveContinuationCandidates = makeContinuationCandidatesResolver({
+    projectsClient: deps.projectsClient,
+    config: deps.config,
+    logger: baseLogger,
+  });
+
   for (const { task, result } of outcomes) {
-    handleDispatchResultForRetry({
+    await processDispatchResultForRetry({
       task,
       result,
       retryQueue: deps.retryQueue,
       maxRetryAttempts: deps.maxRetryAttempts ?? 0,
       maxRetryBackoffMs: deps.maxRetryBackoffMs ?? 0,
+      config: deps.config,
+      dispatchStatuses,
       logger: baseLogger,
       clock,
       resolveWorkspacePath: (t) =>
         deps.workspaceManager.resolveWorkspacePath(`issue-${t.candidate.issueNumber}`),
+      resolveContinuationCandidates,
     });
   }
 
@@ -882,11 +909,17 @@ async function collectAcceptableCandidates(input: SelectInput): Promise<SelectRe
 }
 
 function logSkipReason(logger: Logger, issueNumber: number, reason: DispatchGuardSkipReason): void {
-  if (reason === 'workspace_exists') {
-    logger.info('skip candidate (workspace already exists)', { issueNumber });
-    return;
+  switch (reason) {
+    case 'workspace_exists':
+      logger.info('skip candidate (workspace already exists)', { issueNumber });
+      return;
+    case 'tracker_in_flight':
+      logger.info('skip candidate (already in flight)', { issueNumber });
+      return;
+    case 'retry_queued':
+      logger.info('skip candidate (retry queued)', { issueNumber });
+      return;
   }
-  logger.info('skip candidate (already in flight)', { issueNumber });
 }
 
 function describeError(error: unknown): string {
@@ -919,14 +952,14 @@ async function runAfterRunHooksSafely(
   }
 }
 
-// ─── Retry queue 連携 (#84 / ADR-0008) ───
+// ─── Retry queue 連携 (#84 / ADR-0008, #85 / ADR-0009) ───
 
 /** 1 tick で dispatch する単位。retry 起源かどうかを `retryAttempt` / `retryFrom` で表す */
 export type DispatchTask = {
   candidate: Candidate;
   issue: Issue;
   repository: Repository;
-  /** 0: fresh candidate (初回 dispatch)。1+: retry queue 起源 (= 直前に失敗した attempt 番号) */
+  /** 0: fresh candidate (初回 dispatch)。1+: retry queue 起源 (= 直前の attempt 番号) */
   retryAttempt: number;
   retryFrom: RetryEntry | null;
 };
@@ -934,7 +967,7 @@ export type DispatchTask = {
 const RETRY_RESCHEDULE_DELAY_MS = 10_000;
 
 /**
- * `dispatchSelected` の `failureReason` のうち、retry queue の対象とするものを判定する。
+ * `dispatchSelected` の `failureReason` のうち、failure retry queue の対象とするものを判定する。
  *
  * 現状は全 `FailureReason` を retry 対象とする (ADR-0008 §1)。failureReason 別の細粒度な on/off
  * は spec の Open Question として保留。
@@ -948,6 +981,65 @@ export function isRetryEligibleReason(reason: FailureReason): boolean {
     case 'hook_failed':
       return true;
   }
+}
+
+/**
+ * 直前の dispatch (fresh / retry queue 起源) が active な状態かを Project Status で再判定する。
+ *
+ * spec: docs/specs/retry-queue.md §continuation retry
+ */
+export type ContinuationDecision =
+  | { kind: 'schedule'; status: string }
+  | { kind: 'release'; reason: 'closed' | 'terminal_status' | 'inactive_status' | 'fetch_error' };
+
+export function evaluateContinuationDecision(input: {
+  candidate: Candidate | undefined;
+  config: Config;
+  dispatchStatuses: readonly string[];
+}): ContinuationDecision {
+  const { candidate, config, dispatchStatuses } = input;
+  if (candidate === undefined) return { kind: 'release', reason: 'inactive_status' };
+  if (candidate.issueState !== 'OPEN') return { kind: 'release', reason: 'closed' };
+
+  const allowed = new Set<string>([...dispatchStatuses, config.statusTransitions.inProgress]);
+  if (candidate.status === null || !allowed.has(candidate.status)) {
+    const isTerminal =
+      candidate.status === config.statusTransitions.inReview ||
+      candidate.status === config.statusTransitions.failed;
+    return { kind: 'release', reason: isTerminal ? 'terminal_status' : 'inactive_status' };
+  }
+  return { kind: 'schedule', status: candidate.status };
+}
+
+type ContinuationCandidatesResolver = () => Promise<readonly Candidate[] | null>;
+
+/**
+ * success 後の continuation 判定で使う `fetchProjectCandidates` を memoize する factory。
+ *
+ * 同 tick 内の複数 success で 1 回に共有することで GitHub API call 回数を抑える。fetch が失敗したら
+ * `null` を resolve するので呼び出し側は `release reason=fetch_error` 扱いにする。
+ */
+function makeContinuationCandidatesResolver(deps: {
+  projectsClient: ProjectsClient;
+  config: Config;
+  logger: Logger;
+}): ContinuationCandidatesResolver {
+  let cached: readonly Candidate[] | null | undefined; // undefined = not fetched yet
+  return async () => {
+    if (cached !== undefined) return cached;
+    try {
+      cached = await deps.projectsClient.fetchProjectCandidates({
+        owner: deps.config.owner,
+        projectNumber: deps.config.projectNumber,
+        statusFieldName: deps.config.statusField,
+      });
+      return cached;
+    } catch (error) {
+      deps.logger.warn('continuation fetch error', { error: describeError(error) });
+      cached = null;
+      return cached;
+    }
+  };
 }
 
 type DrainRetryQueueDeps = {
@@ -981,39 +1073,16 @@ async function drainRetryQueue(deps: DrainRetryQueueDeps): Promise<DispatchTask[
 
   for (const entry of drained) {
     if (tasks.length >= deps.limit) {
-      // 上限超過分はそのまま queue に戻して次 tick へ送る
-      deps.retryQueue.schedule({
-        issueNumber: entry.issueNumber,
-        repository: entry.repository,
-        branch: entry.branch,
-        workspacePath: entry.workspacePath,
-        attempt: entry.attempt,
-        failureReason: entry.failureReason,
-        lastRunId: entry.lastRunId,
-        lastErrorSummary: entry.lastErrorSummary,
-        now: deps.clock(),
-        maxBackoffMs: 0,
-      });
+      // 上限超過分はそのまま queue に戻して次 tick へ送る (kind / attempt は据え置き)。
+      rescheduleEntry(deps.retryQueue, entry, 0, deps.clock());
       continue;
     }
 
     if (deps.runTracker.getRunningByIssue(entry.issueNumber) !== null) {
       // drainDue で既に queue から外れているため、attempt は据え置きで 10s 後に積み直す。
-      // computeRetryDelayMs は maxBackoffMs を上限 clamp に使うため、ここでは 10s を上限にして
-      // attempt 値に関わらず常に 10s 遅延を得る。
-      deps.retryQueue.schedule({
-        issueNumber: entry.issueNumber,
-        repository: entry.repository,
-        branch: entry.branch,
-        workspacePath: entry.workspacePath,
-        attempt: entry.attempt,
-        failureReason: entry.failureReason,
-        lastRunId: entry.lastRunId,
-        lastErrorSummary: entry.lastErrorSummary,
-        now: deps.clock(),
-        maxBackoffMs: RETRY_RESCHEDULE_DELAY_MS,
-      });
+      rescheduleEntry(deps.retryQueue, entry, RETRY_RESCHEDULE_DELAY_MS, deps.clock());
       deps.logger.info('retry skipped', {
+        kind: entry.kind,
         issueNumber: entry.issueNumber,
         attempt: entry.attempt,
         reason: 'tracker_in_flight',
@@ -1022,6 +1091,7 @@ async function drainRetryQueue(deps: DrainRetryQueueDeps): Promise<DispatchTask[
     }
 
     deps.logger.info('retry due', {
+      kind: entry.kind,
       issueNumber: entry.issueNumber,
       attempt: entry.attempt,
       lastRunId: entry.lastRunId,
@@ -1036,6 +1106,7 @@ async function drainRetryQueue(deps: DrainRetryQueueDeps): Promise<DispatchTask[
       });
     } catch (error) {
       deps.logger.info('retry skipped', {
+        kind: entry.kind,
         issueNumber: entry.issueNumber,
         attempt: entry.attempt,
         reason: 'fetch_error',
@@ -1046,6 +1117,7 @@ async function drainRetryQueue(deps: DrainRetryQueueDeps): Promise<DispatchTask[
 
     if (issue.state !== 'open') {
       deps.logger.info('retry skipped', {
+        kind: entry.kind,
         issueNumber: entry.issueNumber,
         attempt: entry.attempt,
         reason: 'closed',
@@ -1064,18 +1136,7 @@ async function drainRetryQueue(deps: DrainRetryQueueDeps): Promise<DispatchTask[
         deps.logger.warn('retry drain error', { error: describeError(error) });
         // 取得失敗時は当 tick の retry をすべて諦める。残りの drained entry も queue に戻す
         for (const remaining of drained.slice(drained.indexOf(entry))) {
-          deps.retryQueue.schedule({
-            issueNumber: remaining.issueNumber,
-            repository: remaining.repository,
-            branch: remaining.branch,
-            workspacePath: remaining.workspacePath,
-            attempt: remaining.attempt,
-            failureReason: remaining.failureReason,
-            lastRunId: remaining.lastRunId,
-            lastErrorSummary: remaining.lastErrorSummary,
-            now: deps.clock(),
-            maxBackoffMs: RETRY_RESCHEDULE_DELAY_MS,
-          });
+          rescheduleEntry(deps.retryQueue, remaining, RETRY_RESCHEDULE_DELAY_MS, deps.clock());
         }
         return tasks;
       }
@@ -1084,6 +1145,7 @@ async function drainRetryQueue(deps: DrainRetryQueueDeps): Promise<DispatchTask[
     const candidate = candidatesCache.find((c) => c.issueNumber === entry.issueNumber);
     if (candidate === undefined) {
       deps.logger.info('retry skipped', {
+        kind: entry.kind,
         issueNumber: entry.issueNumber,
         attempt: entry.attempt,
         reason: 'inactive_status',
@@ -1100,6 +1162,7 @@ async function drainRetryQueue(deps: DrainRetryQueueDeps): Promise<DispatchTask[
         candidate.status === deps.config.statusTransitions.inReview ||
         candidate.status === deps.config.statusTransitions.failed;
       deps.logger.info('retry skipped', {
+        kind: entry.kind,
         issueNumber: entry.issueNumber,
         attempt: entry.attempt,
         reason: isTerminal ? 'terminal_status' : 'inactive_status',
@@ -1116,6 +1179,7 @@ async function drainRetryQueue(deps: DrainRetryQueueDeps): Promise<DispatchTask[
       });
     } catch (error) {
       deps.logger.warn('retry workspace cleanup failed', {
+        kind: entry.kind,
         issueNumber: entry.issueNumber,
         attempt: entry.attempt,
         error: describeError(error),
@@ -1137,45 +1201,80 @@ async function drainRetryQueue(deps: DrainRetryQueueDeps): Promise<DispatchTask[
   return tasks;
 }
 
-type HandleDispatchResultForRetryDeps = {
+/**
+ * `drainRetryQueue` 内で entry を queue に戻すための helper。
+ *
+ * - failure: `computeRetryDelayMs(attempt, delayMs)` で clamp された delay
+ * - continuation: schedule 内部で固定 delay (CONTINUATION_RETRY_DELAY_MS) が使われるため
+ *   `delayMs` 引数は無視される。tracker_in_flight / overflow / fetch error いずれの場合も
+ *   continuation entry は次回 ~10s 後に積み直る挙動になる
+ */
+function rescheduleEntry(
+  retryQueue: RetryQueue,
+  entry: RetryEntry,
+  delayMs: number,
+  now: Date,
+): void {
+  retryQueue.schedule({
+    kind: entry.kind,
+    issueNumber: entry.issueNumber,
+    repository: entry.repository,
+    branch: entry.branch,
+    workspacePath: entry.workspacePath,
+    attempt: entry.attempt,
+    failureReason: entry.failureReason,
+    lastRunId: entry.lastRunId,
+    lastErrorSummary: entry.lastErrorSummary,
+    now,
+    maxBackoffMs: delayMs,
+  });
+}
+
+type ProcessDispatchResultDeps = {
   task: DispatchTask;
   result: Extract<RunOnceResult, { kind: 'success' | 'failed' }>;
   retryQueue?: RetryQueue;
   maxRetryAttempts: number;
   maxRetryBackoffMs: number;
+  config: Config;
+  dispatchStatuses: readonly string[];
   logger: Logger;
   clock: () => Date;
   /** fresh candidate の retry を schedule する際に workspacePath を解決する関数 */
   resolveWorkspacePath: (task: DispatchTask) => string;
+  /** continuation 判定用の最新 Project candidates を memoize 経由で返す resolver */
+  resolveContinuationCandidates: ContinuationCandidatesResolver;
 };
 
 /**
  * 1 件の dispatch 結果に対して retry queue を更新する。
  *
- * - success: queue から落とす (retry 中だった entry も clear)
- * - failed (retry-eligible) で next attempt が上限内: schedule
+ * - success: Project Status を再取得し、active なら continuation を schedule、それ以外は release
+ * - failed (retry-eligible) で next attempt が上限内: failure を schedule
  * - failed (retry-eligible) で next attempt が上限超: drop + `retry exhausted` warn
  * - failed (retry 対象外) / queue 未注入 / max_retry_attempts == 0: 何もしない
  */
-function handleDispatchResultForRetry(deps: HandleDispatchResultForRetryDeps): void {
+async function processDispatchResultForRetry(deps: ProcessDispatchResultDeps): Promise<void> {
+  if (deps.result.kind === 'success') {
+    await processDispatchSuccessForContinuation(deps);
+    return;
+  }
+  processDispatchFailureForRetry(deps);
+}
+
+function processDispatchFailureForRetry(deps: ProcessDispatchResultDeps): void {
   const { task, result, retryQueue, maxRetryAttempts, maxRetryBackoffMs, logger, clock } = deps;
-
   if (retryQueue === undefined) return;
+  if (result.kind !== 'failed') return;
 
-  if (result.kind === 'success') {
-    retryQueue.remove(task.candidate.issueNumber);
-    return;
-  }
-
-  if (!isRetryEligibleReason(result.reason)) {
-    return;
-  }
+  if (!isRetryEligibleReason(result.reason)) return;
   if (maxRetryAttempts <= 0) return;
 
-  const nextAttempt = task.retryAttempt + 1;
+  const nextAttempt = nextAttemptForKind(task, 'failure');
   if (nextAttempt > maxRetryAttempts) {
     retryQueue.remove(task.candidate.issueNumber);
     logger.warn('retry exhausted', {
+      kind: 'failure',
       issueNumber: task.candidate.issueNumber,
       attempt: task.retryAttempt,
       failureReason: result.reason,
@@ -1188,6 +1287,7 @@ function handleDispatchResultForRetry(deps: HandleDispatchResultForRetryDeps): v
   const workspacePath = task.retryFrom?.workspacePath ?? deps.resolveWorkspacePath(task);
   const now = clock();
   const entry = retryQueue.schedule({
+    kind: 'failure',
     issueNumber: task.candidate.issueNumber,
     repository: { owner: task.repository.owner, name: task.repository.name },
     branch,
@@ -1200,6 +1300,7 @@ function handleDispatchResultForRetry(deps: HandleDispatchResultForRetryDeps): v
     maxBackoffMs: maxRetryBackoffMs,
   });
   logger.info('retry scheduled', {
+    kind: entry.kind,
     issueNumber: entry.issueNumber,
     attempt: entry.attempt,
     delayMs: entry.dueAt.getTime() - now.getTime(),
@@ -1209,7 +1310,114 @@ function handleDispatchResultForRetry(deps: HandleDispatchResultForRetryDeps): v
   });
 }
 
+async function processDispatchSuccessForContinuation(
+  deps: ProcessDispatchResultDeps,
+): Promise<void> {
+  const {
+    task,
+    result,
+    retryQueue,
+    maxRetryAttempts,
+    config,
+    dispatchStatuses,
+    logger,
+    clock,
+    resolveContinuationCandidates,
+  } = deps;
+  if (result.kind !== 'success') return;
+  if (retryQueue === undefined) return;
+
+  // retry 機能 off (= max_retry_attempts == 0) のときは継続せず queue を空にして終わる
+  // (retry 中の entry が success に至ったケースを含めて queue から落とす)。
+  if (maxRetryAttempts <= 0) {
+    retryQueue.remove(task.candidate.issueNumber);
+    return;
+  }
+
+  const candidates = await resolveContinuationCandidates();
+  if (candidates === null) {
+    retryQueue.remove(task.candidate.issueNumber);
+    logger.info('continuation released', {
+      issueNumber: task.candidate.issueNumber,
+      reason: 'fetch_error',
+      lastRunId: result.runId,
+    });
+    return;
+  }
+
+  const candidate = candidates.find((c) => c.issueNumber === task.candidate.issueNumber);
+  const decision = evaluateContinuationDecision({
+    candidate,
+    config,
+    dispatchStatuses,
+  });
+
+  if (decision.kind === 'release') {
+    retryQueue.remove(task.candidate.issueNumber);
+    logger.info('continuation released', {
+      issueNumber: task.candidate.issueNumber,
+      reason: decision.reason,
+      status: candidate?.status ?? null,
+      lastRunId: result.runId,
+    });
+    return;
+  }
+
+  // continuation を schedule (attempt は kind 別カウンタ)
+  const nextAttempt = nextAttemptForKind(task, 'continuation');
+  if (nextAttempt > maxRetryAttempts) {
+    retryQueue.remove(task.candidate.issueNumber);
+    logger.warn('retry exhausted', {
+      kind: 'continuation',
+      issueNumber: task.candidate.issueNumber,
+      attempt: task.retryAttempt,
+      failureReason: null,
+      lastRunId: result.runId,
+    });
+    return;
+  }
+
+  const branch = result.branch ?? task.retryFrom?.branch ?? '(unknown)';
+  const workspacePath = task.retryFrom?.workspacePath ?? deps.resolveWorkspacePath(task);
+  const now = clock();
+  const entry = retryQueue.schedule({
+    kind: 'continuation',
+    issueNumber: task.candidate.issueNumber,
+    repository: { owner: task.repository.owner, name: task.repository.name },
+    branch,
+    workspacePath,
+    attempt: nextAttempt,
+    failureReason: null,
+    lastRunId: result.runId,
+    lastErrorSummary: null,
+    now,
+    maxBackoffMs: 0, // continuation は固定 delay
+  });
+  logger.info('retry scheduled', {
+    kind: entry.kind,
+    issueNumber: entry.issueNumber,
+    attempt: entry.attempt,
+    delayMs: entry.dueAt.getTime() - now.getTime(),
+    dueAt: entry.dueAt.toISOString(),
+    failureReason: entry.failureReason,
+    lastRunId: entry.lastRunId,
+    activeStatus: decision.status,
+  });
+}
+
+/**
+ * 次の attempt 番号を計算する。
+ *
+ * 直前の dispatch (= `task`) の kind と新しい kind が一致すれば counter +1。
+ * 違えばリセット (1 から)。fresh candidate (`retryFrom === null`) は常に 1。
+ */
+function nextAttemptForKind(task: DispatchTask, newKind: RetryKind): number {
+  if (task.retryFrom === null) return 1;
+  if (task.retryFrom.kind === newKind) return task.retryAttempt + 1;
+  return 1;
+}
+
 export {
   drainRetryQueue as drainRetryQueueForTest,
-  handleDispatchResultForRetry as handleDispatchResultForRetryForTest,
+  processDispatchResultForRetry as processDispatchResultForRetryForTest,
 };

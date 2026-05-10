@@ -54,11 +54,12 @@ export type RetryQueueStateJson = {
   max_attempts: number;
   max_backoff_ms: number;
   entries: Array<{
+    kind: 'failure' | 'continuation';
     issue_number: number;
     attempt: number;
     due_at: string;
     scheduled_at: string;
-    failure_reason: string;
+    failure_reason: string | null;
     last_run_id: string;
     last_error_summary: string | null;
   }>;
@@ -147,6 +148,7 @@ function retryQueueToJson(
 
 function toRetryEntryJson(entry: RetryEntry): RetryQueueStateJson['entries'][number] {
   return {
+    kind: entry.kind,
     issue_number: entry.issueNumber,
     attempt: entry.attempt,
     due_at: entry.dueAt.toISOString(),

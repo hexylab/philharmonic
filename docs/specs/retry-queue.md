@@ -2,38 +2,61 @@
 
 ## 概要
 
-`philharmonic serve` daemon の **in-memory retry queue** の仕様。`workspace_provisioning` / `runner_error` / `timeout` / `stalled` / `hook_failed` のいずれかで失敗した dispatch を、Symphony と同じ指数バックオフ (`10s * 2^(attempt-1)` を `agent.max_retry_backoff_ms` で clamp) で自動的に再 dispatch する。永続化は **しない** (daemon プロセスを跨いだ retry は recovery が引き受ける)。
+`philharmonic serve` daemon の **in-memory retry queue** の仕様。以下 2 種類の自動再 dispatch を 1 本の queue で扱う。
+
+- **failure retry** (ADR-0008): `workspace_provisioning` / `runner_error` / `timeout` / `stalled` / `hook_failed` のいずれかで失敗した dispatch を、Symphony と同じ指数バックオフ (`10s * 2^(attempt-1)` を `agent.max_retry_backoff_ms` で clamp) で自動的に再 dispatch する
+- **continuation retry** (ADR-0009): agent が正常終了したのに Issue が active (Todo / In Progress) のままなら、短い固定 delay 後に Status を再確認して必要なら再 dispatch する
+
+永続化は **しない** (daemon プロセスを跨いだ retry は recovery が引き受ける)。
 
 ## 関連 Issue
 
 - Issue #84 — 失敗・stalled run を指数バックオフで自動リトライする
-- ADR: [ADR-0008 失敗 / stalled run を指数バックオフで再 dispatch する in-memory retry queue を導入する](../adr/0008-in-memory-retry-queue.md)
+- Issue #85 — 正常終了後も Issue が active なら continuation retry で再確認する
+- ADR: [ADR-0008 失敗 / stalled run を指数バックオフで再 dispatch する in-memory retry queue を導入する](../adr/0008-in-memory-retry-queue.md), [ADR-0009 agent run の正常終了後に Issue が active のままなら continuation retry で再確認する](../adr/0009-continuation-retry-after-success.md)
 - 関連 spec: [serve-daemon.md](./serve-daemon.md), [orchestration-mvp.md](./orchestration-mvp.md), [snapshot-api.md](./snapshot-api.md), [config-schema.md](./config-schema.md)
 - 関連 ADR: [ADR-0005 §7 worktree cleanup の trigger 簡素化](../adr/0005-thin-orchestrator-agent-delegation.md), [ADR-0005 §8 retry-state は撤廃](../adr/0005-thin-orchestrator-agent-delegation.md)
 
 ## 用語
 
-| 用語            | 意味                                                                                           |
-| --------------- | ---------------------------------------------------------------------------------------------- |
-| **retry queue** | daemon プロセス内に 1 つ存在する in-memory な待機列。`Map<issueNumber, RetryEntry>` で実装する |
-| **retry entry** | 1 件の retry 情報。issueNumber / attempt / dueAt / failureReason / branch / workspacePath ほか |
-| **attempt**     | retry の試行番号 (1-indexed)。初回 dispatch は attempt 0 扱いで queue に積まれない             |
-| **drain**       | `dueAt <= now` を満たす entry を queue から pop すること                                       |
-| **schedule**    | dispatch 失敗を受けて retry entry を queue に enqueue する操作                                 |
-| **exhausted**   | `attempt > max_retry_attempts` で queue から落とす状態                                         |
+| 用語                  | 意味                                                                                                              |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| **retry queue**       | daemon プロセス内に 1 つ存在する in-memory な待機列。`Map<issueNumber, RetryEntry>` で実装する                    |
+| **retry entry**       | 1 件の retry 情報。issueNumber / kind / attempt / dueAt / failureReason / branch / workspacePath ほか             |
+| **kind**              | `'failure'` (失敗起因) / `'continuation'` (success 起因かつ Status が active のまま) のいずれか                   |
+| **attempt**           | retry の試行番号 (1-indexed)。初回 dispatch は attempt 0 扱いで queue に積まれない。kind 切替時はカウンタリセット |
+| **drain**             | `dueAt <= now` を満たす entry を queue から pop すること                                                          |
+| **schedule**          | dispatch 失敗 / 成功時の active 残存を受けて retry entry を queue に enqueue する操作                             |
+| **exhausted**         | `attempt > max_retry_attempts` で queue から落とす状態 (failure / continuation 共通)                              |
+| **continuation 解放** | success 後の Status 再確認で terminal / inactive / closed が判明し、queue に積まずに終了する状態                  |
 
 ## 要件
 
-- `agent.max_retry_attempts >= 1` のとき、retry-eligible failure (本 spec [対象 failure](#対象-failure-failurereason)) を受けて自動的に retry queue に積む
-- `agent.max_retry_attempts == 0` のとき、retry queue は **常に空** (機能 off)
-- backoff は `min(10_000 * 2^(attempt - 1), max_retry_backoff_ms)` で計算 (ms 単位)
+### failure / continuation 共通
+
+- `agent.max_retry_attempts >= 1` のとき機能 on (failure / continuation 両方)。`agent.max_retry_attempts == 0` のとき queue は **常に空** (機能 off)
 - retry の dispatch は **次の poll tick 以降の `dueAt <= now`** を満たす最初の tick で発火する。同 tick 内の即時 sleep は行わない
 - 各 retry の dispatch 直前に **`getIssue` と `fetchProjectCandidates` を再取得** し、Issue / Project Status が active でないなら drop する (詳細: [Status 再取得](#status-再取得))
 - retry の dispatch は `agent.max_concurrent_agents` の slot を **最優先で消費** する。残り slot 件数だけ通常 candidate selection を呼ぶ
-- 同一 Issue が retry queue に **同時に複数 entry 存在しない** (Map で `issueNumber` キーで dedup する)
-- retry 中の Issue が `runTracker.getRunningByIssue !== null` のとき、その entry は dispatch せずに **同じ attempt のまま `dueAt` を `now + 10s` に再 schedule** (重複 dispatch を防ぐ)
-- recovery 経路 (`recoverInProgress`) で `dispatchSelected` が failed を返した場合も、同じ規則で retry queue に積む (queue が DI で渡されているとき)
+- 同一 Issue が retry queue に **同時に複数 entry 存在しない** (Map で `issueNumber` キーで dedup する)。`kind` が異なっても同居しない
+- retry 中の Issue が `runTracker.getRunningByIssue !== null` のとき、その entry は dispatch せずに **同じ attempt / 同じ kind のまま `dueAt` を `now + 10s` に再 schedule** (重複 dispatch を防ぐ)
+- 通常 candidate selection では、**queue に entry がある Issue を skip する** (`DispatchGuard.inRetryQueue`)。failure では worktree が残るため `workspaceExists` で弾けるが、continuation では worktree が cleanup 済みのため queue 参照が必須
+- recovery 経路 (`recoverInProgress`) で `dispatchSelected` が failed / success を返した場合も、同じ規則で retry queue に積む (queue が DI で渡されているとき)
 - `philharmonic run` (1 ターン CLI) は retry queue を持たない (queue を渡さなければ動作変更なし)
+
+### failure retry (kind=`failure`)
+
+- retry-eligible failure (本 spec [対象 failure](#対象-failure-failurereason)) を受けて自動的に積む
+- backoff は `min(10_000 * 2^(attempt - 1), max_retry_backoff_ms)` で計算 (ms 単位)
+
+### continuation retry (kind=`continuation`)
+
+- `dispatchSelected` が `success` を返した直後に `fetchProjectCandidates` で当該 Issue の最新 Status を再取得
+- Status が `dispatch_statuses ∪ {status_transitions.in_progress}` に含まれるなら **active** とみなし、continuation entry を schedule
+- それ以外 (`in_review` / `failed` / `Done` / Issue closed / candidate に居ない) なら **release** (queue に積まない)
+- delay は **固定値** `CONTINUATION_RETRY_DELAY_MS = 10_000` ms。`max_retry_backoff_ms` には依存しない
+- attempt は failure とは **独立にカウント**。kind 切替時はカウンタリセット。上限は `max_retry_attempts` を共有
+- `failureReason` / `lastErrorSummary` は always `null`
 
 ## 非機能要件
 
@@ -48,20 +71,23 @@
 
 ```ts
 type RetryEntry = {
+  kind: 'failure' | 'continuation';
   issueNumber: number;
   repository: { owner: string; name: string };
   branch: string;
   workspacePath: string;
-  attempt: number; // 1-indexed retry attempt
+  attempt: number; // 1-indexed retry attempt (kind 内で独立にカウント)
   dueAt: Date; // ISO 8601 ms 精度
   scheduledAt: Date;
-  failureReason: FailureReason;
+  failureReason: FailureReason | null; // kind=continuation のとき null
   lastRunId: string;
-  lastErrorSummary: string | null;
+  lastErrorSummary: string | null; // kind=continuation のとき null
 };
 ```
 
 `FailureReason` は `src/orchestrator/errors.ts` の type ([対象 failure](#対象-failure-failurereason) と同じ列挙)。`lastErrorSummary` は `markFailed` が `describeError(error)` または `RunResult.rawStderrTail` から組み立てた `errorSummary` (先頭最大 500 文字) を `RunOnceResult.failed.errorSummary` 経由で受け取る。`runConcurrent` の dispatch worker が想定外 throw した場合は catch 句で同様に `describeError(error)` から作る。
+
+continuation kind では `failureReason` / `lastErrorSummary` は常に null (success 経路で積まれるため)。
 
 ### 対象 failure (`failureReason`)
 
@@ -79,12 +105,14 @@ type RetryEntry = {
 
 ```ts
 type RetryQueue = {
-  /** 既存 entry があれば差し替える (同一 issueNumber は 1 件だけ) */
+  /** 既存 entry があれば差し替える (同一 issueNumber は 1 件だけ。kind 違いも上書き) */
   schedule(input: ScheduleInput): RetryEntry;
   /** dueAt <= now の entry を取り出して queue から消す。残りは保持 */
   drainDue(now: Date): RetryEntry[];
-  /** 任意 issue を queue から落とす (success 時 / exhausted 時に呼ぶ) */
+  /** 任意 issue を queue から落とす (success 時の release / exhausted 時に呼ぶ) */
   remove(issueNumber: number): boolean;
+  /** dispatch ガード用: 該当 Issue が queue に居るかどうか (kind 問わず) */
+  has(issueNumber: number): boolean;
   /** dispatch 直前の重複防止用: tracker_in_flight だった entry を 10s 後に積み直す */
   reschedule(input: RescheduleInput): RetryEntry;
   /** Snapshot API 用。dueAt 昇順 */
@@ -94,16 +122,17 @@ type RetryQueue = {
 };
 
 type ScheduleInput = {
+  kind: 'failure' | 'continuation';
   issueNumber: number;
   repository: { owner: string; name: string };
   branch: string;
   workspacePath: string;
   attempt: number; // schedule する attempt 番号 (1-indexed)
-  failureReason: FailureReason;
+  failureReason: FailureReason | null; // kind=continuation のとき null
   lastRunId: string;
   lastErrorSummary: string | null;
   now: Date;
-  maxBackoffMs: number;
+  maxBackoffMs: number; // kind=continuation では無視 (固定 delay)
 };
 
 type RescheduleInput = {
@@ -123,6 +152,8 @@ function computeRetryDelayMs(attempt: number, maxBackoffMs: number): number {
 ```
 
 `attempt < 1` は呼び出し側のバグ。defensive に `attempt = 1` として扱う (実装上は `Math.max(1, attempt)` で clamp)。
+
+continuation の delay は固定値 `CONTINUATION_RETRY_DELAY_MS = 10_000` を使う (computeRetryDelayMs は使わない)。
 
 ## API / インターフェース
 
@@ -147,36 +178,62 @@ type RunOnceDeps = {
 
 ```
 each tick:
-  1. retry queue から drainDue(now) で due な entry を pop
+  1. retry queue から drainDue(now) で due な entry を pop (kind 問わず)
   2. 各 entry について:
-     2.1 runTracker.getRunningByIssue(issueNumber) !== null → reschedule(10s 後), drop from this tick
-     2.2 getIssue で再取得 → state === 'closed' なら remove(), `retry skipped reason=closed` info ログ
-     2.3 fetchProjectCandidates で再取得 → status が "active 範囲" 外なら remove(), `retry skipped reason=terminal_status / inactive_status` info ログ
+     2.1 runTracker.getRunningByIssue(issueNumber) !== null → 同 kind / 同 attempt のまま reschedule(10s 後), drop from this tick
+     2.2 getIssue で再取得 → state === 'closed' なら remove(), `retry skipped reason=closed kind=...` info ログ
+     2.3 fetchProjectCandidates で再取得 → status が "active 範囲" 外なら remove(), `retry skipped reason=terminal_status / inactive_status kind=...` info ログ
          active 範囲 = dispatch_statuses ∪ {status_transitions.in_progress}
      2.4 上記合格なら retry task に積む
   3. retry tasks の件数 M。fresh slots = max(0, max_concurrent_agents - M)
-  4. fresh_slots > 0 なら通常 candidate selection を呼ぶ (fresh tasks; 既存挙動)
+  4. fresh_slots > 0 なら通常 candidate selection を呼ぶ
+     4.1 DispatchGuard.inRetryQueue(issueNumber) が true の Issue は skip (`retry_queued`)
+     4.2 残りは既存挙動 (status / assignee / dependency / workspaceExists / isRunning)
   5. retry tasks + fresh tasks (合計 ≤ max_concurrent_agents) を dispatchPool に投入
-     5.1 retry task の場合: dispatchSelected を呼ぶ前に cleanupWorkspace で worktree を force reset
+     5.1 retry task の場合 (failure / continuation 共通): dispatchSelected を呼ぶ前に cleanupWorkspace で worktree を force reset
      5.2 dispatchSelected を呼ぶ
   6. 各 dispatch 結果を集計:
-     6.1 success → retryQueue.remove(issueNumber)
-     6.2 failed (retry-eligible) かつ attempt + 1 <= max_retry_attempts → schedule(attempt + 1)
-     6.3 failed (retry-eligible) かつ attempt + 1 > max_retry_attempts → remove() + `retry exhausted` warn
+     6.1 success → fetchProjectCandidates で当該 Issue の最新 Status を再取得 (runConcurrent では同 tick 内で 1 回に共有)
+         6.1.1 active なら continuation entry を schedule (kind=continuation, fixed delay 10s, attempt は kind 別カウンタ +1)
+         6.1.2 attempt が max_retry_attempts 超 → remove() + `retry exhausted kind=continuation` warn
+         6.1.3 inactive / terminal / closed / fetch error なら remove() + `continuation released reason=...` info
+     6.2 failed (retry-eligible) かつ attempt + 1 <= max_retry_attempts → schedule(kind=failure, attempt + 1)
+     6.3 failed (retry-eligible) かつ attempt + 1 > max_retry_attempts → remove() + `retry exhausted kind=failure` warn
+     6.4 failed (retry 対象外) → 既存挙動 (queue に触らない)
   7. sleep
 ```
 
-retry entry の `attempt` は **その entry が現在保持している試行番号** (= 直前に失敗した attempt)。tick 内で再 dispatch するときの「次回 attempt」は `attempt + 1`、ただし「初回失敗 → 初 schedule」のときは attempt=1 で schedule する (attempt 0 は queue に積まない)。
+retry entry の `attempt` は **その entry が現在保持している試行番号** (= 直前の dispatch の試行回数)。tick 内で再 dispatch するときの「次回 attempt」は同じ kind なら `attempt + 1`、kind が切り替わるなら `1` から (counter リセット)。「初回失敗 → 初 failure schedule」も「初回 success → 初 continuation schedule」も attempt=1 で schedule する (attempt 0 は queue に積まない)。
 
-具体的な遷移:
+具体的な遷移 (failure):
 
 ```
 初回 dispatch (attempt 0) 失敗
-  → schedule(attempt = 1, dueAt = now + 10s)
-attempt 1 の retry dispatch 失敗
-  → schedule(attempt = 2, dueAt = now + 20s)
-attempt 5 の retry dispatch 失敗 (max_retry_attempts = 5)
-  → remove() + retry exhausted warn (max_retry_attempts == attempt なので further schedule しない)
+  → schedule(kind=failure, attempt = 1, dueAt = now + 10s)
+failure attempt 1 の retry dispatch 失敗
+  → schedule(kind=failure, attempt = 2, dueAt = now + 20s)
+failure attempt 5 の retry dispatch 失敗 (max_retry_attempts = 5)
+  → remove() + `retry exhausted kind=failure` warn
+```
+
+具体的な遷移 (continuation):
+
+```
+初回 dispatch success かつ Status active
+  → schedule(kind=continuation, attempt = 1, dueAt = now + 10s)
+continuation attempt 1 の retry dispatch success かつ Status active
+  → schedule(kind=continuation, attempt = 2, dueAt = now + 10s)
+continuation attempt 5 の retry dispatch success かつ Status active (max_retry_attempts = 5)
+  → remove() + `retry exhausted kind=continuation` warn
+```
+
+kind 切替の例:
+
+```
+failure attempt 2 dispatch success かつ Status active
+  → schedule(kind=continuation, attempt = 1, ...)  -- counter リセット
+continuation attempt 2 dispatch failed (runner_error)
+  → schedule(kind=failure, attempt = 1, ...)  -- counter リセット
 ```
 
 ### Status 再取得
@@ -214,6 +271,7 @@ await deps.workspaceManager.cleanupWorkspace({
     "max_backoff_ms": 300000,
     "entries": [
       {
+        "kind": "failure",
         "issue_number": 42,
         "attempt": 2,
         "due_at": "2026-05-09T00:00:50.000Z",
@@ -221,26 +279,37 @@ await deps.workspaceManager.cleanupWorkspace({
         "failure_reason": "runner_error",
         "last_run_id": "0190ce80-...",
         "last_error_summary": "claude exited with code 1: ..."
+      },
+      {
+        "kind": "continuation",
+        "issue_number": 43,
+        "attempt": 1,
+        "due_at": "2026-05-09T00:01:00.000Z",
+        "scheduled_at": "2026-05-09T00:00:50.000Z",
+        "failure_reason": null,
+        "last_run_id": "0190ce80-...",
+        "last_error_summary": null
       }
     ]
   }
 }
 ```
 
-| フィールド                     | 型             | 説明                                                                              |
-| ------------------------------ | -------------- | --------------------------------------------------------------------------------- |
-| `retry_queue`                  | object \| null | retry queue が無効 (`max_retry_attempts == 0`) または queue 未注入時は null       |
-| `retry_queue.size`             | integer        | 現在の entry 件数                                                                 |
-| `retry_queue.max_attempts`     | integer        | `agent.max_retry_attempts` の現値 (運用者の参照用)                                |
-| `retry_queue.max_backoff_ms`   | integer        | `agent.max_retry_backoff_ms` の現値                                               |
-| `retry_queue.entries[]`        | array          | dueAt 昇順                                                                        |
-| `entries[].issue_number`       | integer        | Issue 番号                                                                        |
-| `entries[].attempt`            | integer        | 1-indexed retry 試行番号                                                          |
-| `entries[].due_at`             | ISO 8601       | 次に dispatch される予定時刻                                                      |
-| `entries[].scheduled_at`       | ISO 8601       | この entry が積まれた時刻                                                         |
-| `entries[].failure_reason`     | string         | `workspace_provisioning` / `runner_error` / `timeout` / `stalled` / `hook_failed` |
-| `entries[].last_run_id`        | string         | 直近失敗した run id                                                               |
-| `entries[].last_error_summary` | string \| null | エラーメッセージの先頭 500 文字以内                                               |
+| フィールド                     | 型                              | 説明                                                                                                                |
+| ------------------------------ | ------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `retry_queue`                  | object \| null                  | retry queue が無効 (`max_retry_attempts == 0`) または queue 未注入時は null                                         |
+| `retry_queue.size`             | integer                         | 現在の entry 件数                                                                                                   |
+| `retry_queue.max_attempts`     | integer                         | `agent.max_retry_attempts` の現値 (運用者の参照用)                                                                  |
+| `retry_queue.max_backoff_ms`   | integer                         | `agent.max_retry_backoff_ms` の現値                                                                                 |
+| `retry_queue.entries[]`        | array                           | dueAt 昇順                                                                                                          |
+| `entries[].kind`               | `"failure"` \| `"continuation"` | retry の種類。`failure` は ADR-0008、`continuation` は ADR-0009                                                     |
+| `entries[].issue_number`       | integer                         | Issue 番号                                                                                                          |
+| `entries[].attempt`            | integer                         | 1-indexed retry 試行番号 (kind 内で独立にカウント)                                                                  |
+| `entries[].due_at`             | ISO 8601                        | 次に dispatch される予定時刻                                                                                        |
+| `entries[].scheduled_at`       | ISO 8601                        | この entry が積まれた時刻                                                                                           |
+| `entries[].failure_reason`     | string \| null                  | failure: `workspace_provisioning` / `runner_error` / `timeout` / `stalled` / `hook_failed`。continuation: 常に null |
+| `entries[].last_run_id`        | string                          | 直近の run id (failure: 失敗した run / continuation: success した run)                                              |
+| `entries[].last_error_summary` | string \| null                  | failure 時のエラー先頭 500 文字。continuation では常に null                                                         |
 
 「古い (本フィールドを実装していない) serve」が response から `retry_queue` を完全に省略するパターンも client 側で考慮する (TypeScript 上 `retry_queue?: ...` の **optional** にする)。
 
@@ -260,13 +329,15 @@ retry queue 上の entry は **`/api/v1/<issue_number>` には載せない** (= 
 
 ## 構造化ログ
 
-| level | msg                 | fields                                                                                                                      |
-| ----- | ------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| info  | `retry scheduled`   | `issueNumber`, `attempt`, `delayMs`, `dueAt`, `failureReason`, `lastRunId`                                                  |
-| info  | `retry due`         | `issueNumber`, `attempt`, `lastRunId`                                                                                       |
-| info  | `retry skipped`     | `issueNumber`, `attempt`, `reason` (`closed` / `terminal_status` / `inactive_status` / `fetch_error` / `tracker_in_flight`) |
-| warn  | `retry exhausted`   | `issueNumber`, `attempt`, `failureReason`, `lastRunId`                                                                      |
-| warn  | `retry drain error` | `error`                                                                                                                     |
+| level | msg                             | fields                                                                                                                                   |
+| ----- | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| info  | `retry scheduled`               | `kind`, `issueNumber`, `attempt`, `delayMs`, `dueAt`, `failureReason` (continuation では null), `lastRunId`, `via` (recovery 経由のとき) |
+| info  | `retry due`                     | `kind`, `issueNumber`, `attempt`, `lastRunId`                                                                                            |
+| info  | `retry skipped`                 | `kind`, `issueNumber`, `attempt`, `reason` (`closed` / `terminal_status` / `inactive_status` / `fetch_error` / `tracker_in_flight`)      |
+| warn  | `retry exhausted`               | `kind`, `issueNumber`, `attempt`, `failureReason` (continuation では null), `lastRunId`                                                  |
+| warn  | `retry drain error`             | `error`                                                                                                                                  |
+| info  | `continuation released`         | `issueNumber`, `reason` (`closed` / `terminal_status` / `inactive_status` / `fetch_error`), `status` (取得できたとき), `lastRunId`       |
+| info  | `skip candidate (retry queued)` | `issueNumber` — `DispatchGuard.inRetryQueue` が true で fresh selection から skip した                                                   |
 
 `concurrent tick` ログには `retries` フィールドを追加する (= 当 tick で dispatch する retry 件数)。
 
@@ -287,10 +358,12 @@ retry queue 上の entry は **`/api/v1/<issue_number>` には載せない** (= 
 ## オープンクエスチョン
 
 - failureReason 別に retry on/off を切り替える config 拡張 (例: `hook_failed` は人間が直すまで retry させない) — 必要になったら別 PR
+- continuation 専用の cap / delay を `agent.continuation_*` で別設定可能にする — failure と同 cap で運用上問題が出てから検討
 - retry queue を `/api/v1/refresh` で強制 drain する API — 認証導入後の別 Issue
 - TUI dashboard (ADR-0006) の Retry section 表示 — 後続 PR で `retry_queue` field を購読する
 - multi-host 跨ぎの retry queue 共有 — multi-host orchestration ADR で扱う (MVP out-of-scope)
 - attempt counter を runlog に記録する — 個別 retry の root cause を後追いするため。`<run-id>/metadata.json` に `retryAttempt` を追加する案あり (本 spec では未採用)
+- continuation drain 時に DAG (ADR-0007) を再評価して blocked なら release する — 短い delay の間に依存先が増えるケースは稀だが、別 PR で追加する余地あり
 
 ## MVP でやらないこと
 

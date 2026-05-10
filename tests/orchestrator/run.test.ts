@@ -808,6 +808,58 @@ describe('runConcurrent (ADR-0005: 薄い orchestrator)', () => {
     expect(outcomes).toHaveLength(1);
     expect(outcomes[0]?.result.issueNumber).toBe(201);
   });
+
+  it('複数 success の continuation 判定で fetchProjectCandidates は 1 tick で 2 回 (initial + 共有 1 回) に抑える (#85 / ADR-0009)', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue();
+
+    const candidates: Candidate[] = [
+      { ...SAMPLE_CANDIDATE, itemId: 'A', issueNumber: 101, status: 'In Review' },
+      { ...SAMPLE_CANDIDATE, itemId: 'B', issueNumber: 102, status: 'In Review' },
+    ];
+    const initial: Candidate[] = [
+      { ...SAMPLE_CANDIDATE, itemId: 'A', issueNumber: 101 }, // Todo (dispatch 用)
+      { ...SAMPLE_CANDIDATE, itemId: 'B', issueNumber: 102 },
+    ];
+    const projects: ProjectsMock = {
+      fetchProjectCandidates: vi
+        .fn()
+        .mockResolvedValueOnce(initial) // initial selection
+        .mockResolvedValueOnce(candidates), // shared continuation re-fetch (1 回のみ)
+    };
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    workspace.resolveWorkspacePath.mockImplementation((key: string) => path.join(tempDir, key));
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+
+    let runIdSeq = 0;
+    await runConcurrent({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => {
+        runIdSeq += 1;
+        return `0190ce80-0000-7000-8000-00000000010${runIdSeq}`;
+      },
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
+      maxConcurrent: 2,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+    });
+
+    // initial selection: 1 回 + continuation 用 (2 success 共有): 1 回 = 計 2 回
+    expect(projects.fetchProjectCandidates).toHaveBeenCalledTimes(2);
+    // 両 Issue とも In Review (terminal) → release
+    expect(queue.size()).toBe(0);
+  });
 });
 
 describe('runOnce + retry queue (#84 / ADR-0008)', () => {
@@ -824,7 +876,7 @@ describe('runOnce + retry queue (#84 / ADR-0008)', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('retry-eligible failure で attempt=1 が schedule され、success で remove される', async () => {
+  it('retry-eligible failure で kind=failure attempt=1 が schedule される', async () => {
     const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
     const queue = createRetryQueue();
 
@@ -854,12 +906,14 @@ describe('runOnce + retry queue (#84 / ADR-0008)', () => {
     expect(failResult.reason).toBe('stalled');
     expect(queue.size()).toBe(1);
     const entry = queue.list()[0]!;
+    expect(entry.kind).toBe('failure');
     expect(entry.issueNumber).toBe(19);
     expect(entry.attempt).toBe(1);
     expect(entry.dueAt.toISOString()).toBe('2026-05-09T00:00:10.000Z');
     expect(entry.failureReason).toBe('stalled');
 
-    // 次の dispatch (success) で queue から消える
+    // 次の dispatch (success) で failure entry が消え、Issue がまだ active なら
+    // 同 Issue は continuation entry に置き換わる (ADR-0009)
     runClaudeMock.mockResolvedValueOnce(makeRunResult());
     const successResult = await runOnce({
       config: makeConfig(),
@@ -880,16 +934,22 @@ describe('runOnce + retry queue (#84 / ADR-0008)', () => {
     });
 
     expect(successResult.kind).toBe('success');
-    expect(queue.size()).toBe(0);
+    expect(queue.size()).toBe(1);
+    const continuation = queue.list()[0]!;
+    expect(continuation.kind).toBe('continuation');
+    expect(continuation.attempt).toBe(1); // counter リセット (failure → continuation)
+    expect(continuation.failureReason).toBeNull();
+    expect(continuation.dueAt.toISOString()).toBe('2026-05-09T00:00:40.000Z'); // 30s + 10s
   });
 
   it('attempt が max_retry_attempts に達したら exhausted になり queue から落とす', async () => {
     const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
     const queue = createRetryQueue();
 
-    // 既に attempt=5 で due な entry を仕込む (workspacePath は workspace.resolveWorkspacePath と一致させる必要あり)
+    // 既に kind=failure attempt=5 で due な entry を仕込む
     const workspacePath = path.join(tempDir, 'wt-retry');
     queue.schedule({
+      kind: 'failure',
       issueNumber: 19,
       repository: { owner: 'hexylab', name: 'philharmonic' },
       branch: 'feature/19-x',
@@ -938,6 +998,7 @@ describe('runOnce + retry queue (#84 / ADR-0008)', () => {
     const queue = createRetryQueue();
 
     queue.schedule({
+      kind: 'failure',
       issueNumber: 19,
       repository: { owner: 'hexylab', name: 'philharmonic' },
       branch: 'feature/19-x',
@@ -1062,5 +1123,346 @@ describe('runOnce + retry queue (#84 / ADR-0008)', () => {
     });
 
     expect(queue.size()).toBe(0);
+  });
+});
+
+describe('runOnce + continuation retry (#85 / ADR-0009)', () => {
+  let tempDir: string;
+  let workflowSource: WorkflowSource;
+
+  beforeEach(async () => {
+    tempDir = mkdtempSync(path.join(tmpdir(), 'phil-orch-cont-'));
+    workflowSource = await makeFallbackWorkflowSource(tempDir);
+  });
+
+  afterEach(async () => {
+    await workflowSource.close();
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('success かつ Issue が active のままなら continuation entry が固定 10s 後に schedule される', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue();
+
+    const projects = makeProjectsMock(); // SAMPLE_CANDIDATE.status === 'Todo' (active)
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const runClaudeMock = vi.fn(async () => makeRunResult()); // success
+    const logger = makeFakeLogger();
+
+    const result = await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+      logger,
+    });
+
+    expect(result.kind).toBe('success');
+    expect(queue.size()).toBe(1);
+    const entry = queue.list()[0]!;
+    expect(entry.kind).toBe('continuation');
+    expect(entry.attempt).toBe(1);
+    expect(entry.failureReason).toBeNull();
+    expect(entry.lastErrorSummary).toBeNull();
+    expect(entry.dueAt.toISOString()).toBe('2026-05-09T00:00:10.000Z');
+    // 構造化ログに kind=continuation で retry scheduled が出る
+    const scheduledLog = logger.info.mock.calls.find((c) => c[0] === 'retry scheduled');
+    expect(scheduledLog).toBeDefined();
+    const fields = scheduledLog?.[1] as Record<string, unknown>;
+    expect(fields['kind']).toBe('continuation');
+    expect(fields['delayMs']).toBe(10_000);
+  });
+
+  it('success だが Status が In Review (terminal) になっていれば release される', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue();
+
+    // 1 回目の fetchProjectCandidates は dispatch 用 (Todo)、2 回目は continuation 用 (In Review)
+    const candidateInReview: Candidate = { ...SAMPLE_CANDIDATE, status: 'In Review' };
+    const projects: ProjectsMock = {
+      fetchProjectCandidates: vi
+        .fn()
+        .mockResolvedValueOnce([SAMPLE_CANDIDATE])
+        .mockResolvedValueOnce([candidateInReview]),
+    };
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+    const logger = makeFakeLogger();
+
+    const result = await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+      logger,
+    });
+
+    expect(result.kind).toBe('success');
+    expect(queue.size()).toBe(0);
+    const released = logger.info.mock.calls.find((c) => c[0] === 'continuation released');
+    expect(released).toBeDefined();
+    const fields = released?.[1] as Record<string, unknown>;
+    expect(fields['reason']).toBe('terminal_status');
+    expect(fields['status']).toBe('In Review');
+  });
+
+  it('success だが Issue が close 済みなら release される', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue();
+
+    const closedCandidate: Candidate = {
+      ...SAMPLE_CANDIDATE,
+      issueState: 'CLOSED',
+      status: 'Done',
+    };
+    const projects: ProjectsMock = {
+      fetchProjectCandidates: vi
+        .fn()
+        .mockResolvedValueOnce([SAMPLE_CANDIDATE])
+        .mockResolvedValueOnce([closedCandidate]),
+    };
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+    const logger = makeFakeLogger();
+
+    await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+      logger,
+    });
+
+    expect(queue.size()).toBe(0);
+    const released = logger.info.mock.calls.find((c) => c[0] === 'continuation released');
+    expect(released?.[1]).toMatchObject({ reason: 'closed' });
+  });
+
+  it('continuation 中の Issue は fresh candidate selection から retry_queued で skip される', async () => {
+    // ADR-0009 §5: success で worktree が cleanup されている間に同 Issue を fresh selection が
+    // 拾わないことを保証する。
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue();
+
+    // 同 Issue を kind=continuation で先に積んでおく (まだ due ではないので drainDue では取れない)
+    queue.schedule({
+      kind: 'continuation',
+      issueNumber: SAMPLE_CANDIDATE.issueNumber,
+      repository: { owner: 'hexylab', name: 'philharmonic' },
+      branch: 'feature/19-x',
+      workspacePath: path.join(tempDir, 'wt'),
+      attempt: 1,
+      failureReason: null,
+      lastRunId: 'prev',
+      lastErrorSummary: null,
+      now: new Date('2026-05-09T00:00:00Z'),
+      maxBackoffMs: 0,
+    });
+
+    const projects = makeProjectsMock(); // SAMPLE_CANDIDATE.status === 'Todo'
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+    const logger = makeFakeLogger();
+
+    // continuation の dueAt は 00:00:10。clock を 00:00:05 に設定して drainDue が空になるようにする
+    const result = await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:05Z'),
+      pathExists: async () => false,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+      logger,
+    });
+
+    expect(result.kind).toBe('no_candidate');
+    expect(runClaudeMock).toHaveBeenCalledTimes(0);
+    expect(queue.size()).toBe(1); // continuation entry は据え置き
+    const skipped = logger.info.mock.calls.find((c) => c[0] === 'skip candidate (retry queued)');
+    expect(skipped).toBeDefined();
+  });
+
+  it('continuation attempt が max_retry_attempts に達したら exhausted になる', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue();
+
+    // attempt=5 の continuation entry が due な状態を作る
+    const workspacePath = path.join(tempDir, 'wt');
+    queue.schedule({
+      kind: 'continuation',
+      issueNumber: 19,
+      repository: { owner: 'hexylab', name: 'philharmonic' },
+      branch: 'feature/19-x',
+      workspacePath,
+      attempt: 5,
+      failureReason: null,
+      lastRunId: 'prev',
+      lastErrorSummary: null,
+      now: new Date('2026-05-09T00:00:00Z'),
+      maxBackoffMs: 0,
+    });
+
+    const projects = makeProjectsMock();
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(workspacePath);
+    const runClaudeMock = vi.fn(async () => makeRunResult()); // success
+    const logger = makeFakeLogger();
+
+    await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:30Z'),
+      pathExists: async () => false,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+      logger,
+    });
+
+    expect(queue.size()).toBe(0);
+    const exhausted = logger.warn.mock.calls.find((c) => c[0] === 'retry exhausted');
+    expect(exhausted?.[1]).toMatchObject({ kind: 'continuation', attempt: 5 });
+  });
+
+  it('success だが continuation 用の fetchProjectCandidates が失敗したら release される', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue();
+
+    const projects: ProjectsMock = {
+      fetchProjectCandidates: vi
+        .fn()
+        .mockResolvedValueOnce([SAMPLE_CANDIDATE]) // dispatch 用 (success まで進むため)
+        .mockRejectedValueOnce(new Error('boom')), // continuation 用 (release path)
+    };
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+    const logger = makeFakeLogger();
+
+    await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+      logger,
+    });
+
+    expect(queue.size()).toBe(0);
+    const released = logger.info.mock.calls.find((c) => c[0] === 'continuation released');
+    expect(released?.[1]).toMatchObject({ reason: 'fetch_error' });
+  });
+
+  it('continuation 中の Issue が success で再 dispatch されると attempt が +1 される', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue();
+
+    const workspacePath = path.join(tempDir, 'wt');
+    queue.schedule({
+      kind: 'continuation',
+      issueNumber: 19,
+      repository: { owner: 'hexylab', name: 'philharmonic' },
+      branch: 'feature/19-x',
+      workspacePath,
+      attempt: 1,
+      failureReason: null,
+      lastRunId: 'first-cont',
+      lastErrorSummary: null,
+      now: new Date('2026-05-09T00:00:00Z'),
+      maxBackoffMs: 0,
+    });
+
+    const projects = makeProjectsMock();
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(workspacePath);
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+
+    await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => '0190ce80-0000-7000-8000-000000000099',
+      clock: () => new Date('2026-05-09T00:00:30Z'),
+      pathExists: async () => false,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+    });
+
+    expect(queue.size()).toBe(1);
+    const entry = queue.list()[0]!;
+    expect(entry.kind).toBe('continuation');
+    expect(entry.attempt).toBe(2); // 1 → 2
+    expect(entry.lastRunId).toBe('0190ce80-0000-7000-8000-000000000099');
   });
 });
