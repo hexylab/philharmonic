@@ -31,6 +31,11 @@ export {
 } from './run.js';
 export { recoverInProgress, type RecoveryDeps, type RecoverySummary } from './recovery.js';
 export {
+  cleanupStaleWorktreesAtStartup,
+  type CleanupStaleWorktreesAtStartupDeps,
+  type CleanupStaleWorktreesSummary,
+} from './stale-cleanup.js';
+export {
   computeRetryDelayMs,
   CONTINUATION_RETRY_DELAY_MS,
   createRetryQueue,

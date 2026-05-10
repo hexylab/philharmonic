@@ -24,6 +24,7 @@ import {
 } from '../github/index.js';
 import { createLogger, type Logger } from '../logger/index.js';
 import {
+  cleanupStaleWorktreesAtStartup,
   createRetryQueue,
   recoverInProgress,
   runConcurrent,
@@ -61,6 +62,8 @@ import {
 } from '../workflow/index.js';
 import {
   createWorkspaceManager,
+  defaultGitRunner,
+  type GitRunner,
   type HookConfigMap,
   type WorkspaceManager,
 } from '../workspace/index.js';
@@ -108,6 +111,8 @@ export type ServeCommandDeps = {
   runConcurrent?: typeof runConcurrent;
   serveLoop?: typeof serveLoop;
   recoverInProgress?: typeof recoverInProgress;
+  cleanupStaleWorktreesAtStartup?: typeof cleanupStaleWorktreesAtStartup;
+  gitRunner?: GitRunner;
   createSignalSubscription?: CreateServeSignalSubscription;
   stdout?: NodeJS.WritableStream;
   stderr?: NodeJS.WritableStream;
@@ -137,6 +142,8 @@ const DEFAULT_DEPS: Required<ServeCommandDeps> = {
   runConcurrent,
   serveLoop,
   recoverInProgress,
+  cleanupStaleWorktreesAtStartup,
+  gitRunner: defaultGitRunner,
   createSignalSubscription: createProcessSignalSubscription,
   stdout: process.stdout,
   stderr: process.stderr,
@@ -464,6 +471,19 @@ async function runServeCommand(
       } catch (error) {
         logger.warn('recovery aborted', { error: describeError(error) });
       }
+    }
+
+    if (!controller.signal.aborted) {
+      await deps.cleanupStaleWorktreesAtStartup({
+        config,
+        repoRoot,
+        githubClient,
+        projectsClient,
+        workspaceManager,
+        gitRunner: deps.gitRunner,
+        runTracker,
+        logger,
+      });
     }
 
     await deps.serveLoop({

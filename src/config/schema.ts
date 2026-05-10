@@ -23,6 +23,7 @@ export const DEFAULT_STATUS_TRANSITION_IN_PROGRESS = 'In Progress';
 export const DEFAULT_STATUS_TRANSITION_IN_REVIEW = 'In Review';
 export const DEFAULT_STATUS_TRANSITION_FAILED = 'Failed';
 export const DEFAULT_CLEAN_RETENTION_DAYS = 7;
+export const DEFAULT_TERMINAL_STATUSES: readonly string[] = ['Done'];
 export const DEFAULT_LOG_LEVEL: LogLevel = 'info';
 export const DEFAULT_POLLING_INTERVAL_MS = 30_000;
 export const MIN_POLLING_INTERVAL_MS = 1_000;
@@ -199,6 +200,9 @@ const rawConfigSchema = z
       .array(z.string().min(1, 'dispatch_statuses の各要素は空文字以外で指定してください'))
       .min(1, 'dispatch_statuses は 1 件以上の文字列配列で指定してください')
       .default([...DEFAULT_DISPATCH_STATUSES]),
+    terminal_statuses: z
+      .array(z.string().min(1, 'terminal_statuses の各要素は空文字以外で指定してください'))
+      .default([...DEFAULT_TERMINAL_STATUSES]),
     status_transitions: statusTransitionsSchema,
     clean_retention_days: z
       .number({ message: 'clean_retention_days は 0 以上の数値で指定してください' })
@@ -226,6 +230,7 @@ export const configSchema = rawConfigSchema.transform((raw) => ({
   killGracePeriodMs: raw.kill_grace_period_ms,
   workspaceRoot: raw.workspace_root,
   dispatchStatuses: raw.dispatch_statuses,
+  terminalStatuses: raw.terminal_statuses,
   statusTransitions: {
     inProgress: raw.status_transitions.in_progress,
     inReview: raw.status_transitions.in_review,

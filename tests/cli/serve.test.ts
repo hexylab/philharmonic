@@ -669,6 +669,10 @@ describe('philharmonic serve CLI コマンド', () => {
         skipped: 0,
       };
     });
+    const cleanupStaleSpy = vi.fn(async () => {
+      order.push('staleCleanup');
+      return { scanned: 0, removed: 0, failed: 0, skipped: 0 };
+    });
     const serveLoopMock = vi.fn(async (deps: { signal: AbortSignal }) => {
       order.push('serveLoop');
       subscription.emit('SIGTERM');
@@ -690,12 +694,14 @@ describe('philharmonic serve CLI コマンド', () => {
       runOnce: vi.fn(),
       serveLoop: serveLoopMock as never,
       recoverInProgress: recoverySpy as never,
+      cleanupStaleWorktreesAtStartup: cleanupStaleSpy as never,
       createSignalSubscription: () => subscription,
     });
 
     expect(recoverySpy).toHaveBeenCalledTimes(1);
+    expect(cleanupStaleSpy).toHaveBeenCalledTimes(1);
     expect(serveLoopMock).toHaveBeenCalledTimes(1);
-    expect(order).toEqual(['recovery', 'serveLoop']);
+    expect(order).toEqual(['recovery', 'staleCleanup', 'serveLoop']);
     expect(lock.released).toBe(true);
   });
 

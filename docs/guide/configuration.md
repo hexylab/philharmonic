@@ -69,10 +69,11 @@ philharmonic init --dry-run --owner foo --project 1         # 書かずに内容
 
 ### Workspace / クリーンアップ
 
-| キー                   | 既定                      | 何が変わるか                                                                                                                             |
-| ---------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `workspace_root`       | `.philharmonic/worktrees` | git worktree の親ディレクトリ。相対パスは repo root 基準で解決                                                                           |
-| `clean_retention_days` | `7`                       | `philharmonic clean` で retention 経過済みと判定する日数。各 worktree の `mtime` が `now - clean_retention_days * 1day` 以下なら削除対象 |
+| キー                   | 既定                      | 何が変わるか                                                                                                                                                                                                                                              |
+| ---------------------- | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workspace_root`       | `.philharmonic/worktrees` | git worktree の親ディレクトリ。相対パスは repo root 基準で解決                                                                                                                                                                                            |
+| `clean_retention_days` | `7`                       | `philharmonic clean` で retention 経過済みと判定する日数。各 worktree の `mtime` が `now - clean_retention_days * 1day` 以下なら削除対象                                                                                                                  |
+| `terminal_statuses`    | `[Done]`                  | `philharmonic clean-stale` / `serve` 起動時の cleanup で terminal とみなす Status option 名の配列。custom Status (`Archived` 等) を使う Project は差し替える (詳細: [operations.md](./operations.md#philharmonic-clean-stale--terminal-issue-の自動掃除)) |
 
 ### `philharmonic serve` (常駐デーモン)
 
@@ -134,6 +135,8 @@ timeout_ms: 1800000
 
 workspace_root: .philharmonic/worktrees
 clean_retention_days: 7
+terminal_statuses:
+  - Done
 log_level: info
 
 polling:
