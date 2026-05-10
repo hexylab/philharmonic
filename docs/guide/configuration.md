@@ -2,21 +2,23 @@
 
 Philharmonic の挙動は次の 3 つを通じてカスタマイズします。
 
-1. `philharmonic.yaml` — Orchestrator / Runner / Workspace / serve daemon の設定値
-2. `WORKFLOW.md` — Claude Code に渡す prompt の上位レイヤ (Liquid テンプレート)
+1. `.philharmonic/philharmonic.yaml` — Orchestrator / Runner / Workspace / serve daemon の設定値
+2. `.philharmonic/WORKFLOW.md` — Claude Code に渡す prompt の上位レイヤ (Liquid テンプレート)
 3. Lifecycle hooks — workspace の各イベントで任意の shell コマンドを実行する
 
 本ドキュメントは利用者視点で「どこをいじると何が変わるか」を扱います。フィールドの全リファレンス (型 / 下限 / strict 検証の挙動など) は [`docs/specs/config-schema.md`](../specs/config-schema.md) を参照してください。
 
-## `philharmonic.yaml` の場所と最小構成
+## `.philharmonic/philharmonic.yaml` の場所と最小構成
 
-- 既定では Philharmonic を実行した cwd の `philharmonic.yaml` を読みます (`philharmonic run` / `philharmonic serve` / `philharmonic clean` 共通)
-- `--config <path>` で別パスを指定できます
+- 既定では Philharmonic を実行した cwd の `.philharmonic/philharmonic.yaml` を読みます (`philharmonic run` / `philharmonic serve` / `philharmonic clean` 共通)
+- 旧来の repo root 直下 `philharmonic.yaml` のみ存在する場合は当面 fallback で読み込み、warning を 1 行出します。`mv philharmonic.yaml .philharmonic/philharmonic.yaml` で移行してください (#67)
+- `--config <path>` で別パスを指定できます (legacy fallback の探索は行いません)
 - `~` 展開などは行いません (絶対パスか cwd 相対で渡す)
 
 最小構成は次の 2 行だけです:
 
 ```yaml
+# .philharmonic/philharmonic.yaml
 owner: your-github-login
 project_number: 1
 ```
@@ -25,7 +27,7 @@ project_number: 1
 
 ### `philharmonic init` で scaffold する (推奨)
 
-最小構成 + コメント化された default サンプルを 1 コマンドで生成できます (詳細手順: [getting-started.md#4-対象リポジトリで-philharmonic-init-を実行する](./getting-started.md#4-対象リポジトリで-philharmonic-init-を実行する))。
+最小構成 + コメント化された default サンプルを 1 コマンドで生成できます (詳細手順: [getting-started.md#4-対象リポジトリで-philharmonic-init-を実行する](./getting-started.md#4-対象リポジトリで-philharmonic-init-を実行する))。生成先は `.philharmonic/philharmonic.yaml` (および任意で `.philharmonic/WORKFLOW.md`) です (#67)。
 
 ```sh
 # 対象リポジトリのルートで
@@ -35,6 +37,8 @@ philharmonic init --dry-run --owner foo --project 1         # 書かずに内容
 ```
 
 生成 yaml は冒頭が `owner` / `project_number` のみ active で、`permission_mode` / `base_branch` / `polling` / `server` / `hooks` 等はコメントで default が同梱されます。`#` を外すと有効化できます。
+
+> Philharmonic 関連ファイルは原則 `.philharmonic/` 配下に集約されます (config / workflow テンプレート / worktree / run ログ / serve.lock)。`.gitignore` には `.philharmonic/worktrees/` / `.philharmonic/runs/` / `.philharmonic/serve.lock` のみを登録し、`.philharmonic/philharmonic.yaml` と `.philharmonic/WORKFLOW.md` は commit 可能にしておくと、チーム間で設定を共有しやすくなります (#67)。
 
 ## よく触るキーと使いどころ
 
@@ -54,14 +58,14 @@ philharmonic init --dry-run --owner foo --project 1         # 書かずに内容
 
 ### Runner (Claude Code) の挙動
 
-| キー                     | 既定              | 何が変わるか                                                                                                                                                                                                                                                                                                                                            |
-| ------------------------ | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `permission_mode`        | `auto`            | `auto` = `--permission-mode acceptEdits` (worktree 内編集のみ自動承認)。`bypass` = `--dangerously-skip-permissions` (**worktree 外、ホスト全体への副作用が起き得る**)。**ADR-0005 で agent 委譲型に切り替えたため、`auto` では Bash tool (`gh` / `git push`) を agent が呼べず、Status 遷移 / PR 作成が失敗します。実用上は `bypass` を選んでください** |
-| `timeout_ms`             | `1800000` (30 分) | Runner subprocess の timeout                                                                                                                                                                                                                                                                                                                            |
-| `kill_grace_period_ms`   | `5000` (5 秒)     | timeout 後 SIGTERM → SIGKILL までの猶予                                                                                                                                                                                                                                                                                                                 |
-| `agent.max_turns`        | `1`               | `1` で 1 セッション完結 (従来動作)。`>= 2` で `error_max_turns` で打ち切られたとき `--resume` で次ターンへ進む                                                                                                                                                                                                                                          |
-| `agent.stall_timeout_ms` | `300000` (5 分)   | Runner stdout の無音許容時間。`0` で stall 検知を無効化                                                                                                                                                                                                                                                                                                 |
-| `workflow_file`          | `WORKFLOW.md`     | リポジトリ直下の prompt テンプレートファイル名 (Liquid)。後述                                                                                                                                                                                                                                                                                           |
+| キー                     | 既定                        | 何が変わるか                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `permission_mode`        | `auto`                      | `auto` = `--permission-mode acceptEdits` (worktree 内編集のみ自動承認)。`bypass` = `--dangerously-skip-permissions` (**worktree 外、ホスト全体への副作用が起き得る**)。**ADR-0005 で agent 委譲型に切り替えたため、`auto` では Bash tool (`gh` / `git push`) を agent が呼べず、Status 遷移 / PR 作成が失敗します。実用上は `bypass` を選んでください** |
+| `timeout_ms`             | `1800000` (30 分)           | Runner subprocess の timeout                                                                                                                                                                                                                                                                                                                            |
+| `kill_grace_period_ms`   | `5000` (5 秒)               | timeout 後 SIGTERM → SIGKILL までの猶予                                                                                                                                                                                                                                                                                                                 |
+| `agent.max_turns`        | `1`                         | `1` で 1 セッション完結 (従来動作)。`>= 2` で `error_max_turns` で打ち切られたとき `--resume` で次ターンへ進む                                                                                                                                                                                                                                          |
+| `agent.stall_timeout_ms` | `300000` (5 分)             | Runner stdout の無音許容時間。`0` で stall 検知を無効化                                                                                                                                                                                                                                                                                                 |
+| `workflow_file`          | `.philharmonic/WORKFLOW.md` | prompt テンプレートファイルへのパス (Liquid、relative は repo root 基準)。default のときに不在で legacy `WORKFLOW.md` (repo root 直下) があれば warning 付きで採用 (#67)。後述                                                                                                                                                                          |
 
 ### Workspace / クリーンアップ
 
@@ -106,7 +110,7 @@ status_transitions:
 agent_user_login: philharmonic-bot
 base_branch: main
 
-workflow_file: WORKFLOW.md
+workflow_file: .philharmonic/WORKFLOW.md
 permission_mode: bypass # ADR-0005: agent 委譲型では bypass が実用上必須
 timeout_ms: 1800000
 
@@ -145,7 +149,9 @@ hooks:
 
 ## `WORKFLOW.md` で prompt をカスタマイズする
 
-リポジトリ直下に `WORKFLOW.md` を置くと、Claude Code に渡す prompt の **本体構造** をリポジトリごとに変えられます。`WORKFLOW.md` が無いリポジトリでは Issue body をそのまま埋めたデフォルト prompt が組み立てられます (構造化セクション必須は ADR-0005 で撤廃)。
+`.philharmonic/WORKFLOW.md` を置くと、Claude Code に渡す prompt の **本体構造** をリポジトリごとに変えられます。テンプレートが無いリポジトリでは Issue body をそのまま埋めたデフォルト prompt が組み立てられます (構造化セクション必須は ADR-0005 で撤廃)。
+
+> 旧来の `WORKFLOW.md` (repo root 直下) も当面 fallback として読まれますが、警告ログが出ます。`mv WORKFLOW.md .philharmonic/WORKFLOW.md` で移行してください (#67)。
 
 ### 仕組み
 

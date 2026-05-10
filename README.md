@@ -26,7 +26,7 @@ stateDiagram-v2
 - **Issue 本文は自由フォーマット**: `## Goal` / `## Constraints` / `## Acceptance Criteria` の必須セクション制約は撤廃。本文はそのまま agent に渡される
 - **タスクごとに git worktree で隔離**: 作業は `.philharmonic/worktrees/issue-<番号>/` の中だけ。ホスト環境を汚さず、複数タスクを並行して試せる
 - **daemon 運用に必要なものが揃っている**: SIGTERM で in-flight 完了待ちの graceful shutdown、起動時に `In Progress` を引き取る recovery、`max_concurrent_agents` で並列 dispatch、二重起動を防ぐ lock file、`localhost` の Snapshot HTTP API (`/api/v1/state`) で dashboard 連携も可能
-- **`WORKFLOW.md` で prompt をカスタマイズ**: Liquid テンプレートでリポジトリごとに Claude への指示を自由に組み立てられる
+- **`.philharmonic/WORKFLOW.md` で prompt をカスタマイズ**: Liquid テンプレートでリポジトリごとに Claude への指示を自由に組み立てられる
 - **Lifecycle hooks**: workspace 作成直後に `pnpm install`、削除直前に cleanup スクリプト、といった shell コマンドをイベントごとに差し込める
 
 ## 1 分で動かす
@@ -44,9 +44,10 @@ pnpm link --global
 # 2) GitHub token を環境変数に置く (Orchestrator + Runner の env allowlist 経由で agent も利用)
 export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 
-# 3) 動かしたい先のリポジトリに philharmonic.yaml を置く
+# 3) 動かしたい先のリポジトリに .philharmonic/philharmonic.yaml を置く (#67)
 cd /path/to/your-repo
-cat > philharmonic.yaml <<'EOF'
+mkdir -p .philharmonic
+cat > .philharmonic/philharmonic.yaml <<'EOF'
 owner: your-github-login
 project_number: 1
 EOF

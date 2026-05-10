@@ -66,7 +66,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     projectNumber: 1,
     baseBranch: 'main',
     statusField: 'Status',
-    workflowFile: 'WORKFLOW.md',
+    workflowFile: '.philharmonic/WORKFLOW.md',
     agentUserLogin: null,
     permissionMode: 'auto',
     timeoutMs: 30 * 60 * 1000,

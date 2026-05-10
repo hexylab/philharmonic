@@ -10,10 +10,16 @@ import {
   ConfigValidationError,
   type ConfigValidationIssue,
 } from './errors.js';
-import { configSchema, DEFAULT_CONFIG_FILE, type Config } from './schema.js';
+import { configSchema, DEFAULT_CONFIG_FILE, LEGACY_CONFIG_FILE, type Config } from './schema.js';
 
 export type LoadConfigOptions = {
   cwd?: string;
+  /**
+   * default パス (`.philharmonic/philharmonic.yaml`) が不在で、legacy `philharmonic.yaml`
+   * (repo root 直下) から読み込むことになったときに 1 度だけ呼ばれる。CLI 側で warning を
+   * 出すための seam (loader 自体は logger を持たない)。
+   */
+  onLegacyPathUsed?: (legacyPath: string, expectedPath: string) => void;
 };
 
 export async function loadConfig(
@@ -21,17 +27,11 @@ export async function loadConfig(
   options: LoadConfigOptions = {},
 ): Promise<Config> {
   const cwd = options.cwd ?? process.cwd();
-  const resolvedPath = configPath ?? path.resolve(cwd, DEFAULT_CONFIG_FILE);
-
-  let raw: string;
-  try {
-    raw = await readFile(resolvedPath, 'utf8');
-  } catch (error) {
-    if (isErrnoException(error) && error.code === 'ENOENT') {
-      throw new ConfigFileNotFoundError(resolvedPath);
-    }
-    throw error;
-  }
+  const { resolvedPath, raw } = await readConfigSource({
+    configPath,
+    cwd,
+    onLegacyPathUsed: options.onLegacyPathUsed,
+  });
 
   let parsed: unknown;
   try {
@@ -49,6 +49,58 @@ export async function loadConfig(
     throw toValidationError(result.error, resolvedPath);
   }
   return result.data;
+}
+
+type ReadConfigSourceInput = {
+  configPath: string | undefined;
+  cwd: string;
+  onLegacyPathUsed?: (legacyPath: string, expectedPath: string) => void;
+};
+
+type ReadConfigSourceResult = {
+  resolvedPath: string;
+  raw: string;
+};
+
+async function readConfigSource(input: ReadConfigSourceInput): Promise<ReadConfigSourceResult> {
+  if (input.configPath !== undefined) {
+    const explicitPath = input.configPath;
+    try {
+      const raw = await readFile(explicitPath, 'utf8');
+      return { resolvedPath: explicitPath, raw };
+    } catch (error) {
+      if (isErrnoException(error) && error.code === 'ENOENT') {
+        throw new ConfigFileNotFoundError(explicitPath);
+      }
+      throw error;
+    }
+  }
+
+  const defaultPath = path.resolve(input.cwd, DEFAULT_CONFIG_FILE);
+  const defaultRaw = await tryReadFile(defaultPath);
+  if (defaultRaw !== null) {
+    return { resolvedPath: defaultPath, raw: defaultRaw };
+  }
+
+  const legacyPath = path.resolve(input.cwd, LEGACY_CONFIG_FILE);
+  const legacyRaw = await tryReadFile(legacyPath);
+  if (legacyRaw !== null) {
+    input.onLegacyPathUsed?.(legacyPath, defaultPath);
+    return { resolvedPath: legacyPath, raw: legacyRaw };
+  }
+
+  throw new ConfigFileNotFoundError(defaultPath);
+}
+
+async function tryReadFile(filePath: string): Promise<string | null> {
+  try {
+    return await readFile(filePath, 'utf8');
+  } catch (error) {
+    if (isErrnoException(error) && error.code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
 }
 
 function toParseError(error: unknown, filePath: string): ConfigParseError {

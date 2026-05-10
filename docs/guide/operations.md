@@ -11,7 +11,7 @@
 | `philharmonic serve`         | 一定間隔でポーリングして候補があれば run を回す常駐デーモン (SIGTERM/SIGINT で graceful shutdown)       |
 | `philharmonic clean`         | retention 経過済みの `issue-*` worktree とローカルブランチを掃除する (失敗 worktree のクリーンアップ用) |
 
-すべてのコマンドで `--config <path>` が使えます (cwd 以外の `philharmonic.yaml` を指定するとき)。
+すべてのコマンドで `--config <path>` が使えます (cwd 以外の `.philharmonic/philharmonic.yaml` を指定するとき)。
 
 ## `philharmonic projects list` — 候補確認
 
@@ -36,7 +36,7 @@ philharmonic projects list --owner <owner> --project <project-number> --json
 philharmonic run
 
 # 別パスの設定ファイルを指定する場合
-philharmonic run --config ./path/to/philharmonic.yaml
+philharmonic run --config ./path/to/.philharmonic/philharmonic.yaml
 ```
 
 stdout / stderr の出力は次のとおり。
@@ -61,7 +61,7 @@ stdout / stderr の出力は次のとおり。
 philharmonic serve
 
 # 別パスの設定ファイルを指定する場合
-philharmonic serve --config ./path/to/philharmonic.yaml
+philharmonic serve --config ./path/to/.philharmonic/philharmonic.yaml
 ```
 
 `philharmonic serve` は SIGTERM / SIGINT を受信すると **in-flight run の完了を待ってから** graceful に exit します (subprocess を強制終了したりはしない)。systemd / Docker など PID 1 として走らせるユースケースでも安全です。終了 exit code は **0** (graceful shutdown は正常終了とみなす)。
@@ -196,7 +196,7 @@ ClaudeNotInstalledError: claude command not found
 ConfigFileNotFoundError: ... / ConfigValidationError: ... / ConfigParseError: ...
 ```
 
-→ ファイルパス・YAML 文法・型違反のいずれか。エラーメッセージにファイルパス・該当フィールド・期待値が出ます。`docs/specs/config-schema.md` のフィールド定義と突き合わせてください。
+→ ファイルパス・YAML 文法・型違反のいずれか。エラーメッセージにファイルパス・該当フィールド・期待値が出ます。`docs/specs/config-schema.md` のフィールド定義と突き合わせてください。既定の探索先は `.philharmonic/philharmonic.yaml` です (#67)。旧来の repo root 直下 `philharmonic.yaml` のみ存在する場合は当面 fallback で読み込みつつ warning が出ます。`mkdir -p .philharmonic && git mv philharmonic.yaml .philharmonic/philharmonic.yaml` で移行してください。
 
 ### 候補 Issue が拾われない (`no candidate` ばかり)
 

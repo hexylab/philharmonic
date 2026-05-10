@@ -6,9 +6,9 @@ import {
   ConfigFileNotFoundError,
   ConfigParseError,
   ConfigValidationError,
-  DEFAULT_WORKFLOW_FILE,
   loadConfig,
   type Config,
+  type LoadConfigOptions,
 } from '../config/index.js';
 import {
   GitHubTokenNotSetError,
@@ -31,10 +31,11 @@ import {
 } from '../workspace/index.js';
 
 import { configHooksToHookConfigMap } from './hooks.js';
+import { resolveWorkflowPath } from './paths.js';
 
 export type RunCommandDeps = {
   cwd?: () => string;
-  loadConfig?: (configPath?: string, options?: { cwd?: string }) => Promise<Config>;
+  loadConfig?: (configPath?: string, options?: LoadConfigOptions) => Promise<Config>;
   getToken?: () => string;
   createGitHubClient?: (token: string) => GitHubClient;
   createProjectsClient?: (token: string) => ProjectsClient;
@@ -75,7 +76,10 @@ export function createRunCommand(deps: RunCommandDeps = {}): Command {
     .description(
       'GitHub Projects v2 から候補 Issue を 1 件だけ処理する 1 ターン分の orchestration を実行する',
     )
-    .option('-c, --config <path>', '設定ファイルのパス (省略時は cwd の philharmonic.yaml)')
+    .option(
+      '-c, --config <path>',
+      '設定ファイルのパス (省略時は cwd の .philharmonic/philharmonic.yaml、不在なら legacy philharmonic.yaml に fallback)',
+    )
     .action(async (options: { config?: string }) => {
       await runRunCommand(options, resolved);
     });
@@ -103,8 +107,14 @@ async function runRunCommand(
   }
 
   let config: Config;
+  let legacyConfigUsed: { legacyPath: string; expectedPath: string } | null = null;
   try {
-    config = await deps.loadConfig(options.config, { cwd });
+    config = await deps.loadConfig(options.config, {
+      cwd,
+      onLegacyPathUsed: (legacyPath, expectedPath) => {
+        legacyConfigUsed = { legacyPath, expectedPath };
+      },
+    });
   } catch (error) {
     if (
       error instanceof ConfigFileNotFoundError ||
@@ -130,6 +140,17 @@ async function runRunCommand(
     destination: deps.stderr,
   });
 
+  if (legacyConfigUsed !== null) {
+    const { legacyPath, expectedPath } = legacyConfigUsed as {
+      legacyPath: string;
+      expectedPath: string;
+    };
+    logger.warn(
+      'legacy `philharmonic.yaml` を repo root から読み込みました。`.philharmonic/philharmonic.yaml` への移動を推奨します (#67)',
+      { legacyPath, expectedPath },
+    );
+  }
+
   const workspaceManager = deps.createWorkspaceManager({
     repoRoot,
     workspaceRoot: config.workspaceRoot,
@@ -145,12 +166,18 @@ async function runRunCommand(
     );
   }
 
-  // WORKFLOW.md は repoRoot 直下に解決する。`philharmonic run` は単発実行のため watch=false。
+  // WORKFLOW.md は `.philharmonic/WORKFLOW.md` を default とし、不在なら legacy `WORKFLOW.md`
+  // (repo root 直下) に fallback する (#67)。`philharmonic run` は単発実行のため watch=false。
+  const { workflowPath, fallbackOnMissing } = await resolveWorkflowPath({
+    repoRoot,
+    workflowFile: config.workflowFile,
+    logger,
+  });
   let workflowSource: WorkflowSource;
   try {
     workflowSource = await deps.createWorkflowSource({
-      workflowPath: path.resolve(repoRoot, config.workflowFile),
-      fallbackOnMissing: isDefaultWorkflowFile(config.workflowFile),
+      workflowPath,
+      fallbackOnMissing,
       watch: false,
       logger,
     });
@@ -207,8 +234,4 @@ async function runRunCommand(
 function describeError(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
-}
-
-function isDefaultWorkflowFile(value: string): boolean {
-  return value === DEFAULT_WORKFLOW_FILE;
 }

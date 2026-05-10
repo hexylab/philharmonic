@@ -72,8 +72,10 @@ async function runCmd(streams: Streams, deps: InitCommandDeps, args: string[] = 
 }
 
 const REPO_ROOT = '/tmp/repo';
-const yamlPath = (cwd: string) => path.resolve(cwd, 'philharmonic.yaml');
-const workflowPath = (cwd: string) => path.resolve(cwd, 'WORKFLOW.md');
+// #67: init は `.philharmonic/` 配下に config / workflow を生成する
+const yamlPath = (cwd: string) => path.resolve(cwd, '.philharmonic/philharmonic.yaml');
+const legacyYamlPath = (cwd: string) => path.resolve(cwd, 'philharmonic.yaml');
+const workflowPath = (cwd: string) => path.resolve(cwd, '.philharmonic/WORKFLOW.md');
 const gitignorePath = (cwd: string) => path.resolve(cwd, '.gitignore');
 
 describe('parseGitHubOwner', () => {
@@ -127,7 +129,7 @@ describe('philharmonic init CLI コマンド', () => {
   it('--help にコマンドの説明と全フラグが表示される', () => {
     const cmd = createInitCommand();
     const helpText = cmd.helpInformation();
-    expect(cmd.description()).toContain('philharmonic.yaml');
+    expect(cmd.description()).toContain('.philharmonic/philharmonic.yaml');
     expect(helpText).toContain('--owner');
     expect(helpText).toContain('--project');
     expect(helpText).toContain('--yes');
@@ -136,7 +138,7 @@ describe('philharmonic init CLI コマンド', () => {
     expect(helpText).toContain('--no-workflow');
   });
 
-  it('--yes --owner --project の最小フラグで非対話的に philharmonic.yaml を生成する', async () => {
+  it('--yes --owner --project の最小フラグで非対話的に .philharmonic/philharmonic.yaml を生成する', async () => {
     const streams = createStreams();
     const fsMocks = createFsMocks();
 
@@ -191,7 +193,7 @@ describe('philharmonic init CLI コマンド', () => {
     expect(out).toContain('project_number: 1');
   });
 
-  it('既存の philharmonic.yaml があると --force なしでは error exit する', async () => {
+  it('既存の .philharmonic/philharmonic.yaml があると --force なしでは error exit する', async () => {
     const streams = createStreams();
     const fsMocks = createFsMocks({
       [yamlPath(REPO_ROOT)]: 'owner: old\nproject_number: 99\n',
@@ -296,7 +298,7 @@ describe('philharmonic init CLI コマンド', () => {
     expect(joinWrites(streams.stderr)).toMatch(/owner/);
   });
 
-  it('対話モードで bypass=Yes / WORKFLOW=Yes / .gitignore=Yes を選ぶと全部反映される', async () => {
+  it('対話モードで bypass=Yes / WORKFLOW=Yes / .gitignore=Yes を選ぶと全部反映される (#67)', async () => {
     const streams = createStreams();
     const fsMocks = createFsMocks({
       [gitignorePath(REPO_ROOT)]: 'node_modules\ndist\n',
@@ -305,8 +307,8 @@ describe('philharmonic init CLI コマンド', () => {
       '', // owner: detected default を採用
       '1', // project_number
       'y', // permission_mode bypass
-      'y', // WORKFLOW.md
-      'y', // .gitignore
+      'y', // .philharmonic/WORKFLOW.md
+      'y', // .gitignore (worktrees/ / runs/ / serve.lock)
     ]);
 
     await runCmd(
@@ -331,7 +333,12 @@ describe('philharmonic init CLI コマンド', () => {
     const workflowContent = fsMocks.files.get(workflowPath(REPO_ROOT)) ?? '';
     expect(workflowContent).toContain('{{ issue.body }}');
     const gitignoreContent = fsMocks.files.get(gitignorePath(REPO_ROOT)) ?? '';
-    expect(gitignoreContent).toContain('.philharmonic/\n');
+    // `.philharmonic/philharmonic.yaml` 等は commit 可能にしておくため、
+    // 生成物 (worktrees / runs / serve.lock) のみを ignore に追記する (#67)
+    expect(gitignoreContent).toContain('.philharmonic/worktrees/\n');
+    expect(gitignoreContent).toContain('.philharmonic/runs/\n');
+    expect(gitignoreContent).toContain('.philharmonic/serve.lock\n');
+    expect(gitignoreContent).not.toMatch(/^\.philharmonic\/$/m);
   });
 
   it('対話モードで bypass=No なら permission_mode はコメントのまま', async () => {
@@ -366,7 +373,7 @@ describe('philharmonic init CLI コマンド', () => {
     expect(fsMocks.files.has(workflowPath(REPO_ROOT))).toBe(false);
   });
 
-  it('.gitignore に既に .philharmonic/ がある場合は重複追記しない', async () => {
+  it('.gitignore に既に broad ignore (.philharmonic/) がある場合は重複追記しない (#67 後方互換)', async () => {
     const streams = createStreams();
     const fsMocks = createFsMocks({
       [gitignorePath(REPO_ROOT)]: 'node_modules\n.philharmonic/\n',
@@ -398,10 +405,41 @@ describe('philharmonic init CLI コマンド', () => {
     const gitignoreContent = fsMocks.files.get(gitignorePath(REPO_ROOT)) ?? '';
     const occurrences = gitignoreContent.split('\n').filter((l) => l.trim() === '.philharmonic/');
     expect(occurrences.length).toBe(1);
+    // 生成物用の細かい行は重複しない (broad ignore の側で既にカバーされているとみなす)
+    expect(gitignoreContent).not.toContain('.philharmonic/worktrees/');
     expect(joinWrites(streams.stdout)).toMatch(/already contains/);
   });
 
-  it('--no-workflow を渡すと対話プロンプトが上がっても WORKFLOW.md は生成しない', async () => {
+  it('.gitignore に既に worktrees / runs / serve.lock がある場合は重複追記しない (#67)', async () => {
+    const streams = createStreams();
+    const fsMocks = createFsMocks({
+      [gitignorePath(REPO_ROOT)]:
+        'node_modules\n.philharmonic/worktrees/\n.philharmonic/runs/\n.philharmonic/serve.lock\n',
+    });
+    const prompt = makeQueuePrompter(['hexylab', '1', 'n', 'n', 'y']);
+
+    await runCmd(
+      streams,
+      {
+        cwd: () => REPO_ROOT,
+        runGit: vi.fn(async () => {
+          throw new Error('no remote');
+        }),
+        readFile: fsMocks.readFile,
+        writeFile: fsMocks.writeFile,
+        pathExists: fsMocks.pathExists,
+        prompt,
+        isTTY: () => true,
+      },
+      [],
+    );
+
+    const gitignoreContent = fsMocks.files.get(gitignorePath(REPO_ROOT)) ?? '';
+    expect(gitignoreContent.match(/\.philharmonic\/worktrees\//g)?.length ?? 0).toBe(1);
+    expect(joinWrites(streams.stdout)).toMatch(/already contains/);
+  });
+
+  it('--no-workflow を渡すと対話プロンプトが上がっても .philharmonic/WORKFLOW.md は生成しない', async () => {
     const streams = createStreams();
     const fsMocks = createFsMocks();
     const prompt = makeQueuePrompter([
@@ -428,6 +466,60 @@ describe('philharmonic init CLI コマンド', () => {
     );
 
     expect(fsMocks.files.has(workflowPath(REPO_ROOT))).toBe(false);
+  });
+
+  it('repo root に legacy philharmonic.yaml があると warning を出して移行を促す (#67)', async () => {
+    const streams = createStreams();
+    const fsMocks = createFsMocks({
+      [legacyYamlPath(REPO_ROOT)]: 'owner: legacy\nproject_number: 99\n',
+    });
+
+    await runCmd(
+      streams,
+      {
+        cwd: () => REPO_ROOT,
+        runGit: vi.fn(),
+        readFile: fsMocks.readFile,
+        writeFile: fsMocks.writeFile,
+        pathExists: fsMocks.pathExists,
+        prompt: vi.fn(),
+        isTTY: () => false,
+      },
+      ['--yes', '--owner', 'hexylab', '--project', '1'],
+    );
+
+    const stderr = joinWrites(streams.stderr);
+    expect(stderr).toMatch(/legacy philharmonic\.yaml/);
+    expect(stderr).toMatch(/\.philharmonic\/philharmonic\.yaml/);
+    // 新規 yaml は `.philharmonic/` 配下に書かれており、legacy は触らない
+    expect(fsMocks.files.has(yamlPath(REPO_ROOT))).toBe(true);
+    expect(fsMocks.files.get(legacyYamlPath(REPO_ROOT))).toBe(
+      'owner: legacy\nproject_number: 99\n',
+    );
+  });
+
+  it('default writeFile は親ディレクトリ (.philharmonic/) を recursive に作成する (#67)', async () => {
+    const tmpRoot = await mkdtemp(path.join(tmpdir(), 'philharmonic-init-mkdir-'));
+    try {
+      const streams = createStreams();
+      // deps.writeFile を default 実装に任せる (defaultWriteFile が `.philharmonic/` を作るかを実 fs で検証)
+      await runCmd(
+        streams,
+        {
+          cwd: () => tmpRoot,
+          runGit: vi.fn(),
+          isTTY: () => false,
+        },
+        ['--yes', '--owner', 'hexylab', '--project', '1'],
+      );
+
+      const written = await import('node:fs/promises').then((fsmod) =>
+        fsmod.readFile(path.join(tmpRoot, '.philharmonic/philharmonic.yaml'), 'utf8'),
+      );
+      expect(written).toMatch(/^owner: hexylab$/m);
+    } finally {
+      await rm(tmpRoot, { recursive: true, force: true });
+    }
   });
 
   it('Philharmonic 自身のリポジトリでは warning を出す', async () => {

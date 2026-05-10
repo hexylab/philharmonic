@@ -2,7 +2,7 @@
 
 ## 概要
 
-リポジトリ内の Markdown ファイル (デフォルト `WORKFLOW.md`) を Claude Code Runner 用 prompt の **上位レイヤ** として扱い、Liquid テンプレートで Issue 情報・workspace パス等を埋め込めるようにする。`WORKFLOW.md` が無いリポジトリでは [prompt-construction.md](./prompt-construction.md) の `buildPrompt` を **下位レイヤ** としてフォールバック利用する。Orchestrator フッタ (Status 遷移 / PR 作成 / 失敗時コメント / Conventional Commits の指示) は Orchestrator が無条件で末尾に連結する。
+リポジトリ内の Markdown ファイル (デフォルト `.philharmonic/WORKFLOW.md` / 後方互換 fallback として repo root の `WORKFLOW.md` も読む) を Claude Code Runner 用 prompt の **上位レイヤ** として扱い、Liquid テンプレートで Issue 情報・workspace パス等を埋め込めるようにする。テンプレートが無いリポジトリでは [prompt-construction.md](./prompt-construction.md) の `buildPrompt` を **下位レイヤ** としてフォールバック利用する。Orchestrator フッタ (Status 遷移 / PR 作成 / 失敗時コメント / Conventional Commits の指示) は Orchestrator が無条件で末尾に連結する。
 
 ## 関連 Issue
 
@@ -15,12 +15,13 @@
 
 ## 用語と登場アクター
 
-| 用語                 | 意味                                                                                                                       |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| **WORKFLOW.md**      | リポジトリ直下に置かれる Liquid テンプレートファイル (ファイル名は config で変更可)                                        |
-| **WorkflowSource**   | `src/workflow/` モジュールが提供する prompt 構築ハンドル。dispatch ごとに `render(vars)` が呼ばれ prompt 文字列を返す      |
-| **テンプレート上位** | `WORKFLOW.md` が存在する場合、テンプレート本体が prompt の主構造を決める                                                   |
-| **テンプレート下位** | テンプレート不在時の `buildPrompt` フォールバック、およびテンプレート末尾に連結される `Orchestrator からの追加指示` フッタ |
+| 用語                   | 意味                                                                                                                       |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| **WORKFLOW.md**        | 対象リポジトリの `.philharmonic/WORKFLOW.md` (既定)。ファイル名は `philharmonic.yaml` の `workflow_file` で変更可          |
+| **Legacy WORKFLOW.md** | repo root 直下 `WORKFLOW.md` (#67 で `.philharmonic/` 配下へ移行)。default のときだけ後方互換 fallback として読み込む      |
+| **WorkflowSource**     | `src/workflow/` モジュールが提供する prompt 構築ハンドル。dispatch ごとに `render(vars)` が呼ばれ prompt 文字列を返す      |
+| **テンプレート上位**   | テンプレートが存在する場合、テンプレート本体が prompt の主構造を決める                                                     |
+| **テンプレート下位**   | テンプレート不在時の `buildPrompt` フォールバック、およびテンプレート末尾に連結される `Orchestrator からの追加指示` フッタ |
 
 ## 要件
 
@@ -58,7 +59,7 @@ export type CreateWorkflowSourceOptions = {
 export function createWorkflowSource(options: CreateWorkflowSourceOptions): Promise<WorkflowSource>;
 ```
 
-- `workflowPath` は呼び出し側で `path.resolve(repoRoot, config.workflowFile)` した絶対パスを渡す
+- `workflowPath` は呼び出し側 (`src/cli/paths.ts` の `resolveWorkflowPath`) で `path.resolve(repoRoot, config.workflowFile)` を解決し、新 default が不在で legacy `WORKFLOW.md` (repo root 直下) のみが存在する場合は legacy 側を採用して warning を 1 度だけ出す (#67)
 - `watch=true` のときのみ `fs.watch` を仕掛け、変更検出時に内部キャッシュを invalidate して `workflow reloaded` ログを 1 行 INFO で出す。`philharmonic serve` から有効化する
 - `close()` は `fs.watch` を解除する。`watch=false` のときは何もしない
 
@@ -84,7 +85,8 @@ export function createWorkflowSource(options: CreateWorkflowSourceOptions): Prom
 ### `WORKFLOW.md` 不在時の挙動
 
 - 既存 `buildPrompt(input)` にフォールバックして従来どおり prompt を組み立てる
-- `philharmonic.yaml` で `workflow_file` を明示指定しているのに ファイルが無い場合は **エラー** (typo を疑うべきため)。デフォルト `WORKFLOW.md` のままで無い場合のみフォールバックを許す
+- `philharmonic.yaml` で `workflow_file` を明示指定しているのに ファイルが無い場合は **エラー** (typo を疑うべきため)。デフォルト `.philharmonic/WORKFLOW.md` のままで無い場合のみフォールバックを許す
+- default のときに `.philharmonic/WORKFLOW.md` が無く、repo root の legacy `WORKFLOW.md` が存在する場合は `resolveWorkflowPath` が legacy を採用して warning を 1 度だけ出す (#67 後方互換)。利用者は `mv WORKFLOW.md .philharmonic/WORKFLOW.md` で移行する
 
 ### hot-reload の挙動
 
