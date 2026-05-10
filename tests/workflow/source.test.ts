@@ -35,6 +35,8 @@ function baseInput(overrides: Partial<RenderInput> = {}): RenderInput {
     issueBody: ISSUE_BODY,
     workspacePath: '/tmp/.philharmonic/worktrees/issue-27',
     runId: '01900000-0000-7000-8000-000000000000',
+    project: { owner: 'hexylab', number: 1, statusField: 'Status' },
+    statusTransitions: { inProgress: 'In Progress', inReview: 'In Review', failed: 'Failed' },
     ...overrides,
   };
 }

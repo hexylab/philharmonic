@@ -1,12 +1,6 @@
 import { graphql } from '@octokit/graphql';
 
 import { extractCandidates } from './extract.js';
-import {
-  extractProjectMetadata,
-  PROJECT_METADATA_QUERY,
-  projectMetadataResponseSchema,
-  type ProjectMetadata,
-} from './metadata.js';
 import { PROJECT_ITEMS_QUERY } from './query.js';
 import { projectItemsResponseSchema, type Candidate } from './schema.js';
 
@@ -27,15 +21,8 @@ export type FetchProjectCandidatesInput = {
   first?: number;
 };
 
-export type FetchProjectMetadataInput = {
-  owner: string;
-  projectNumber: number;
-  statusFieldName: string;
-};
-
 export type ProjectsClient = {
   fetchProjectCandidates(input: FetchProjectCandidatesInput): Promise<Candidate[]>;
-  fetchProjectMetadata(input: FetchProjectMetadataInput): Promise<ProjectMetadata>;
 };
 
 const DEFAULT_FIRST = 100;
@@ -76,20 +63,6 @@ export function createProjectsClient(options: CreateProjectsClientOptions): Proj
       const response = projectItemsResponseSchema.parse(raw);
 
       return extractCandidates({
-        response,
-        owner: input.owner,
-        projectNumber: input.projectNumber,
-        statusFieldName: input.statusFieldName,
-      });
-    },
-
-    async fetchProjectMetadata(input) {
-      const raw = await request<unknown>(PROJECT_METADATA_QUERY, {
-        owner: input.owner,
-        number: input.projectNumber,
-      });
-      const response = projectMetadataResponseSchema.parse(raw);
-      return extractProjectMetadata({
         response,
         owner: input.owner,
         projectNumber: input.projectNumber,

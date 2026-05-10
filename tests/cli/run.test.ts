@@ -30,6 +30,7 @@ function fakeConfig(overrides: Partial<Config> = {}): Config {
     killGracePeriodMs: 5_000,
     workspaceRoot: '.philharmonic/worktrees',
     dispatchStatuses: ['Todo'],
+    statusTransitions: { inProgress: 'In Progress', inReview: 'In Review', failed: 'Failed' },
     cleanRetentionDays: 7,
     logLevel: 'info',
     polling: { intervalMs: 30_000 },
@@ -53,7 +54,6 @@ const fakeGitHub: GitHubClient = {
 
 const fakeProjects: ProjectsClient = {
   fetchProjectCandidates: vi.fn(),
-  fetchProjectMetadata: vi.fn(),
 };
 
 const fakeWorkspace: WorkspaceManager = {

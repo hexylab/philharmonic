@@ -1,4 +1,8 @@
-import { ORCHESTRATOR_FOOTER_HEADER, ORCHESTRATOR_FOOTER_LINES } from '../workflow/footer.js';
+import {
+  buildOrchestratorFooterLines,
+  ORCHESTRATOR_FOOTER_HEADER,
+  type StatusTransitions,
+} from '../workflow/footer.js';
 
 export type BuildPromptInput = {
   repository: { owner: string; name: string };
@@ -8,6 +12,12 @@ export type BuildPromptInput = {
   issueUrl: string;
   issueBody: string;
   workspacePath: string;
+  project: {
+    owner: string;
+    number: number;
+    statusField: string;
+  };
+  statusTransitions: StatusTransitions;
 };
 
 /**
@@ -15,6 +25,7 @@ export type BuildPromptInput = {
  *
  * - `## Goal` / `## Constraints` / `## Acceptance Criteria` の必須セクションは撤廃
  * - footer は `workflow/footer.ts` の単一ソースを利用 (テンプレート経路と同一文言)
+ * - 遷移先 Status 名は `philharmonic.yaml` の `status_transitions` から渡す
  *
  * spec: docs/specs/prompt-construction.md
  */
@@ -26,13 +37,18 @@ export function buildPrompt(input: BuildPromptInput): string {
     `- Base branch: ${input.baseBranch}`,
     `- Issue: #${input.issueNumber} ${input.issueTitle}`,
     `- Issue URL: ${input.issueUrl}`,
+    `- Project: ${input.project.owner}/projects/${input.project.number} (Status field: \`${input.project.statusField}\`)`,
     `- Workspace (worktree, absolute path): ${input.workspacePath}`,
     '- 必ずリポジトリの `AGENTS.md` および `CLAUDE.md` を参照してから着手すること',
   ].join('\n');
 
   const issueBody = ['# Issue 本文', '', normalizeBody(input.issueBody)].join('\n');
 
-  const footer = [ORCHESTRATOR_FOOTER_HEADER, '', ...ORCHESTRATOR_FOOTER_LINES].join('\n');
+  const footer = [
+    ORCHESTRATOR_FOOTER_HEADER,
+    '',
+    ...buildOrchestratorFooterLines(input.statusTransitions),
+  ].join('\n');
 
   return [context, issueBody, footer].join('\n\n') + '\n';
 }

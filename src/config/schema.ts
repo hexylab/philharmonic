@@ -12,6 +12,9 @@ export const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 export const DEFAULT_KILL_GRACE_PERIOD_MS = 5_000;
 export const DEFAULT_WORKSPACE_ROOT = '.philharmonic/worktrees';
 export const DEFAULT_DISPATCH_STATUSES: readonly string[] = ['Todo'];
+export const DEFAULT_STATUS_TRANSITION_IN_PROGRESS = 'In Progress';
+export const DEFAULT_STATUS_TRANSITION_IN_REVIEW = 'In Review';
+export const DEFAULT_STATUS_TRANSITION_FAILED = 'Failed';
 export const DEFAULT_CLEAN_RETENTION_DAYS = 7;
 export const DEFAULT_LOG_LEVEL: LogLevel = 'info';
 export const DEFAULT_POLLING_INTERVAL_MS = 30_000;
@@ -108,6 +111,28 @@ const serverSchema = z
   .strict()
   .optional();
 
+const statusTransitionsSchema = z
+  .object({
+    in_progress: z
+      .string()
+      .min(1, 'status_transitions.in_progress は空文字以外で指定してください')
+      .default(DEFAULT_STATUS_TRANSITION_IN_PROGRESS),
+    in_review: z
+      .string()
+      .min(1, 'status_transitions.in_review は空文字以外で指定してください')
+      .default(DEFAULT_STATUS_TRANSITION_IN_REVIEW),
+    failed: z
+      .string()
+      .min(1, 'status_transitions.failed は空文字以外で指定してください')
+      .default(DEFAULT_STATUS_TRANSITION_FAILED),
+  })
+  .strict()
+  .default({
+    in_progress: DEFAULT_STATUS_TRANSITION_IN_PROGRESS,
+    in_review: DEFAULT_STATUS_TRANSITION_IN_REVIEW,
+    failed: DEFAULT_STATUS_TRANSITION_FAILED,
+  });
+
 const rawConfigSchema = z
   .object({
     owner: z.string().min(1, 'owner は空文字以外の文字列で指定してください'),
@@ -130,6 +155,7 @@ const rawConfigSchema = z
       .array(z.string().min(1, 'dispatch_statuses の各要素は空文字以外で指定してください'))
       .min(1, 'dispatch_statuses は 1 件以上の文字列配列で指定してください')
       .default([...DEFAULT_DISPATCH_STATUSES]),
+    status_transitions: statusTransitionsSchema,
     clean_retention_days: z
       .number({ message: 'clean_retention_days は 0 以上の数値で指定してください' })
       .nonnegative('clean_retention_days は 0 以上で指定してください')
@@ -154,6 +180,11 @@ export const configSchema = rawConfigSchema.transform((raw) => ({
   killGracePeriodMs: raw.kill_grace_period_ms,
   workspaceRoot: raw.workspace_root,
   dispatchStatuses: raw.dispatch_statuses,
+  statusTransitions: {
+    inProgress: raw.status_transitions.in_progress,
+    inReview: raw.status_transitions.in_review,
+    failed: raw.status_transitions.failed,
+  },
   cleanRetentionDays: raw.clean_retention_days,
   logLevel: raw.log_level,
   polling: {

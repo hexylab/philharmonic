@@ -10,5 +10,11 @@ export {
   type BuildWorkflowVariablesInput,
   type WorkflowVariables,
 } from './variables.js';
-export { ORCHESTRATOR_FOOTER, appendOrchestratorFooter } from './footer.js';
+export {
+  appendOrchestratorFooter,
+  buildOrchestratorFooter,
+  buildOrchestratorFooterLines,
+  ORCHESTRATOR_FOOTER_HEADER,
+  type StatusTransitions,
+} from './footer.js';
 export { WorkflowFileNotFoundError, WorkflowReadError, WorkflowRenderError } from './errors.js';

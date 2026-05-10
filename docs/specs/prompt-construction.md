@@ -57,15 +57,17 @@ Claude Code Runner に渡す prompt 文字列を構築する **pure 関数モジ
 
 ### `BuildPromptInput`
 
-| キー            | 型                                | 必須 | 説明                                                              |
-| --------------- | --------------------------------- | ---- | ----------------------------------------------------------------- |
-| `repository`    | `{ owner: string; name: string }` | yes  | リポジトリの owner / 名前。Context セクションに表示される         |
-| `baseBranch`    | `string`                          | yes  | base ブランチ名。設定既定の `main` を呼び出し側で解決した値を渡す |
-| `issueNumber`   | `number`                          | yes  | 対象 Issue の番号                                                 |
-| `issueTitle`    | `string`                          | yes  | Issue タイトル                                                    |
-| `issueUrl`      | `string`                          | yes  | Issue の HTML URL (Context セクションに表示される)                |
-| `issueBody`     | `string`                          | yes  | Issue body (Markdown)。空文字も許容                               |
-| `workspacePath` | `string`                          | yes  | Runner の `cwd` となる worktree の絶対パス                        |
+| キー                | 型                                                         | 必須 | 説明                                                                                                      |
+| ------------------- | ---------------------------------------------------------- | ---- | --------------------------------------------------------------------------------------------------------- |
+| `repository`        | `{ owner: string; name: string }`                          | yes  | リポジトリの owner / 名前。Context セクションに表示される                                                 |
+| `baseBranch`        | `string`                                                   | yes  | base ブランチ名。設定既定の `main` を呼び出し側で解決した値を渡す                                         |
+| `issueNumber`       | `number`                                                   | yes  | 対象 Issue の番号                                                                                         |
+| `issueTitle`        | `string`                                                   | yes  | Issue タイトル                                                                                            |
+| `issueUrl`          | `string`                                                   | yes  | Issue の HTML URL (Context セクションに表示される)                                                        |
+| `issueBody`         | `string`                                                   | yes  | Issue body (Markdown)。空文字も許容                                                                       |
+| `workspacePath`     | `string`                                                   | yes  | Runner の `cwd` となる worktree の絶対パス                                                                |
+| `project`           | `{ owner: string; number: number; statusField: string }`   | yes  | `philharmonic.yaml` の `owner` / `project_number` / `status_field`。Context に Project 情報として埋め込む |
+| `statusTransitions` | `{ inProgress: string; inReview: string; failed: string }` | yes  | `philharmonic.yaml` の `status_transitions`。フッタの遷移先 Status 名をユーザ設定でカスタマイズ可能にする |
 
 `workspacePath` の存在確認や絶対パス validation は本モジュールでは行わない (Workspace Manager の責務)。
 
@@ -85,6 +87,8 @@ export type BuildPromptInput = {
   issueUrl: string;
   issueBody: string;
   workspacePath: string;
+  project: { owner: string; number: number; statusField: string };
+  statusTransitions: { inProgress: string; inReview: string; failed: string };
 };
 
 export function buildPrompt(input: BuildPromptInput): string;
@@ -103,6 +107,7 @@ export function buildPrompt(input: BuildPromptInput): string;
 - Base branch: <baseBranch>
 - Issue: #<number> <title>
 - Issue URL: <url>
+- Project: <project.owner>/projects/<project.number> (Status field: `<project.statusField>`)
 - Workspace (worktree, absolute path): <workspacePath>
 - 必ずリポジトリの `AGENTS.md` および `CLAUDE.md` を参照してから着手すること
 
@@ -112,14 +117,16 @@ export function buildPrompt(input: BuildPromptInput): string;
 
 # Orchestrator からの追加指示
 
-- 着手直後に Project Status を `In Progress` に遷移する (`gh project item-edit` 等を使用)
+- 着手直後に Project Status を `<statusTransitions.inProgress>` に遷移する (`gh project item-edit` 等を使用)
 - 現在の worktree のブランチ上で [Conventional Commits](https://www.conventionalcommits.org/) 形式で commit する
 - 作業完了後は `git push -u origin <branch>` で push する
 - `gh pr create` で対応 Issue に紐づく Pull Request を作成し、本文に `Closes #<番号>` を含める
-- PR 作成成功後は Project Status を `In Review` に遷移する
-- 失敗時は Project Status を `Failed` に遷移し、Issue に失敗の理由をコメントする (token / 機微情報を貼らない)
+- PR 作成成功後は Project Status を `<statusTransitions.inReview>` に遷移する
+- 失敗時は Project Status を `<statusTransitions.failed>` に遷移し、Issue に失敗の理由をコメントする (token / 機微情報を貼らない)
 - GitHub の認証は環境変数 `GITHUB_TOKEN` / `GH_TOKEN` (Orchestrator が allowlist で透過) または host の `gh auth` を使う
 ```
+
+`<statusTransitions.*>` には `philharmonic.yaml` の `status_transitions` の値がそのまま埋め込まれる (default は `In Progress` / `In Review` / `Failed`)。Orchestrator は値を解釈せず、Project の Status options に存在するかどうかは利用者の責務 (詳細: [config-schema.md](./config-schema.md))。
 
 ### Orchestrator フッタの内容
 

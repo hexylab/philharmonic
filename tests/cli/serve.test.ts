@@ -60,7 +60,6 @@ const fakeGitHub: GitHubClient = {
 
 const fakeProjects: ProjectsClient = {
   fetchProjectCandidates: vi.fn(),
-  fetchProjectMetadata: vi.fn(),
 };
 
 const fakeWorkspace: WorkspaceManager = {

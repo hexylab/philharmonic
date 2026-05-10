@@ -27,7 +27,6 @@ type GitHubMock = GitHubClient & {
 
 type ProjectsMock = ProjectsClient & {
   fetchProjectCandidates: ReturnType<typeof vi.fn>;
-  fetchProjectMetadata: ReturnType<typeof vi.fn>;
 };
 
 type WorkspaceMock = WorkspaceManager & {
@@ -54,6 +53,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     killGracePeriodMs: 5_000,
     workspaceRoot: '.philharmonic/worktrees',
     dispatchStatuses: ['Todo'],
+    statusTransitions: { inProgress: 'In Progress', inReview: 'In Review', failed: 'Failed' },
     cleanRetentionDays: 7,
     logLevel: 'info',
     polling: { intervalMs: 30_000 },
@@ -124,9 +124,6 @@ function makeGitHubMock(overrides: Partial<GitHubMock> = {}): GitHubMock {
 function makeProjectsMock(candidates: Candidate[]): ProjectsMock {
   return {
     fetchProjectCandidates: vi.fn(async () => candidates),
-    fetchProjectMetadata: vi.fn(async () => {
-      throw new Error('fetchProjectMetadata は呼ばれない (ADR-0005)');
-    }),
   };
 }
 

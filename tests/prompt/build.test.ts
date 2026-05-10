@@ -21,6 +21,8 @@ function baseInput(overrides: Partial<BuildPromptInput> = {}): BuildPromptInput 
     issueUrl: 'https://github.com/hexylab/philharmonic/issues/17',
     issueBody: fixture('issue-body-valid.md'),
     workspacePath: '/home/runner/.philharmonic/worktrees/issue-17',
+    project: { owner: 'hexylab', number: 1, statusField: 'Status' },
+    statusTransitions: { inProgress: 'In Progress', inReview: 'In Review', failed: 'Failed' },
     ...overrides,
   };
 }
@@ -45,10 +47,24 @@ describe('buildPrompt', () => {
     expect(prompt).toContain('- Base branch: main');
     expect(prompt).toContain('- Issue: #17 Issue body から prompt を組み立てる');
     expect(prompt).toContain('- Issue URL: https://github.com/hexylab/philharmonic/issues/17');
+    expect(prompt).toContain('- Project: hexylab/projects/1 (Status field: `Status`)');
     expect(prompt).toContain(
       '- Workspace (worktree, absolute path): /home/runner/.philharmonic/worktrees/issue-17',
     );
     expect(prompt).toContain('`AGENTS.md` および `CLAUDE.md`');
+  });
+
+  it('status_transitions が custom 値ならフッタにそれが埋め込まれる', () => {
+    const prompt = buildPrompt(
+      baseInput({
+        statusTransitions: { inProgress: 'Working', inReview: 'In Review', failed: 'Blocked' },
+      }),
+    );
+
+    expect(prompt).toContain('Project Status を `Working` に遷移');
+    expect(prompt).toContain('Project Status を `Blocked` に遷移');
+    expect(prompt).not.toContain('Project Status を `In Progress` に遷移');
+    expect(prompt).not.toContain('Project Status を `Failed` に遷移');
   });
 
   it('Issue body 全文がそのまま貼り付けられる (構造化抽出を行わない)', () => {

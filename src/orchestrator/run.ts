@@ -331,6 +331,14 @@ export async function dispatchSelected(
     runTracker: tracker,
   };
 
+  let resolved = false;
+  const finalize = (
+    result: Extract<RunOnceResult, { kind: 'success' | 'failed' }>,
+  ): Extract<RunOnceResult, { kind: 'success' | 'failed' }> => {
+    resolved = true;
+    return result;
+  };
+
   try {
     // Workspace Provisioning (orchestration-mvp.md「3. Workspace Provisioning」)
     // git fetch を先に実行してから worktree を作成する。WorkspaceManager は worktree add のみで
@@ -346,7 +354,7 @@ export async function dispatchSelected(
       });
       workspacePath = workspace.path;
     } catch (error) {
-      return await markFailed(failureContext, 'workspace_provisioning', error);
+      return finalize(await markFailed(failureContext, 'workspace_provisioning', error));
     }
 
     // Prompt Construction
@@ -361,9 +369,15 @@ export async function dispatchSelected(
         issueBody: issue.body ?? '',
         workspacePath,
         runId,
+        project: {
+          owner: deps.config.owner,
+          number: deps.config.projectNumber,
+          statusField: deps.config.statusField,
+        },
+        statusTransitions: deps.config.statusTransitions,
       });
     } catch (error) {
-      return await markFailed(failureContext, 'runner_error', error);
+      return finalize(await markFailed(failureContext, 'runner_error', error));
     }
     await writeFile(path.join(runLog.dir, 'prompt.md'), prompt, 'utf8');
 
@@ -383,7 +397,7 @@ export async function dispatchSelected(
       await deps.workspaceManager.runHooks('before_run', hookContext);
     } catch (error) {
       if (isHookError(error)) {
-        return await markFailed(failureContext, 'hook_failed', error);
+        return finalize(await markFailed(failureContext, 'hook_failed', error));
       }
       throw error;
     }
@@ -411,7 +425,7 @@ export async function dispatchSelected(
       });
     } catch (error) {
       await runAfterRunHooksSafely(deps.workspaceManager, hookContext, 'failed', logger);
-      return await markFailed(failureContext, 'runner_error', error);
+      return finalize(await markFailed(failureContext, 'runner_error', error));
     }
 
     try {
@@ -424,20 +438,20 @@ export async function dispatchSelected(
       });
     } catch (error) {
       if (isHookError(error)) {
-        return await markFailed(failureContext, 'hook_failed', error, run);
+        return finalize(await markFailed(failureContext, 'hook_failed', error, run));
       }
       throw error;
     }
 
     // Result Triage (orchestration-mvp.md「6. Result Triage」)
     if (run.status === 'timeout') {
-      return await markFailed(failureContext, 'timeout', null, run);
+      return finalize(await markFailed(failureContext, 'timeout', null, run));
     }
     if (run.status === 'stalled') {
-      return await markFailed(failureContext, 'stalled', null, run);
+      return finalize(await markFailed(failureContext, 'stalled', null, run));
     }
     if (run.status === 'failed') {
-      return await markFailed(failureContext, 'runner_error', null, run);
+      return finalize(await markFailed(failureContext, 'runner_error', null, run));
     }
 
     // Cleanup (success): runner exit 0 のみ worktree を削除する (ADR-0005)
@@ -470,20 +484,24 @@ export async function dispatchSelected(
       totalCostUsd: run.totalCostUsd,
     });
 
-    return {
+    return finalize({
       kind: 'success',
       runId,
       issueNumber: candidate.issueNumber,
       branch,
-    };
-  } finally {
-    tracker.runFinished({
-      kind: 'failed',
-      runId,
-      issueNumber: candidate.issueNumber,
-      reason: 'runner_error',
-      totalCostUsd: null,
     });
+  } finally {
+    // 想定外の throw で resolved にならなかった場合の防御的な finalize。
+    // 通常パス (success / markFailed) は finalize を経由して runFinished 済みなので noop になる。
+    if (!resolved) {
+      tracker.runFinished({
+        kind: 'failed',
+        runId,
+        issueNumber: candidate.issueNumber,
+        reason: 'runner_error',
+        totalCostUsd: null,
+      });
+    }
   }
 }
 

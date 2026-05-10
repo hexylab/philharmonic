@@ -13,6 +13,9 @@ import {
   DEFAULT_PERMISSION_MODE,
   DEFAULT_POLLING_INTERVAL_MS,
   DEFAULT_STATUS_FIELD,
+  DEFAULT_STATUS_TRANSITION_FAILED,
+  DEFAULT_STATUS_TRANSITION_IN_PROGRESS,
+  DEFAULT_STATUS_TRANSITION_IN_REVIEW,
   DEFAULT_TIMEOUT_MS,
   DEFAULT_WORKFLOW_FILE,
   DEFAULT_WORKSPACE_ROOT,
@@ -34,6 +37,11 @@ describe('configSchema', () => {
       killGracePeriodMs: DEFAULT_KILL_GRACE_PERIOD_MS,
       workspaceRoot: DEFAULT_WORKSPACE_ROOT,
       dispatchStatuses: [...DEFAULT_DISPATCH_STATUSES],
+      statusTransitions: {
+        inProgress: DEFAULT_STATUS_TRANSITION_IN_PROGRESS,
+        inReview: DEFAULT_STATUS_TRANSITION_IN_REVIEW,
+        failed: DEFAULT_STATUS_TRANSITION_FAILED,
+      },
       cleanRetentionDays: DEFAULT_CLEAN_RETENTION_DAYS,
       logLevel: DEFAULT_LOG_LEVEL,
       polling: { intervalMs: DEFAULT_POLLING_INTERVAL_MS },
@@ -334,6 +342,46 @@ describe('configSchema', () => {
       owner: 'hexylab',
       project_number: 1,
       retry: { max_attempts: 3 },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('status_transitions が未指定なら default (In Progress / In Review / Failed) が補完される', () => {
+    const parsed = configSchema.parse({ owner: 'hexylab', project_number: 1 });
+    expect(parsed.statusTransitions).toEqual({
+      inProgress: DEFAULT_STATUS_TRANSITION_IN_PROGRESS,
+      inReview: DEFAULT_STATUS_TRANSITION_IN_REVIEW,
+      failed: DEFAULT_STATUS_TRANSITION_FAILED,
+    });
+  });
+
+  it('status_transitions の一部だけ指定しても残りはデフォルトで埋まる', () => {
+    const parsed = configSchema.parse({
+      owner: 'hexylab',
+      project_number: 1,
+      status_transitions: { in_progress: 'Working' },
+    });
+    expect(parsed.statusTransitions).toEqual({
+      inProgress: 'Working',
+      inReview: DEFAULT_STATUS_TRANSITION_IN_REVIEW,
+      failed: DEFAULT_STATUS_TRANSITION_FAILED,
+    });
+  });
+
+  it('status_transitions の値が空文字なら拒否する', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      status_transitions: { in_progress: '' },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('status_transitions の未知キーは strict で拒否する', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      status_transitions: { in_progress: 'Working', done: 'Done' },
     });
     expect(result.success).toBe(false);
   });

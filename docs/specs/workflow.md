@@ -110,19 +110,25 @@ export function createWorkflowSource(options: CreateWorkflowSourceOptions): Prom
 
 ### `WorkflowVariables` (snake_case でテンプレートに公開)
 
-| キー               | 型     | 例                                                         |
-| ------------------ | ------ | ---------------------------------------------------------- |
-| `repository.owner` | string | `hexylab`                                                  |
-| `repository.name`  | string | `philharmonic`                                             |
-| `base_branch`      | string | `main`                                                     |
-| `issue.number`     | number | `27`                                                       |
-| `issue.title`      | string | `WORKFLOW.md ...`                                          |
-| `issue.url`        | string | `https://github.com/hexylab/philharmonic/issues/27`        |
-| `issue.body`       | string | Issue body 全文                                            |
-| `workspace_path`   | string | `/home/runner/.philharmonic/worktrees/issue-27` (絶対パス) |
-| `run_id`           | string | UUIDv7                                                     |
+| キー                             | 型     | 例                                                         |
+| -------------------------------- | ------ | ---------------------------------------------------------- |
+| `repository.owner`               | string | `hexylab`                                                  |
+| `repository.name`                | string | `philharmonic`                                             |
+| `base_branch`                    | string | `main`                                                     |
+| `issue.number`                   | number | `27`                                                       |
+| `issue.title`                    | string | `WORKFLOW.md ...`                                          |
+| `issue.url`                      | string | `https://github.com/hexylab/philharmonic/issues/27`        |
+| `issue.body`                     | string | Issue body 全文                                            |
+| `project.owner`                  | string | `hexylab`                                                  |
+| `project.number`                 | number | `1`                                                        |
+| `project.status_field`           | string | `Status`                                                   |
+| `status_transitions.in_progress` | string | `In Progress` (default) / Project の custom Status 名      |
+| `status_transitions.in_review`   | string | `In Review` (default)                                      |
+| `status_transitions.failed`      | string | `Failed` (default)                                         |
+| `workspace_path`                 | string | `/home/runner/.philharmonic/worktrees/issue-27` (絶対パス) |
+| `run_id`                         | string | UUIDv7                                                     |
 
-ADR-0005 で `issue.goal` / `issue.constraints` / `issue.acceptance_criteria` / `attempt` は撤廃された。Issue body 全文を `issue.body` で受け取り、必要ならテンプレート側で部分抽出する形に変わった。
+ADR-0005 で `issue.goal` / `issue.constraints` / `issue.acceptance_criteria` / `attempt` は撤廃された。Issue body 全文を `issue.body` で受け取り、必要ならテンプレート側で部分抽出する形に変わった。`project` / `status_transitions` は #62 で追加 — Project の Status options を agent に伝える経路として、`philharmonic.yaml` の `owner` / `project_number` / `status_field` / `status_transitions` の値がそのままテンプレート変数に流れる。
 
 ### サンプル `WORKFLOW.md`
 

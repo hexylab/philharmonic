@@ -27,14 +27,17 @@ project_number: 1
 
 ### Project / 候補選定
 
-| キー                | 既定     | 何が変わるか                                                                                                                            |
-| ------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `owner`             | (必須)   | Project owner の GitHub login (user または org)                                                                                         |
-| `project_number`    | (必須)   | Project URL 末尾の整数                                                                                                                  |
-| `status_field`      | `Status` | Project 上の単一選択フィールド名。Status を別フィールド名で運用しているならここを変える                                                 |
-| `dispatch_statuses` | `[Todo]` | dispatch 候補とする Status option 名の配列。`[Ready for Agent, Todo]` のように複数指定可。`status_field` のどの option を拾うか直交設定 |
-| `agent_user_login`  | `null`   | `null` のとき unassigned のみ拾う。bot login (例: `philharmonic-bot`) を指定するとその assignee の Issue だけ拾う                       |
-| `base_branch`       | `main`   | PR の base ブランチ。worktree もこの ref から派生する                                                                                   |
+| キー                             | 既定          | 何が変わるか                                                                                                                            |
+| -------------------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `owner`                          | (必須)        | Project owner の GitHub login (user または org)                                                                                         |
+| `project_number`                 | (必須)        | Project URL 末尾の整数                                                                                                                  |
+| `status_field`                   | `Status`      | Project 上の単一選択フィールド名。Status を別フィールド名で運用しているならここを変える                                                 |
+| `dispatch_statuses`              | `[Todo]`      | dispatch 候補とする Status option 名の配列。`[Ready for Agent, Todo]` のように複数指定可。`status_field` のどの option を拾うか直交設定 |
+| `status_transitions.in_progress` | `In Progress` | agent が dispatch 直後に flip する遷移先 Status 名。Project の Status options に合わせて差し替える (#62)                                |
+| `status_transitions.in_review`   | `In Review`   | PR 作成成功後に agent が flip する遷移先 Status 名                                                                                      |
+| `status_transitions.failed`      | `Failed`      | 失敗時に agent が flip する遷移先 Status 名                                                                                             |
+| `agent_user_login`               | `null`        | `null` のとき unassigned のみ拾う。bot login (例: `philharmonic-bot`) を指定するとその assignee の Issue だけ拾う                       |
+| `base_branch`                    | `main`        | PR の base ブランチ。worktree もこの ref から派生する                                                                                   |
 
 ### Runner (Claude Code) の挙動
 
@@ -83,6 +86,10 @@ status_field: Status
 dispatch_statuses:
   - Ready for Agent
   - Todo
+status_transitions:
+  in_progress: In Progress
+  in_review: In Review
+  failed: Failed
 agent_user_login: philharmonic-bot
 base_branch: main
 
@@ -131,21 +138,27 @@ hooks:
 
 - テンプレートエンジンは [LiquidJS](https://liquidjs.com/)
 - `philharmonic run` は dispatch ごとにファイルを読み直し、`philharmonic serve` は `fs.watch` で変更検出時にもログを出します
-- prompt の **末尾には Orchestrator が無条件で agent 委譲指示を連結** します (Status を In Progress に遷移 / commit / push / PR 作成 / 失敗時の Issue コメント / Conventional Commits)。テンプレート側でこれを書く必要はありません
+- prompt の **末尾には Orchestrator が無条件で agent 委譲指示を連結** します (Status を `status_transitions.in_progress` に遷移 / commit / push / PR 作成 / 失敗時の Issue コメント / Conventional Commits)。テンプレート側でこれを書く必要はありません。Status 名はすべて `philharmonic.yaml` の `status_transitions` を参照するため、Project の Status options に合わせて差し替え可能です
 
 ### 提供される変数 (snake_case)
 
-| 変数名             | 例                                                  |
-| ------------------ | --------------------------------------------------- |
-| `repository.owner` | `hexylab`                                           |
-| `repository.name`  | `philharmonic`                                      |
-| `base_branch`      | `main`                                              |
-| `issue.number`     | `27`                                                |
-| `issue.title`      | `WORKFLOW.md ...`                                   |
-| `issue.url`        | `https://github.com/hexylab/philharmonic/issues/27` |
-| `issue.body`       | Issue body 全文                                     |
-| `workspace_path`   | worktree の絶対パス                                 |
-| `run_id`           | UUIDv7                                              |
+| 変数名                           | 例                                                  |
+| -------------------------------- | --------------------------------------------------- |
+| `repository.owner`               | `hexylab`                                           |
+| `repository.name`                | `philharmonic`                                      |
+| `base_branch`                    | `main`                                              |
+| `issue.number`                   | `27`                                                |
+| `issue.title`                    | `WORKFLOW.md ...`                                   |
+| `issue.url`                      | `https://github.com/hexylab/philharmonic/issues/27` |
+| `issue.body`                     | Issue body 全文                                     |
+| `project.owner`                  | `hexylab`                                           |
+| `project.number`                 | `1`                                                 |
+| `project.status_field`           | `Status`                                            |
+| `status_transitions.in_progress` | `In Progress` (config 既定) / Project の Status 名  |
+| `status_transitions.in_review`   | `In Review` (config 既定)                           |
+| `status_transitions.failed`      | `Failed` (config 既定)                              |
+| `workspace_path`                 | worktree の絶対パス                                 |
+| `run_id`                         | UUIDv7                                              |
 
 > ADR-0005 で `issue.goal` / `issue.constraints` / `issue.acceptance_criteria` / `attempt` 変数は撤廃されました。本文を部分抽出したい場合はテンプレート側で `{{ issue.body | split: '## Goal' | last | split: '##' | first }}` のように加工してください。
 
