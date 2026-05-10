@@ -1,90 +1,166 @@
 # Philharmonic
 
-> **`philharmonic serve` を常駐させておけば、GitHub Projects v2 の Todo にチケットを積むだけで Claude Code が勝手に拾って Pull Request にしてくれる coding-agent オーケストレータ。**
+<p align="center">
+  <strong>GitHub Projects の Todo を、Claude Code が Pull Request に変える。</strong>
+</p>
 
-[OpenAI Symphony](https://github.com/openai/symphony) から着想を得た TypeScript / Node.js 実装で、個人開発者や小規模チームが「やりたいけど手が回っていないタスク」を Claude Code に少しずつ消化させたいときに使えます。
+<p align="center">
+  <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <img alt="Node.js 22+" src="https://img.shields.io/badge/node-%3E%3D22-5FA04E.svg">
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white">
+  <img alt="GitHub Projects v2" src="https://img.shields.io/badge/GitHub%20Projects-v2-181717?logo=github">
+  <img alt="Claude Code" src="https://img.shields.io/badge/Claude%20Code-headless-D97757.svg">
+</p>
 
-## 全体像 — Issue を積んで PR を merge するだけ
+**Philharmonic** は、GitHub Projects v2 と Claude Code をつなぐ coding-agent オーケストレータです。
+
+Issue を Project の **Todo** に置くと、Philharmonic が作業場所を用意し、Claude Code が実装して Pull Request を作ります。
+
+> Inspired by [OpenAI Symphony](https://github.com/openai/symphony)。
+
+## 何ができる？
+
+| アイコン | できること                 | 説明                                                    |
+| :------: | -------------------------- | ------------------------------------------------------- |
+|    🎫    | Issue を自動で拾う         | Project の Todo を polling して、次のタスクを見つけます |
+|    🤖    | Claude Code を起動する     | headless mode の Claude Code に実装を任せます           |
+|    🌿    | 作業場所を分ける           | タスクごとに git worktree を作り、作業を隔離します      |
+|    🔀    | Pull Request を作る        | commit / push / PR 作成まで agent が進めます            |
+|    👀    | 最後は人がレビューする     | merge 判断は自動化せず、人間に残します                  |
+|    🧩    | リポジトリごとに調整できる | prompt や lifecycle hook をカスタマイズできます         |
+
+## どう動く？
 
 ```mermaid
-stateDiagram-v2
-    direction LR
-    [*] --> Todo: 開発者が Issue を積む
-    Todo --> InProgress: philharmonic serve が dispatch<br/>(30 秒 polling → 隔離 worktree → Claude Code 起動)
-    InProgress --> InReview: agent が実装 → PR 作成<br/>(commit / push / gh pr create)
-    InReview --> Done: 開発者がレビュー → merge
-    InProgress --> Failed: agent が失敗判断<br/>+ Issue にコメント
-    Failed --> Todo: 人が再開判断
-    Done --> [*]
+flowchart LR
+  A[🎫 Project Todo] --> B[📡 Philharmonic]
+  B --> C[🌿 専用 worktree]
+  C --> D[🤖 Claude Code]
+  D --> E[🔀 Pull Request]
+  E --> F[👀 人間レビュー]
+  F --> G[✅ Merge]
+
+  D --> H[⚠️ Failed]
+  H --> A
 ```
 
-**開発者がやること**: Issue を Todo に積む / PR をレビューして merge する — それだけです。worktree 作成 / Claude Code 起動 / 実装 / commit / push / PR 作成 / Status 遷移は Philharmonic と agent が代行します。最後の merge 判断だけは必ず人間に残ります。
+基本の流れはこれだけです。
 
-## なぜ Philharmonic を使うのか
+1. 開発者が Issue を Project の **Todo** に置く
+2. `philharmonic serve` が Todo を見つける
+3. タスク用の git worktree を作る
+4. Claude Code が実装する
+5. agent が Pull Request を作る
+6. 人間がレビューして merge する
 
-- **チケットを積むだけで自動 dispatch**: `philharmonic serve` を常駐させると、Project の Todo に Issue が積まれた瞬間 (次の polling tick) に候補選定 → worktree 作成 → Claude Code 起動 まで自動でやり切る。以降の commit / push / PR 作成 / Status 遷移 / 必要に応じた Issue コメントは agent (Claude Code + `gh` CLI) が prompt 指示に従って完結する
-- **Issue 本文は自由フォーマット**: `## Goal` / `## Constraints` / `## Acceptance Criteria` の必須セクション制約は撤廃。本文はそのまま agent に渡される
-- **タスクごとに git worktree で隔離**: 作業は `.philharmonic/worktrees/issue-<番号>/` の中だけ。ホスト環境を汚さず、複数タスクを並行して試せる
-- **daemon 運用に必要なものが揃っている**: SIGTERM で in-flight 完了待ちの graceful shutdown、起動時に `In Progress` を引き取る recovery、`max_concurrent_agents` で並列 dispatch、二重起動を防ぐ lock file、`localhost` の Snapshot HTTP API (`/api/v1/state`) で dashboard 連携も可能
-- **`.philharmonic/WORKFLOW.md` で prompt をカスタマイズ**: Liquid テンプレートでリポジトリごとに Claude への指示を自由に組み立てられる
-- **Lifecycle hooks**: workspace 作成直後に `pnpm install`、削除直前に cleanup スクリプト、といった shell コマンドをイベントごとに差し込める
+## 向いている用途
 
-## 1 分で動かす
+- 個人開発や小規模チームの自動実装補助
+- 「いつか直したい」Issue の継続的な消化
+- Claude Code に任せるタスクの実験
+- Project board を中心にした開発フロー
 
-前提: Node.js 22 LTS / pnpm / [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) / GitHub Projects v2 / GitHub PAT (対象リポジトリの `Contents: RW` / `Pull requests: RW` / `Issues: RW` + 対象 user/org の `Projects: RW`)
+## 必要なもの
+
+| 必要なもの             | 備考                                       |
+| ---------------------- | ------------------------------------------ |
+| Node.js                | 22 LTS 以上                                |
+| pnpm                   | Corepack 経由を推奨                        |
+| Claude Code CLI        | `claude` コマンドが使える状態              |
+| GitHub CLI             | `gh auth login` 済みを推奨                 |
+| GitHub Projects v2     | Issue を並べる Project board               |
+| GitHub token / gh 認証 | repo と Project への読み書き権限が必要です |
+
+## クイックスタート
+
+### 1. Philharmonic をインストールする
 
 ```sh
-# 1) Philharmonic をビルド & コマンドにパスを通す
 git clone https://github.com/hexylab/philharmonic.git
 cd philharmonic
 corepack enable
-pnpm install && pnpm build
+pnpm install
+pnpm build
 pnpm link --global
+```
 
-# 2) GitHub 認証を整える (gh auth login 済みなら追加 export 不要 / config の default は github.token_source: auto)
-gh auth login                              # 推奨経路
-# CI / systemd / cron など非対話環境では env を使う:
-# export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+### 2. GitHub 認証を用意する
 
-# 3) 動かしたい先のリポジトリで philharmonic init を実行
+通常は GitHub CLI の認証で十分です。
+
+```sh
+gh auth login
+```
+
+CI、systemd、cron などで動かす場合は環境変数も使えます。
+
+```sh
+export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+```
+
+### 3. 使いたいリポジトリで初期化する
+
+Philharmonic を動かしたいリポジトリに移動して実行します。
+
+```sh
 cd /path/to/your-repo
 philharmonic init
-# 対話で owner / project_number / permission_mode: bypass / .gitignore 追記が訊かれます。
-# 生成先は .philharmonic/philharmonic.yaml (active 行 + コメント化された default サンプル)。
-# 非対話で完走したいときは:
-#   philharmonic init --yes --owner your-github-login --project 1
+```
 
-# 4) serve で bypass を使うための opt-in を有効にする
-# .philharmonic/philharmonic.yaml の `safety:` ブロックの # を外して true にするか、
-# env で代替できます:
-# export PHILHARMONIC_ALLOW_BYPASS_IN_SERVE=1
+非対話で作る場合はこちらです。
 
-# 5) 常駐デーモンを起動 (30 秒ごとに Project Todo を polling)
+```sh
+philharmonic init --yes --owner your-github-login --project 1
+```
+
+### 4. daemon を起動する
+
+```sh
 philharmonic serve
 ```
 
-これで Philharmonic が立ち上がります。あとは Project の Todo に Issue を積めば、次の polling tick で自動的に dispatch され、`stderr` の構造化ログに `dispatch success run-id=... issue=#...` が流れて Pull Request が立ちます。停止したいときは **Ctrl+C** (または SIGTERM) を送れば、in-flight の run の完了を待ってから graceful に exit します。
+あとは Project の **Todo** に Issue を置くだけです。
 
-> **`permission_mode: bypass` と `safety.allow_bypass_in_serve` について**: agent が `gh` / `git push` を呼ぶには Bash tool が必要なため、`bypass` (= `--dangerously-skip-permissions`) が実用上必須です。worktree 外への副作用リスクを伴うため、長時間稼働する `serve` には config か env での明示的 opt-in を必須にしています ([ADR-0005](./docs/adr/0005-thin-orchestrator-agent-delegation.md))。
+## よく使うコマンド
 
-> 1 件だけ単発で試したい場合や、cron / GitHub Actions の `schedule` から呼びたい場合は `philharmonic run` を使えます (1 ターンで exit する単発モード)。
+| やりたいこと           | コマンド                     |
+| ---------------------- | ---------------------------- |
+| 設定ファイルを作る     | `philharmonic init`          |
+| Todo の候補を見る      | `philharmonic projects list` |
+| 1 回だけ実行する       | `philharmonic run`           |
+| 常駐して自動 dispatch  | `philharmonic serve`         |
+| 古い作業場所を掃除する | `philharmonic clean`         |
 
-ステップごとの詳しい手順 (Project Status の整備 / Issue 本文の書きかた / 候補確認コマンド / Snapshot API での観測 等) は [`docs/guide/getting-started.md`](./docs/guide/getting-started.md) を参照してください。
+## 安全に使うための注意
 
-## ユーザガイド
+Claude Code が `git push` や `gh pr create` を実行するには、実用上 `permission_mode: bypass` が必要です。
 
-| ドキュメント                                                       | 内容                                                                                                 |
-| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| [`docs/guide/README.md`](./docs/guide/README.md)                   | ユーザガイドの目次と、1 ターンで何が起きるかの全体像                                                 |
-| [`docs/guide/getting-started.md`](./docs/guide/getting-started.md) | 前提・インストール・`philharmonic init`・GitHub 認証・Project Status 整備・`philharmonic serve` 起動 |
-| [`docs/guide/configuration.md`](./docs/guide/configuration.md)     | `.philharmonic/philharmonic.yaml` / `.philharmonic/WORKFLOW.md` / lifecycle hooks のカスタマイズ     |
-| [`docs/guide/operations.md`](./docs/guide/operations.md)           | CLI コマンド / 構造化ログ / `.philharmonic/runs/` / Snapshot HTTP API / トラブルシュート             |
+そのため、`philharmonic serve` で bypass を使う場合は明示的な opt-in が必要です。
 
-## もっと知る
+```yaml
+# .philharmonic/philharmonic.yaml
+safety:
+  allow_bypass_in_serve: true
+```
 
-- 機能仕様の真実 (フィールド全表 / state machine / API 全定義): [`docs/specs/`](./docs/specs/)
-- 設計判断の記録 (なぜそう決めたか): [`docs/adr/`](./docs/adr/)
-- リポジトリへのコントリビュート (ブランチ戦略 / コミット規約 / PR ルール / ドキュメント運用): [`AGENTS.md`](./AGENTS.md)
+または環境変数でも有効化できます。
+
+```sh
+export PHILHARMONIC_ALLOW_BYPASS_IN_SERVE=1
+```
+
+詳しい背景は [ADR-0005](./docs/adr/0005-thin-orchestrator-agent-delegation.md) を参照してください。
+
+## 詳しいドキュメント
+
+| 読みたいこと            | ドキュメント                                       |
+| ----------------------- | -------------------------------------------------- |
+| まず 1 件 PR を作りたい | [Getting Started](./docs/guide/getting-started.md) |
+| 設定を変えたい          | [Configuration](./docs/guide/configuration.md)     |
+| 運用・ログ・掃除        | [Operations](./docs/guide/operations.md)           |
+| 仕様を確認したい        | [Specs](./docs/specs/)                             |
+| 設計判断を知りたい      | [ADR](./docs/adr/)                                 |
+| 開発ルールを確認したい  | [AGENTS.md](./AGENTS.md)                           |
 
 ## ライセンス
 
