@@ -66,3 +66,4 @@
 - [ADR-0004: Snapshot HTTP API は Node 標準 http で loopback 固定で公開する](./0004-snapshot-http-api.md) (Accepted)
 - [ADR-0005: Philharmonic を薄い orchestrator に再設計し、Status 遷移 / PR 作成 / Issue コメントを agent に委譲する](./0005-thin-orchestrator-agent-delegation.md) (Accepted)
 - [ADR-0006: TUI dashboard は Ink で実装し、`philharmonic dashboard` として提供する](./0006-tui-dashboard.md) (Accepted)
+- [ADR-0007: Issue 依存関係を `Depends-On:` 行で表現する DAG-aware scheduler を導入する](./0007-dependency-dag-aware-scheduler.md) (Accepted)
