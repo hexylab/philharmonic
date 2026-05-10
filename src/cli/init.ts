@@ -322,6 +322,22 @@ ${permissionModeLine}
 # server:
 #   port: 4000
 
+# === GitHub 認証 ===
+# Philharmonic は GitHub token を YAML に保存しない (誤 commit リスク回避)。
+# token の取得元のみを config で選ぶ:
+#   env  ... GITHUB_TOKEN / GH_TOKEN を直接読む
+#   gh   ... \`gh auth token\` を起動時に呼ぶ (gh auth login 済みであること)
+#   auto ... env を試し、無ければ gh に fallback (デフォルト)
+# github:
+#   token_source: auto
+
+# === Safety ===
+# bypass モードを serve で使う場合、長時間 --dangerously-skip-permissions が連続発火する。
+# 明示的な opt-in としてここで true にするか、PHILHARMONIC_ALLOW_BYPASS_IN_SERVE=1 を env で設定する
+# (どちらか片方が必要。両方未設定なら serve は起動を拒否する)。
+# safety:
+#   allow_bypass_in_serve: false
+
 # === 観測 ===
 # log_level: info
 
@@ -428,9 +444,12 @@ async function confirm(prompt: Prompter, message: string, defaultYes: boolean): 
 
 function writeNextSteps(stdout: NodeJS.WritableStream): void {
   stdout.write('\nnext steps:\n');
-  stdout.write('  1. export GITHUB_TOKEN=<your fine-grained PAT>\n');
-  stdout.write('  2. philharmonic projects list   # 候補となる Issue を確認\n');
-  stdout.write('  3. philharmonic serve           # 常駐デーモンを起動\n');
+  stdout.write(
+    '  1. GitHub 認証を整える: `gh auth login` 済みなら追加設定不要 (default は github.token_source: auto)\n',
+  );
+  stdout.write('     CI 等で env を使う場合は `export GITHUB_TOKEN=<your fine-grained PAT>`\n');
+  stdout.write('  2. philharmonic projects list --owner ... --project ...\n');
+  stdout.write('  3. philharmonic serve\n');
 }
 
 function parseProjectNumber(value: string): number {

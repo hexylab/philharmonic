@@ -11,10 +11,15 @@ import {
   type LoadConfigOptions,
 } from '../config/index.js';
 import {
+  GITHUB_TOKEN_ENV,
+  GhCliNotAuthenticatedError,
+  GhCliNotFoundError,
   GitHubTokenNotSetError,
   createGitHubClient,
-  getGitHubTokenFromEnv,
+  resolveGitHubToken,
   type GitHubClient,
+  type ResolveGitHubTokenInput,
+  type ResolveGitHubTokenResult,
 } from '../github/index.js';
 import { createLogger, type Logger } from '../logger/index.js';
 import { BootstrapError, runOnce, type RunOnceResult } from '../orchestrator/index.js';
@@ -36,7 +41,8 @@ import { resolveWorkflowPath } from './paths.js';
 export type RunCommandDeps = {
   cwd?: () => string;
   loadConfig?: (configPath?: string, options?: LoadConfigOptions) => Promise<Config>;
-  getToken?: () => string;
+  resolveGitHubToken?: (input: ResolveGitHubTokenInput) => Promise<ResolveGitHubTokenResult>;
+  setEnv?: (key: string, value: string) => void;
   createGitHubClient?: (token: string) => GitHubClient;
   createProjectsClient?: (token: string) => ProjectsClient;
   createWorkspaceManager?: (input: {
@@ -56,7 +62,10 @@ export type RunCommandDeps = {
 const DEFAULT_DEPS: Required<RunCommandDeps> = {
   cwd: () => process.cwd(),
   loadConfig: (configPath, options) => loadConfig(configPath, options),
-  getToken: () => getGitHubTokenFromEnv(),
+  resolveGitHubToken: (input) => resolveGitHubToken(input),
+  setEnv: (key, value) => {
+    process.env[key] = value;
+  },
   createGitHubClient: (token) => createGitHubClient({ token }),
   createProjectsClient: (token) => createProjectsClient({ token }),
   createWorkspaceManager: (input) => createWorkspaceManager(input),
@@ -92,20 +101,6 @@ async function runRunCommand(
 ): Promise<void> {
   const cwd = deps.cwd();
 
-  let token: string;
-  try {
-    token = deps.getToken();
-  } catch (error) {
-    if (error instanceof GitHubTokenNotSetError) {
-      deps.stderr.write(`${error.message}\n`);
-      deps.exit(1);
-      return;
-    }
-    deps.stderr.write(`${describeError(error)}\n`);
-    deps.exit(1);
-    return;
-  }
-
   let config: Config;
   let legacyConfigUsed: { legacyPath: string; expectedPath: string } | null = null;
   try {
@@ -130,6 +125,28 @@ async function runRunCommand(
     return;
   }
 
+  let token: string;
+  let tokenOrigin: ResolveGitHubTokenResult['origin'];
+  try {
+    const resolved = await deps.resolveGitHubToken({ source: config.github.tokenSource });
+    token = resolved.token;
+    tokenOrigin = resolved.origin;
+  } catch (error) {
+    if (
+      error instanceof GitHubTokenNotSetError ||
+      error instanceof GhCliNotFoundError ||
+      error instanceof GhCliNotAuthenticatedError
+    ) {
+      deps.stderr.write(`${error.message}\n`);
+      deps.exit(1);
+      return;
+    }
+    deps.stderr.write(`${describeError(error)}\n`);
+    deps.exit(1);
+    return;
+  }
+  deps.setEnv(GITHUB_TOKEN_ENV, token);
+
   const githubClient = deps.createGitHubClient(token);
   const projectsClient = deps.createProjectsClient(token);
   const repoRoot = cwd;
@@ -150,6 +167,8 @@ async function runRunCommand(
       { legacyPath, expectedPath },
     );
   }
+
+  logger.info('github token resolved', { source: config.github.tokenSource, origin: tokenOrigin });
 
   const workspaceManager = deps.createWorkspaceManager({
     repoRoot,

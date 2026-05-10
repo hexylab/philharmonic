@@ -78,7 +78,7 @@ philharmonic serve --config ./path/to/.philharmonic/philharmonic.yaml
 
 > 自動 retry (`retry.*`) は ADR-0005 で撤廃されました。Failed の再実行は人手で `Todo` に戻すか別 Issue で起票します。
 
-`permission_mode: bypass` を `serve` で使う場合は、長時間稼働で `--dangerously-skip-permissions` が連続発火することへの opt-in として、環境変数 `PHILHARMONIC_ALLOW_BYPASS_IN_SERVE=1` を明示的に設定する必要があります (#49)。
+`permission_mode: bypass` を `serve` で使う場合は、長時間稼働で `--dangerously-skip-permissions` が連続発火することへの opt-in が必要です。`philharmonic.yaml` で `safety.allow_bypass_in_serve: true` を設定するか (#68 推奨)、環境変数 `PHILHARMONIC_ALLOW_BYPASS_IN_SERVE=1` を明示してください。両方未設定だと起動を拒否します。
 
 詳細仕様 (lock file / signal handling / 並列 dispatch / Tracker recovery) は [`docs/specs/serve-daemon.md`](../specs/serve-daemon.md)。
 
@@ -185,10 +185,26 @@ ClaudeNotInstalledError: claude command not found
 ### `GITHUB_TOKEN` が設定されていない
 
 ```
-環境変数 GITHUB_TOKEN を設定してください
+環境変数 GITHUB_TOKEN / GH_TOKEN が設定されていません ...
 ```
 
-→ `export GITHUB_TOKEN=...` の漏れ。Philharmonic は `GITHUB_TOKEN` を直接環境変数から読みます (config ファイルには書きません / 書けません)。ADR-0005 で `GITHUB_TOKEN` / `GH_TOKEN` は Runner subprocess にも allowlist 経由で渡され、agent が `gh` / `git push` で利用します。
+→ default の `github.token_source: auto` でも env が空 + `gh auth login` 未実行のときに出ます。対処は次のいずれか:
+
+- ホストで `gh auth login` を実行する (推奨。`auto` で透過的に拾われる)
+- `export GITHUB_TOKEN=...` を設定する (CI / systemd / cron など非対話環境向け)
+- `philharmonic.yaml` で `github.token_source: env` または `: gh` に固定する
+
+ADR-0005 で `GITHUB_TOKEN` / `GH_TOKEN` は Runner subprocess にも allowlist 経由で渡され、agent が `gh` / `git push` で利用します。`gh` 経由で取得した token も orchestrator が `process.env.GITHUB_TOKEN` に書き戻すため、runner には透過的に届きます。
+
+### `gh` コマンドが見つからない / `gh auth login` していない
+
+```
+gh コマンドが見つかりません ... / gh auth token から GitHub token を取得できませんでした ...
+```
+
+→ `github.token_source: gh` (または `auto` で env が空) のときの起動失敗です。`gh` をインストールして `gh auth login` するか、env で `GITHUB_TOKEN` を設定してください。
+
+`gh` の **scope 不足** (PAT に Project / Issue / Contents 権限が無い等) はここでは検出できず、後続の GitHub API 呼び出し時に 403 で落ちます。`fine-grained` PAT の scope を見直してください。
 
 ### `philharmonic.yaml` が見つからない / 検証エラー
 

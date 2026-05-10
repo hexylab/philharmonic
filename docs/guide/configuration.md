@@ -84,6 +84,22 @@ philharmonic init --dry-run --owner foo --project 1         # 書かずに内容
 
 > 自動 retry (`retry.max_attempts` / `retry.max_backoff_ms`) は ADR-0005 で撤廃されました。Failed を再実行する場合は人手で `Todo` に戻すか、別 Issue で起票しなおします。
 
+### GitHub 認証 (#68)
+
+| キー                  | 既定   | 何が変わるか                                                                                                                                                                                                                         |
+| --------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `github.token_source` | `auto` | GitHub token の取得元。`env` は `GITHUB_TOKEN` / `GH_TOKEN` を直接読む。`gh` は `gh auth token` を起動時に呼ぶ (`gh auth login` 済みであること)。`auto` は env を試して空なら `gh` に fallback。**token 文字列は YAML に書きません** |
+
+`gh` を使う場合は `gh auth login` 済みであることが必要です。`gh` 未インストール / 未ログインのときは起動時にエラーで exit 1 します。CI / systemd / cron などで env だけを使いたい場合は `github.token_source: env` を明示してください。
+
+### Safety (#68)
+
+| キー                           | 既定    | 何が変わるか                                                                                                                                                                                                                        |
+| ------------------------------ | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `safety.allow_bypass_in_serve` | `false` | `permission_mode: bypass` で `philharmonic serve` を起動するための明示的 opt-in。`true` か env `PHILHARMONIC_ALLOW_BYPASS_IN_SERVE=1` のどちらかが必要 (両方未設定なら起動拒否)。`philharmonic run` (1 ターン実行) には影響しません |
+
+> `bypass` モードは worktree 外への副作用リスクを伴うため、隔離環境であることを必ず確認してください。`serve` daemon は長時間 `--dangerously-skip-permissions` が連続発火するため、env / config いずれかでの明示的な opt-in を必須にしています。
+
 ### 観測
 
 | キー        | 既定   | 何が変わるか                                                                                                       |
@@ -136,6 +152,11 @@ hooks:
       args: []
       timeout_ms: 10000
       on_failure: continue
+
+github:
+  token_source: auto # gh auth login 済みなら env 不要
+safety:
+  allow_bypass_in_serve: true # bypass + serve の OK 印 (env による上書きも可)
 ```
 
 このとき:

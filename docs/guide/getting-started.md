@@ -30,15 +30,26 @@ pnpm link --global
 philharmonic --help
 ```
 
-## 3. GitHub token を環境変数に置く
+## 3. GitHub 認証を整える
+
+`philharmonic.yaml` の default は `github.token_source: auto` なので、**`gh auth login` 済みなら追加設定は不要** です (#68)。Philharmonic が起動時に `gh auth token` を呼んで token を取得します。
+
+```sh
+# 一度だけ
+gh auth login
+```
+
+CI / systemd / cron など非対話環境では env 経由が確実です。`auto` のままでも env が優先されます。
 
 ```sh
 export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 ```
 
-Philharmonic は `GITHUB_TOKEN` / `GH_TOKEN` を Orchestrator + Runner の env allowlist 経由で透過させ、agent (Claude Code + `gh` CLI) が Status 遷移 / `git push` / PR 作成 / Issue コメント投稿に使います ([ADR-0005](../adr/0005-thin-orchestrator-agent-delegation.md))。fine-grained PAT (対象リポジトリと Project に絞ったもの) を強く推奨します。
+固定したいときは `philharmonic.yaml` で `github.token_source: env` (env のみ) または `github.token_source: gh` (`gh auth token` のみ) を明示できます。
 
-> ホストで `gh auth login` 済みなら env 未設定でも動作します (`~/.config/gh` を runner subprocess が読みます)。daemon 用途や CI 用途では env 経由が確実です。
+> Philharmonic は `GITHUB_TOKEN` / `GH_TOKEN` を Orchestrator + Runner の env allowlist 経由で透過させ、agent (Claude Code + `gh` CLI) が Status 遷移 / `git push` / PR 作成 / Issue コメント投稿に使います ([ADR-0005](../adr/0005-thin-orchestrator-agent-delegation.md))。fine-grained PAT (対象リポジトリと Project に絞ったもの) を強く推奨します。
+
+> token 文字列は **YAML に書きません** (誤 commit リスク回避)。設定できるのは取得元 (`env` / `gh` / `auto`) のみです。
 
 ## 4. 対象リポジトリで `philharmonic init` を実行する
 
@@ -58,6 +69,8 @@ philharmonic init
 | `permission_mode: bypass` を採用するか?                                           | Y/n。ADR-0005 により agent 委譲には実用上必須                                           |
 | `.philharmonic/WORKFLOW.md` を scaffold するか?                                   | y/N。後から手で書いてもよい                                                             |
 | `.philharmonic/` 生成物 (`worktrees/` / `runs/` / `serve.lock`) を ignore するか? | Y/n。`.gitignore` が既に存在する場合のみ訊く。config 本体は commit 可能なまま残す (#67) |
+
+> 生成 yaml には `github.token_source` (default `auto`) と `safety.allow_bypass_in_serve` (default `false`) もコメントで同梱されます。`bypass + serve` で起動するときは `safety.allow_bypass_in_serve: true` を有効化するか、env で `PHILHARMONIC_ALLOW_BYPASS_IN_SERVE=1` を設定してください (#68)。
 
 完全に非対話的に scaffold したい場合は flag だけで完走させられます。
 

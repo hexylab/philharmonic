@@ -15,6 +15,7 @@ Symphony の "daemon workflow" 性に追いつくため、起動時の Tracker-d
 - #24 — `max_concurrent_agents` による並列 dispatch (本ドキュメント [並列 dispatch (#24)](#並列-dispatch-24) セクション)
 - #30 — Snapshot HTTP API を追加する (`/api/v1/state` / `/api/v1/<n>` / `/api/v1/refresh`)。詳細: [snapshot-api.md](./snapshot-api.md)
 - #62 — Status 遷移 / PR 作成を agent に委譲し、自動 retry を撤廃する
+- #68 — `serve` 起動前の手動 env export を不要化し、config (`github.token_source` / `safety.allow_bypass_in_serve`) と `gh auth` で起動できるようにする
 - 関連 spec: [orchestration-mvp.md](./orchestration-mvp.md), [config-schema.md](./config-schema.md), [claude-runner.md](./claude-runner.md), [observability.md](./observability.md), [snapshot-api.md](./snapshot-api.md)
 - 設計前提: [ADR-0005 薄い orchestrator + agent 委譲型 hybrid](../adr/0005-thin-orchestrator-agent-delegation.md)
 
@@ -55,7 +56,7 @@ Symphony の "daemon workflow" 性に追いつくため、起動時の Tracker-d
 
 - **性能**: 単一プロセスで 1 tick = 1 run。tick あたりの GraphQL/REST 呼び出し数は `philharmonic run` と同等
 - **可用性**: 単発失敗は次 tick まで待つ。runner exit ≠ 0 + agent が Failed flip 前に死亡したケースは **次回 `serve` 起動時の recovery でのみ拾う** (daemon 連続稼働中の自動救済はやらない)
-- **セキュリティ**: GitHub PAT は CLI レイヤと Runner subprocess の両方が保持する。Runner には `GITHUB_TOKEN` / `GH_TOKEN` を allowlist 経由で渡し、agent が `gh` / `git push` で利用する (ADR-0005)
+- **セキュリティ**: GitHub PAT は CLI レイヤと Runner subprocess の両方が保持する。Runner には `GITHUB_TOKEN` / `GH_TOKEN` を allowlist 経由で渡し、agent が `gh` / `git push` で利用する (ADR-0005)。token 文字列は config に書かない (#68)。`gh auth token` 経由で取得した場合は orchestrator が `process.env.GITHUB_TOKEN` に書き戻し、既存の allowlist 経路で runner に届ける
 - **アクセシビリティ**: 該当しない (非対話 / CLI のみ)
 
 ## データモデル
@@ -130,14 +131,17 @@ function abortableSleep(ms: number, signal: AbortSignal, wakeSignal?: AbortSigna
 
 ## エラーハンドリング
 
-| エラー                       | 発生条件                          | 扱い方針                                                               |
-| ---------------------------- | --------------------------------- | ---------------------------------------------------------------------- |
-| `GITHUB_TOKEN` 未設定        | 起動時の token 解決               | stderr に出して exit 1 (loop に入らない)                               |
-| `ConfigFileNotFoundError` 等 | config 読み込み                   | stderr に出して exit 1                                                 |
-| `BootstrapError`             | `runOnce` が throw                | `dispatch error` (warn) を log して次 tick に進む。daemon は落とさない |
-| 想定外の `runOnce` 例外      | `runOnce` が throw                | 同上                                                                   |
-| `runOnce` が `failed` を返す | runner 失敗 / hook 失敗           | `dispatch failed` (warn) を log して次 tick に進む                     |
-| 二重シグナル受信             | shutdown 中にもう 1 回 SIGTERM 等 | `shutdown signal ignored` (warn) を log のみで no-op                   |
+| エラー                       | 発生条件                                                                                    | 扱い方針                                                               |
+| ---------------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `GitHubTokenNotSetError`     | 起動時の token 解決 (`source: env` で env 空、または `auto` で env 空 + 後段で `gh` も失敗) | stderr に出して exit 1 (loop に入らない)                               |
+| `GhCliNotFoundError`         | 起動時の token 解決 (`source: gh` / `auto` で `gh` 未インストール)                          | stderr に出して exit 1                                                 |
+| `GhCliNotAuthenticatedError` | 起動時の token 解決 (`gh auth login` 未実行 / stdout 空 / `gh` exit !=0)                    | stderr に出して exit 1                                                 |
+| bypass guard 失敗            | `permission_mode: bypass` で env / config どちらの opt-in も無し                            | stderr に出して exit 1 (token 解決前)                                  |
+| `ConfigFileNotFoundError` 等 | config 読み込み                                                                             | stderr に出して exit 1                                                 |
+| `BootstrapError`             | `runOnce` が throw                                                                          | `dispatch error` (warn) を log して次 tick に進む。daemon は落とさない |
+| 想定外の `runOnce` 例外      | `runOnce` が throw                                                                          | 同上                                                                   |
+| `runOnce` が `failed` を返す | runner 失敗 / hook 失敗                                                                     | `dispatch failed` (warn) を log して次 tick に進む                     |
+| 二重シグナル受信             | shutdown 中にもう 1 回 SIGTERM 等                                                           | `shutdown signal ignored` (warn) を log のみで no-op                   |
 
 ## 自動 retry の撤廃 (ADR-0005)
 
@@ -247,11 +251,14 @@ agent:
 
 ### `permission_mode: bypass` の opt-in guard
 
-- `permission_mode: bypass` を `serve` で使う場合、env `PHILHARMONIC_ALLOW_BYPASS_IN_SERVE=1` を必須にする
-- 未設定なら **lock 取得前** に exit 1
-- ADR-0005 で agent 委譲型では `bypass` が実用上必須となったが、長時間連続発火を抑止するため opt-in env は維持する
-- opt-in 済みでも起動時に強い警告ログ (`permission_mode=bypass で serve を起動します`) を 1 行出す
-- `philharmonic run` (一過的実行) は引き続き opt-in env 不要 — guard は serve 限定
+- `permission_mode: bypass` を `serve` で使う場合、明示的な opt-in を要求する
+- opt-in は **以下のどちらか** を満たせばよい (#68 で OR に拡張):
+  1. `philharmonic.yaml` の `safety.allow_bypass_in_serve: true` ← 推奨
+  2. env `PHILHARMONIC_ALLOW_BYPASS_IN_SERVE=1` ← 後方互換 / 一時的なオーバーライド
+- どちらも満たさない場合は **lock 取得前** に exit 1。エラーメッセージで両経路を案内する
+- ADR-0005 で agent 委譲型では `bypass` が実用上必須となったが、長時間連続発火を抑止するため opt-in は維持する
+- opt-in 済みでも起動時に強い警告ログ (`permission_mode=bypass で serve を起動します`) を 1 行出す。fields は `optInEnv` / `configOptIn`
+- `philharmonic run` (一過的実行) は引き続き opt-in 不要 — guard は serve 限定
 
 ### `polling.interval_ms` の下限と warning
 
@@ -261,9 +268,9 @@ agent:
 
 ### 起動シーケンス (Hardening 後)
 
-1. token 解決 (失敗 → exit 1)
-2. config 読み込み (失敗 → exit 1)
-3. **bypass guard** (`permission_mode: bypass` で opt-in env が無ければ exit 1)
+1. config 読み込み (失敗 → exit 1)
+2. **bypass guard** (`permission_mode: bypass` で env / config どちらの opt-in も無ければ exit 1) (#68)
+3. **token 解決** (`config.github.tokenSource` を使う。失敗 → exit 1。`gh` 経由で取れた場合は `process.env.GITHUB_TOKEN` に書き戻す) (#68)
 4. **lock 取得** (失敗 → exit 1)
 5. logger 初期化、`bypass` / 低 polling の warning を 1 行ずつ
 6. signal subscription を張る
@@ -273,17 +280,58 @@ agent:
 
 ### structured log 追加分
 
-| level | msg                                               | fields                           | 説明                                            |
-| ----- | ------------------------------------------------- | -------------------------------- | ----------------------------------------------- |
-| warn  | `permission_mode=bypass で serve を起動します...` | `optInEnv`                       | bypass + opt-in 済みの起動時 1 回               |
-| warn  | `polling.interval_ms が低く設定されています...`   | `intervalMs`, `recommendedMinMs` | `intervalMs < 5000` のときの起動時 1 回         |
-| warn  | `serve lock release に失敗`                       | `error`                          | shutdown 時の release 失敗 (race / FS エラー等) |
+| level | msg                                               | fields                           | 説明                                                                                                               |
+| ----- | ------------------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| info  | `github token resolved`                           | `source`, `origin`               | token 解決成功時 1 回。`source` は config 値 (`env` / `gh` / `auto`)、`origin` は実際の取得元 (`env` / `gh`) (#68) |
+| warn  | `permission_mode=bypass で serve を起動します...` | `optInEnv`, `configOptIn`        | bypass + opt-in 済みの起動時 1 回。どちらの経路で opt-in したかが分かる (#68)                                      |
+| warn  | `polling.interval_ms が低く設定されています...`   | `intervalMs`, `recommendedMinMs` | `intervalMs < 5000` のときの起動時 1 回                                                                            |
+| warn  | `serve lock release に失敗`                       | `error`                          | shutdown 時の release 失敗 (race / FS エラー等)                                                                    |
+
+## GitHub token 解決 (#68)
+
+`serve` 起動前に手動で `export GITHUB_TOKEN=...` を要求しないため、token の取得元を config で選べるようにする。token 文字列そのものは絶対に YAML に書かない (誤 commit リスク)。
+
+### `github.token_source` の意味
+
+| 値     | 挙動                                                                                          |
+| ------ | --------------------------------------------------------------------------------------------- |
+| `env`  | `GITHUB_TOKEN` → `GH_TOKEN` の順に env を読む。空なら `GitHubTokenNotSetError` で exit 1      |
+| `gh`   | `gh auth token` を起動時に 1 回呼ぶ。stdout が空 / `gh` 不在 / `gh` exit !=0 のいずれもエラー |
+| `auto` | env を試し、空なら `gh` に fallback。デフォルト (#68)                                         |
+
+### 取得先別エラー
+
+| 状態                                            | 例外                         | exit |
+| ----------------------------------------------- | ---------------------------- | ---- |
+| env 未設定 (`source: env`)                      | `GitHubTokenNotSetError`     | 1    |
+| `gh` コマンド未インストール                     | `GhCliNotFoundError`         | 1    |
+| `gh auth login` 未実行 / scope 不足で stdout 空 | `GhCliNotAuthenticatedError` | 1    |
+| `auto` で env 空 + `gh` 未インストール          | `GhCliNotFoundError`         | 1    |
+
+`gh` の **scope 不足** (PAT に Project / Issue 権限が無い等) は `gh auth token` 自体は成功してしまうため、ここでは検出できない。実態として GitHub API 呼び出し時に 403 で落ちるため、その時点のエラーメッセージで気づく設計。
+
+### Runner subprocess への透過
+
+orchestrator が解決した token を `process.env.GITHUB_TOKEN` に書き戻す。Runner subprocess は既存の `buildRunnerEnv` allowlist 経由で `GITHUB_TOKEN` を受け取り、agent が `gh` / `git push` で利用する (ADR-0005)。`gh` 経由で取得した場合も既存経路と同一になるため、Runner 側の追加変更は不要。
+
+### token がログに出ない (acceptance criteria)
+
+- `info` レベルでは `source` (config 値) と `origin` (`env` / `gh`) のみを出す。`token` フィールドは log オブジェクトに **含めない**
+- error メッセージにも token 文字列は含まない (`GhCliNotAuthenticatedError` は `gh` の stderr tail を出すが、ここに token が含まれることはない)
+- test (`tests/cli/serve.test.ts`) で stderr / stdout / logger の全 call args を集計し、token が含まれないことを assert する
+
+### `philharmonic run` / `philharmonic projects` との共通化
+
+- `philharmonic run` も同じ resolver を使う (config 経由で `github.token_source` を読む)
+- `philharmonic projects list` は config 非依存 (`--owner` / `--project` 必須) のため、`--token-source <env|gh|auto>` フラグで同じ resolver を呼ぶ。default は `auto`
 
 ## 外部依存
 
 - 既存 `runOnce` (`src/orchestrator/run.ts`)
 - 既存 `createLogger` (`src/logger/`)
 - `acquireServeLock` (`src/serve/lock.ts`)
+- `resolveGitHubToken` (`src/github/token.ts`) (#68)
+- `gh` CLI (token_source が `gh` / `auto` のとき。`gh auth token` を 1 回 spawn)
 - Node.js `AbortController` / `AbortSignal`
 - Node.js `process.on('SIG*', ...)` (CLI レイヤのみ)
 - Node.js `process.kill(pid, 0)`

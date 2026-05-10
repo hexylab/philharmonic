@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { createProjectsCommand } from '../../src/cli/projects.js';
+import { GitHubTokenNotSetError } from '../../src/github/index.js';
 import type { Candidate, ProjectsClient } from '../../src/projects/index.js';
 
 type Streams = {
@@ -57,7 +58,9 @@ describe('projects list コマンド', () => {
   it('GITHUB_TOKEN 未設定時はエラーメッセージを stderr に出して exit 1 する', async () => {
     const streams = createStreams();
     const { exit } = await runCommand(['--owner', 'hexylab', '--project', '1'], streams, {
-      getToken: () => undefined,
+      resolveGitHubToken: async () => {
+        throw new GitHubTokenNotSetError();
+      },
       createClient: () => makeClient(SAMPLE_CANDIDATES),
     });
 
@@ -68,7 +71,7 @@ describe('projects list コマンド', () => {
   it('候補があれば table 形式で stdout に出力する', async () => {
     const streams = createStreams();
     await runCommand(['--owner', 'hexylab', '--project', '1'], streams, {
-      getToken: () => 'ghp_test',
+      resolveGitHubToken: async () => ({ token: 'ghp_test', origin: 'env' as const }),
       createClient: () => makeClient(SAMPLE_CANDIDATES),
     });
 
@@ -83,7 +86,7 @@ describe('projects list コマンド', () => {
   it('--json フラグ指定時は JSON で出力する', async () => {
     const streams = createStreams();
     await runCommand(['--owner', 'hexylab', '--project', '1', '--json'], streams, {
-      getToken: () => 'ghp_test',
+      resolveGitHubToken: async () => ({ token: 'ghp_test', origin: 'env' as const }),
       createClient: () => makeClient(SAMPLE_CANDIDATES),
     });
 
@@ -96,7 +99,7 @@ describe('projects list コマンド', () => {
   it('候補が 0 件のときは "no candidates" を出して exit しない', async () => {
     const streams = createStreams();
     await runCommand(['--owner', 'hexylab', '--project', '1'], streams, {
-      getToken: () => 'ghp_test',
+      resolveGitHubToken: async () => ({ token: 'ghp_test', origin: 'env' as const }),
       createClient: () => makeClient([]),
     });
 
@@ -104,10 +107,30 @@ describe('projects list コマンド', () => {
     expect(written).toContain('no candidates');
   });
 
+  it('--token-source <gh> を resolveGitHubToken に渡す (#68)', async () => {
+    const streams = createStreams();
+    const resolveSpy = vi.fn(async () => ({ token: 'gho_x', origin: 'gh' as const }));
+    await runCommand(['--owner', 'hexylab', '--project', '1', '--token-source', 'gh'], streams, {
+      resolveGitHubToken: resolveSpy,
+      createClient: () => makeClient(SAMPLE_CANDIDATES),
+    });
+    expect(resolveSpy).toHaveBeenCalledWith({ source: 'gh' });
+  });
+
+  it('--token-source 省略時は default (auto) で呼ばれる (#68)', async () => {
+    const streams = createStreams();
+    const resolveSpy = vi.fn(async () => ({ token: 'tok', origin: 'env' as const }));
+    await runCommand(['--owner', 'hexylab', '--project', '1'], streams, {
+      resolveGitHubToken: resolveSpy,
+      createClient: () => makeClient(SAMPLE_CANDIDATES),
+    });
+    expect(resolveSpy).toHaveBeenCalledWith({ source: 'auto' });
+  });
+
   it('client が throw した場合は stderr に出して exit 1 する', async () => {
     const streams = createStreams();
     const { exit } = await runCommand(['--owner', 'unknown', '--project', '1'], streams, {
-      getToken: () => 'ghp_test',
+      resolveGitHubToken: async () => ({ token: 'ghp_test', origin: 'env' as const }),
       createClient: () => ({
         fetchProjectCandidates: vi.fn(async () => {
           throw new Error("owner 'unknown' が見つかりません");

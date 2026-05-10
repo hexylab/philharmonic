@@ -37,12 +37,15 @@ function fakeConfig(overrides: Partial<Config> = {}): Config {
     killGracePeriodMs: 5_000,
     workspaceRoot: '.philharmonic/worktrees',
     dispatchStatuses: ['Todo'],
+    statusTransitions: { inProgress: 'In Progress', inReview: 'In Review', failed: 'Failed' },
     cleanRetentionDays: 7,
     logLevel: 'info',
     polling: { intervalMs: 30_000 },
     agent: { maxConcurrentAgents: 1, maxTurns: 1, stallTimeoutMs: 300_000 },
     hooks: { afterCreate: [], beforeRun: [], afterRun: [], beforeRemove: [] },
     server: null,
+    github: { tokenSource: 'auto' },
+    safety: { allowBypassInServe: false },
     ...overrides,
   };
 }
@@ -143,7 +146,8 @@ describe('philharmonic serve CLI コマンド', () => {
     const lock = createFakeLock();
     const { exit } = await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => {
+      loadConfig: async () => fakeConfig(),
+      resolveGitHubToken: async () => {
         throw new GitHubTokenNotSetError();
       },
       acquireServeLock: lock.acquireSpy,
@@ -158,7 +162,7 @@ describe('philharmonic serve CLI コマンド', () => {
     const lock = createFakeLock();
     const { exit } = await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: vi.fn(async () => {
         throw new ConfigFileNotFoundError('/tmp/repo/philharmonic.yaml');
       }),
@@ -183,7 +187,7 @@ describe('philharmonic serve CLI コマンド', () => {
 
     await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig({ polling: { intervalMs: 7_500 } }),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
@@ -223,7 +227,7 @@ describe('philharmonic serve CLI コマンド', () => {
 
     const cmdPromise = runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig({ polling: { intervalMs: 1_000 } }),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
@@ -269,7 +273,7 @@ describe('philharmonic serve CLI コマンド', () => {
 
     const cmdPromise = runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig({ polling: { intervalMs: 1000 } }),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
@@ -302,7 +306,7 @@ describe('philharmonic serve CLI コマンド', () => {
     });
     const { exit } = await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig(),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
@@ -331,7 +335,7 @@ describe('philharmonic serve CLI コマンド', () => {
     const cmd = createServeCommand({
       ...streams,
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig(),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
@@ -353,12 +357,105 @@ describe('philharmonic serve CLI コマンド', () => {
     expect(subscription.disposed).toBe(true);
   });
 
+  it('config.github.tokenSource を resolveGitHubToken にそのまま渡し、解決した token を setEnv で書き戻す (#68)', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const resolveSpy = vi.fn(async () => ({ token: 'gho_secret', origin: 'gh' as const }));
+    const setEnvSpy = vi.fn();
+
+    const serveLoopMock = vi.fn(async (deps: { signal: AbortSignal }) => {
+      subscription.emit('SIGTERM');
+      await new Promise<void>((resolve) => {
+        if (deps.signal.aborted) resolve();
+        else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    });
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      resolveGitHubToken: resolveSpy,
+      setEnv: setEnvSpy,
+      loadConfig: async () => fakeConfig({ github: { tokenSource: 'gh' } }),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      createWorkflowSource: fakeCreateWorkflowSource,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: vi.fn(),
+      serveLoop: serveLoopMock as never,
+      createSignalSubscription: () => subscription,
+    });
+
+    expect(resolveSpy).toHaveBeenCalledWith({ source: 'gh' });
+    expect(setEnvSpy).toHaveBeenCalledWith('GITHUB_TOKEN', 'gho_secret');
+  });
+
+  it('解決した token はログ・stderr のいずれにも出力されない (#68)', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const TOKEN = 'gho_VERY_SECRET_TOKEN_VALUE_42';
+    const debugSpy = vi.fn();
+    const infoSpy = vi.fn();
+    const warnSpy = vi.fn();
+    const errorSpy = vi.fn();
+    const fakeLogger = {
+      level: 'info' as const,
+      debug: debugSpy,
+      info: infoSpy,
+      warn: warnSpy,
+      error: errorSpy,
+      child: vi.fn(),
+    };
+    fakeLogger.child.mockReturnValue(fakeLogger);
+
+    const serveLoopMock = vi.fn(async (deps: { signal: AbortSignal }) => {
+      subscription.emit('SIGTERM');
+      await new Promise<void>((resolve) => {
+        if (deps.signal.aborted) resolve();
+        else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    });
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      resolveGitHubToken: async () => ({ token: TOKEN, origin: 'gh' as const }),
+      loadConfig: async () => fakeConfig({ github: { tokenSource: 'auto' } }),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      createWorkflowSource: fakeCreateWorkflowSource,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: vi.fn(),
+      serveLoop: serveLoopMock as never,
+      createSignalSubscription: () => subscription,
+      createLogger: () => fakeLogger,
+    });
+
+    const allOutputs: string[] = [];
+    for (const spy of [streams.stdout.write, streams.stderr.write]) {
+      for (const call of spy.mock.calls) {
+        if (typeof call[0] === 'string') allOutputs.push(call[0]);
+      }
+    }
+    for (const spy of [debugSpy, infoSpy, warnSpy, errorSpy]) {
+      for (const call of spy.mock.calls) {
+        for (const arg of call) {
+          allOutputs.push(typeof arg === 'string' ? arg : JSON.stringify(arg));
+        }
+      }
+    }
+    const joined = allOutputs.join('\n');
+    expect(joined).not.toContain(TOKEN);
+  });
+
   it('permission_mode=bypass + opt-in env なし → exit 1 (lock 取得前)', async () => {
     const streams = createStreams();
     const lock = createFakeLock();
     const { exit } = await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig({ permissionMode: 'bypass' }),
       getEnv: () => undefined,
       acquireServeLock: lock.acquireSpy,
@@ -366,6 +463,96 @@ describe('philharmonic serve CLI コマンド', () => {
     expect(streams.stderr.write).toHaveBeenCalledWith(expect.stringContaining(BYPASS_OPT_IN_ENV));
     expect(exit).toHaveBeenCalledWith(1);
     expect(lock.acquireSpy).not.toHaveBeenCalled();
+  });
+
+  it('permission_mode=bypass + safety.allow_bypass_in_serve: true なら起動する (env なし) (#68)', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const warnSpy = vi.fn();
+    const fakeLogger = {
+      level: 'info' as const,
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: warnSpy,
+      error: vi.fn(),
+      child: vi.fn(),
+    };
+    fakeLogger.child.mockReturnValue(fakeLogger);
+
+    const serveLoopMock = vi.fn(async (deps: { signal: AbortSignal }) => {
+      subscription.emit('SIGTERM');
+      await new Promise<void>((resolve) => {
+        if (deps.signal.aborted) resolve();
+        else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    });
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
+      loadConfig: async () =>
+        fakeConfig({ permissionMode: 'bypass', safety: { allowBypassInServe: true } }),
+      getEnv: () => undefined,
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      createWorkflowSource: fakeCreateWorkflowSource,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: vi.fn(),
+      serveLoop: serveLoopMock as never,
+      createSignalSubscription: () => subscription,
+      createLogger: () => fakeLogger,
+    });
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('permission_mode=bypass で serve を起動します'),
+      expect.objectContaining({ configOptIn: true }),
+    );
+    expect(lock.released).toBe(true);
+  });
+
+  it('permission_mode=bypass + env=1 + config=true (両方真) でも起動する (#68)', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const warnSpy = vi.fn();
+    const fakeLogger = {
+      level: 'info' as const,
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: warnSpy,
+      error: vi.fn(),
+      child: vi.fn(),
+    };
+    fakeLogger.child.mockReturnValue(fakeLogger);
+
+    const serveLoopMock = vi.fn(async (deps: { signal: AbortSignal }) => {
+      subscription.emit('SIGTERM');
+      await new Promise<void>((resolve) => {
+        if (deps.signal.aborted) resolve();
+        else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    });
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
+      loadConfig: async () =>
+        fakeConfig({ permissionMode: 'bypass', safety: { allowBypassInServe: true } }),
+      getEnv: (key) => (key === BYPASS_OPT_IN_ENV ? '1' : undefined),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      createWorkflowSource: fakeCreateWorkflowSource,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: vi.fn(),
+      serveLoop: serveLoopMock as never,
+      createSignalSubscription: () => subscription,
+      createLogger: () => fakeLogger,
+    });
+
+    expect(lock.released).toBe(true);
   });
 
   it('permission_mode=bypass + opt-in env=1 なら起動して警告ログを出す', async () => {
@@ -393,7 +580,7 @@ describe('philharmonic serve CLI コマンド', () => {
 
     await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig({ permissionMode: 'bypass' }),
       getEnv: (key) => (key === BYPASS_OPT_IN_ENV ? '1' : undefined),
       createGitHubClient: () => fakeGitHub,
@@ -439,7 +626,7 @@ describe('philharmonic serve CLI コマンド', () => {
 
     await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig({ polling: { intervalMs: 2_000 } }),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
@@ -487,7 +674,7 @@ describe('philharmonic serve CLI コマンド', () => {
 
     await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig(),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
@@ -534,7 +721,7 @@ describe('philharmonic serve CLI コマンド', () => {
 
     await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig(),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
@@ -581,7 +768,7 @@ describe('philharmonic serve CLI コマンド', () => {
 
     await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig({ polling: { intervalMs: 5_000 } }),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
@@ -656,7 +843,7 @@ describe('philharmonic serve CLI コマンド', () => {
 
     await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () =>
         fakeConfig({ agent: { maxConcurrentAgents: 3, maxTurns: 1, stallTimeoutMs: 300_000 } }),
       createGitHubClient: () => fakeGitHub,
@@ -722,7 +909,7 @@ describe('philharmonic serve CLI コマンド', () => {
 
     await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () =>
         fakeConfig({ agent: { maxConcurrentAgents: 2, maxTurns: 1, stallTimeoutMs: 300_000 } }),
       createGitHubClient: () => fakeGitHub,
@@ -756,7 +943,7 @@ describe('philharmonic serve CLI コマンド', () => {
 
     await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig(),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
@@ -793,7 +980,7 @@ describe('philharmonic serve CLI コマンド', () => {
 
     await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig({ server: { port: 4_000 } }),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
@@ -822,7 +1009,7 @@ describe('philharmonic serve CLI コマンド', () => {
 
     const { exit } = await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig({ server: { port: 4_000 } }),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
@@ -884,7 +1071,7 @@ describe('philharmonic serve CLI コマンド', () => {
 
     await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig(),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,

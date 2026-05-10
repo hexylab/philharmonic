@@ -41,8 +41,10 @@ corepack enable
 pnpm install && pnpm build
 pnpm link --global
 
-# 2) GitHub token を環境変数に置く (Orchestrator + Runner の env allowlist 経由で agent も利用)
-export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+# 2) GitHub 認証を整える (gh auth login 済みなら追加設定不要 / config の default は github.token_source: auto)
+gh auth login                              # 推奨経路
+# あるいは env を使う場合:
+# export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 
 # 3) 動かしたい先のリポジトリに .philharmonic/philharmonic.yaml を置く (#67)
 cd /path/to/your-repo
@@ -50,6 +52,9 @@ mkdir -p .philharmonic
 cat > .philharmonic/philharmonic.yaml <<'EOF'
 owner: your-github-login
 project_number: 1
+permission_mode: bypass         # ADR-0005: agent 委譲には実用上必須
+safety:
+  allow_bypass_in_serve: true   # serve で bypass を使う opt-in (env でも可)
 EOF
 
 # 4) 常駐デーモンを起動 (30 秒ごとに Project Todo を polling)
