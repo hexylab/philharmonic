@@ -40,3 +40,19 @@ export {
   type WorkspaceManagerOptions,
 } from './manager.js';
 export { FALLBACK_BRANCH_SEGMENT, sanitizeBranchName } from './sanitize.js';
+export {
+  executeStaleCleanup,
+  planStaleWorktreeCleanup,
+  type ExecuteStaleCleanupInput,
+  type ExecuteStaleCleanupResult,
+  type IsRunningFn,
+  type ParseRepositoryFn,
+  type PlanStaleWorktreeCleanupInput,
+  type RepositoryRef,
+  type StaleCleanupCandidate,
+  type StaleCleanupOutcome,
+  type StaleCleanupPlan,
+  type StaleCleanupReason,
+  type StaleCleanupSkip,
+  type StaleCleanupSkipReason,
+} from './stale-cleanup.js';

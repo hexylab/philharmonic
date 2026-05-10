@@ -4,15 +4,16 @@
 
 ## CLI コマンドの早見表
 
-| コマンド                     | 何をするか                                                                                              |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `philharmonic init`          | 対象リポジトリで `.philharmonic/philharmonic.yaml` を scaffold する (初回セットアップ用 / #66 / #67)    |
-| `philharmonic projects list` | Project Item のうち Issue に紐づいたものを一覧表示する (dispatch 候補が見えているか確認)                |
-| `philharmonic run`           | 1 ターン分の orchestration を実行する (1 件処理して exit)                                               |
-| `philharmonic serve`         | 一定間隔でポーリングして候補があれば run を回す常駐デーモン (SIGTERM/SIGINT で graceful shutdown)       |
-| `philharmonic retry <n>`     | 指定 Issue の Project Status を dispatch 対象状態に戻し、stale な worktree を cleanup する (手動再実行) |
-| `philharmonic clean`         | retention 経過済みの `issue-*` worktree とローカルブランチを掃除する (失敗 worktree のクリーンアップ用) |
-| `philharmonic dashboard`     | `philharmonic serve` の Snapshot HTTP API を購読する read-only TUI dashboard を起動する                 |
+| コマンド                     | 何をするか                                                                                                               |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `philharmonic init`          | 対象リポジトリで `.philharmonic/philharmonic.yaml` を scaffold する (初回セットアップ用 / #66 / #67)                     |
+| `philharmonic projects list` | Project Item のうち Issue に紐づいたものを一覧表示する (dispatch 候補が見えているか確認)                                 |
+| `philharmonic run`           | 1 ターン分の orchestration を実行する (1 件処理して exit)                                                                |
+| `philharmonic serve`         | 一定間隔でポーリングして候補があれば run を回す常駐デーモン (SIGTERM/SIGINT で graceful shutdown)                        |
+| `philharmonic retry <n>`     | 指定 Issue の Project Status を dispatch 対象状態に戻し、stale な worktree を cleanup する (手動再実行)                  |
+| `philharmonic clean`         | retention 経過済みの `issue-*` worktree とローカルブランチを掃除する (失敗 worktree のクリーンアップ用)                  |
+| `philharmonic clean-stale`   | terminal state (Done 等) / closed Issue の `issue-*` worktree を、open PR / active run が無い場合のみ cleanup する (#89) |
+| `philharmonic dashboard`     | `philharmonic serve` の Snapshot HTTP API を購読する read-only TUI dashboard を起動する                                  |
 
 `init` 以外のコマンドは `--config <path>` が使えます (cwd 以外の `.philharmonic/philharmonic.yaml` を指定するとき)。`init` の手順詳細は [getting-started.md](./getting-started.md#4-対象リポジトリで-philharmonic-init-を実行する) を参照してください。
 
@@ -180,6 +181,40 @@ philharmonic clean --retention-days 3
 ```
 
 `clean` の対象は `<workspace_root>/issue-*` worktree とそれに紐づくローカルブランチに **限定** されます。`main` などの主リポジトリ worktree や `issue-*` 以外のディレクトリは構造的に保護されます (詳細: [`docs/specs/orchestration-mvp.md#philharmonic-clean-失敗-worktree-のクリーンアップ`](../specs/orchestration-mvp.md))。
+
+## `philharmonic clean-stale` — terminal Issue の自動掃除
+
+retention (mtime) ではなく **Project Status** に基づいて、もう作業の必要がない Issue の worktree を掃除するコマンドです。`philharmonic serve` 起動時にも recovery 完了後に自動で 1 度走るため、daemon 運用していれば手動で叩く必要は通常ありません。
+
+cleanup 対象になるのは以下のいずれか:
+
+- GitHub Issue が CLOSED (Issue 本体が閉じられている)
+- Project Status が `terminal_statuses` (default `['Done']`) に含まれる
+
+cleanup を **skip する** safety 条件:
+
+- `feature/<issue 番号>-` prefix の open PR が残っている (`open_pr_exists`)
+- 同 Issue が run tracker で in-flight に積まれている (`active_run` — serve 起動時のみ)
+- 対応する Project Item が見つからない (`no_project_item`)
+- Open Issue かつ non-terminal Status (`issue_open_non_terminal` — Todo / In Progress / In Review / Failed 等)
+
+```sh
+# 何が消えるかを確認する (副作用ゼロ)
+philharmonic clean-stale --dry-run
+
+# 実行
+philharmonic clean-stale
+
+# terminal とみなす Status を一時的に上書き
+philharmonic clean-stale --terminal-status Done --terminal-status Archived
+
+# daemon が動作中 (serve.lock 存在) でも続行 (race を許容する場合のみ)
+philharmonic clean-stale --force
+```
+
+branch (`feature/<番号>-...`) も `git branch -D` で同時に消します。**main や別 feature ブランチを checkout している `issue-*` worktree は worktree だけ消して branch は触りません** (`shouldDeleteBranch` 保護)。
+
+`Todo` に戻したのに古い worktree が残って `philharmonic serve` の dispatch が進まないケース (= 二重 dispatch ガードの `workspace_exists` で skip され続ける) は、本コマンドの対象外です。個別 Issue の再実行は [`philharmonic retry`](#philharmonic-retry-issue-number--手動再実行) を使ってください。詳細仕様: [`docs/specs/stale-worktree-cleanup.md`](../specs/stale-worktree-cleanup.md)。
 
 ## 構造化ログ
 

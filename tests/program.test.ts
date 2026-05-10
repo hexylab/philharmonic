@@ -29,7 +29,16 @@ describe('createProgram', () => {
     const program = createProgram();
 
     const helpText = program.helpInformation();
-    for (const name of ['init', 'projects', 'run', 'serve', 'retry', 'clean', 'dashboard']) {
+    for (const name of [
+      'init',
+      'projects',
+      'run',
+      'serve',
+      'retry',
+      'clean',
+      'clean-stale',
+      'dashboard',
+    ]) {
       expect(helpText).toContain(name);
     }
   });

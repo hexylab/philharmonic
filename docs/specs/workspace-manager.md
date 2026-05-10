@@ -266,7 +266,7 @@ export class HookTimeoutError extends Error {
 ## オープンクエスチョン
 
 - 既存 worktree が dirty (未コミット変更あり) の場合の再利用ポリシー — MVP では再利用許可とし、Runner 側に判断を委ねる予定だが、後続 Issue で再検討する
-- `cleanupWorkspace` の retention (失敗 worktree を残すか) は orchestrator が制御するため、本 manager では引数で都度指定する。一括 cleanup コマンド (`philharmonic clean`) の仕様は別 Issue
+- `cleanupWorkspace` の retention (失敗 worktree を残すか) は orchestrator が制御するため、本 manager では引数で都度指定する。retention-based の一括 cleanup CLI は `philharmonic clean` (#56)、terminal-state ベースの cleanup は `philharmonic clean-stale` (#89 / 詳細: [stale-worktree-cleanup.md](./stale-worktree-cleanup.md))
 - 並列タスク実行時の lock / 競合検知 — 単一プロセス前提のため未対応。後続で必要に応じて検討
 
 ## MVP でやらないこと
