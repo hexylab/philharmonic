@@ -4,19 +4,21 @@
 
 [OpenAI Symphony](https://github.com/openai/symphony) から着想を得た TypeScript / Node.js 実装で、個人開発者や小規模チームが「やりたいけど手が回っていないタスク」を Claude Code に少しずつ消化させたいときに使えます。
 
-```
-   $ philharmonic serve   (常駐デーモン / 30 秒ごとに polling)
-            │
-            │   GitHub Projects v2: Todo  ←  Issue を積む
-            ▼
-   隔離 git worktree で Claude Code (headless mode)
-            │
-            │   agent が gh / git で Status 遷移 / commit / push / PR 作成
-            ▼
-      Pull Request (Status: In Review)
+## 全体像 — Issue を積んで PR を merge するだけ
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> Todo: 開発者が Issue を積む
+    Todo --> InProgress: philharmonic serve が dispatch<br/>(30 秒 polling → 隔離 worktree → Claude Code 起動)
+    InProgress --> InReview: agent が実装 → PR 作成<br/>(commit / push / gh pr create)
+    InReview --> Done: 開発者がレビュー → merge
+    InProgress --> Failed: agent が失敗判断<br/>+ Issue にコメント
+    Failed --> Todo: 人が再開判断
+    Done --> [*]
 ```
 
-最小設定 2 行で daemon を立ち上げれば、コード生成から PR 化までを agent に任せられます。最後の merge 判断は必ず人間に残ります。
+**開発者がやること**: Issue を Todo に積む / PR をレビューして merge する — それだけです。worktree 作成 / Claude Code 起動 / 実装 / commit / push / PR 作成 / Status 遷移は Philharmonic と agent が代行します。最後の merge 判断だけは必ず人間に残ります。
 
 ## なぜ Philharmonic を使うのか
 
