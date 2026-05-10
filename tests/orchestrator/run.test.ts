@@ -808,6 +808,58 @@ describe('runConcurrent (ADR-0005: 薄い orchestrator)', () => {
     expect(outcomes).toHaveLength(1);
     expect(outcomes[0]?.result.issueNumber).toBe(201);
   });
+
+  it('複数 success の continuation 判定で fetchProjectCandidates は 1 tick で 2 回 (initial + 共有 1 回) に抑える (#85 / ADR-0009)', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue();
+
+    const candidates: Candidate[] = [
+      { ...SAMPLE_CANDIDATE, itemId: 'A', issueNumber: 101, status: 'In Review' },
+      { ...SAMPLE_CANDIDATE, itemId: 'B', issueNumber: 102, status: 'In Review' },
+    ];
+    const initial: Candidate[] = [
+      { ...SAMPLE_CANDIDATE, itemId: 'A', issueNumber: 101 }, // Todo (dispatch 用)
+      { ...SAMPLE_CANDIDATE, itemId: 'B', issueNumber: 102 },
+    ];
+    const projects: ProjectsMock = {
+      fetchProjectCandidates: vi
+        .fn()
+        .mockResolvedValueOnce(initial) // initial selection
+        .mockResolvedValueOnce(candidates), // shared continuation re-fetch (1 回のみ)
+    };
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    workspace.resolveWorkspacePath.mockImplementation((key: string) => path.join(tempDir, key));
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+
+    let runIdSeq = 0;
+    await runConcurrent({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => {
+        runIdSeq += 1;
+        return `0190ce80-0000-7000-8000-00000000010${runIdSeq}`;
+      },
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
+      maxConcurrent: 2,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+    });
+
+    // initial selection: 1 回 + continuation 用 (2 success 共有): 1 回 = 計 2 回
+    expect(projects.fetchProjectCandidates).toHaveBeenCalledTimes(2);
+    // 両 Issue とも In Review (terminal) → release
+    expect(queue.size()).toBe(0);
+  });
 });
 
 describe('runOnce + retry queue (#84 / ADR-0008)', () => {
@@ -1324,6 +1376,45 @@ describe('runOnce + continuation retry (#85 / ADR-0009)', () => {
     expect(queue.size()).toBe(0);
     const exhausted = logger.warn.mock.calls.find((c) => c[0] === 'retry exhausted');
     expect(exhausted?.[1]).toMatchObject({ kind: 'continuation', attempt: 5 });
+  });
+
+  it('success だが continuation 用の fetchProjectCandidates が失敗したら release される', async () => {
+    const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
+    const queue = createRetryQueue();
+
+    const projects: ProjectsMock = {
+      fetchProjectCandidates: vi
+        .fn()
+        .mockResolvedValueOnce([SAMPLE_CANDIDATE]) // dispatch 用 (success まで進むため)
+        .mockRejectedValueOnce(new Error('boom')), // continuation 用 (release path)
+    };
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+    const logger = makeFakeLogger();
+
+    await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
+      retryQueue: queue,
+      maxRetryAttempts: 5,
+      maxRetryBackoffMs: 300_000,
+      logger,
+    });
+
+    expect(queue.size()).toBe(0);
+    const released = logger.info.mock.calls.find((c) => c[0] === 'continuation released');
+    expect(released?.[1]).toMatchObject({ reason: 'fetch_error' });
   });
 
   it('continuation 中の Issue が success で再 dispatch されると attempt が +1 される', async () => {
