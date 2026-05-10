@@ -8,10 +8,12 @@ import {
   DEFAULT_BASE_BRANCH,
   DEFAULT_CLEAN_RETENTION_DAYS,
   DEFAULT_DISPATCH_STATUSES,
+  DEFAULT_GITHUB_TOKEN_SOURCE,
   DEFAULT_KILL_GRACE_PERIOD_MS,
   DEFAULT_LOG_LEVEL,
   DEFAULT_PERMISSION_MODE,
   DEFAULT_POLLING_INTERVAL_MS,
+  DEFAULT_SAFETY_ALLOW_BYPASS_IN_SERVE,
   DEFAULT_STATUS_FIELD,
   DEFAULT_STATUS_TRANSITION_FAILED,
   DEFAULT_STATUS_TRANSITION_IN_PROGRESS,
@@ -57,6 +59,8 @@ describe('configSchema', () => {
         beforeRemove: [],
       },
       server: null,
+      github: { tokenSource: DEFAULT_GITHUB_TOKEN_SOURCE },
+      safety: { allowBypassInServe: DEFAULT_SAFETY_ALLOW_BYPASS_IN_SERVE },
     });
   });
 
@@ -623,6 +627,60 @@ describe('configSchema', () => {
       owner: 'hexylab',
       project_number: 1,
       server: {},
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('github 未指定時は token_source: auto が補完される (#68)', () => {
+    const parsed = configSchema.parse({ owner: 'hexylab', project_number: 1 });
+    expect(parsed.github).toEqual({ tokenSource: 'auto' });
+  });
+
+  it('github.token_source は env / gh / auto のみ許可する (#68)', () => {
+    for (const source of ['env', 'gh', 'auto']) {
+      const parsed = configSchema.parse({
+        owner: 'hexylab',
+        project_number: 1,
+        github: { token_source: source },
+      });
+      expect(parsed.github.tokenSource).toBe(source);
+    }
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      github: { token_source: 'pat' },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('github 配下の未知キー (token 直書き等) は strict で拒否する (#68)', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      github: { token: 'ghp_xxx' },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('safety 未指定時は allow_bypass_in_serve: false が補完される (#68)', () => {
+    const parsed = configSchema.parse({ owner: 'hexylab', project_number: 1 });
+    expect(parsed.safety).toEqual({ allowBypassInServe: false });
+  });
+
+  it('safety.allow_bypass_in_serve に boolean を渡すと camelCase で取り出せる (#68)', () => {
+    const parsed = configSchema.parse({
+      owner: 'hexylab',
+      project_number: 1,
+      safety: { allow_bypass_in_serve: true },
+    });
+    expect(parsed.safety.allowBypassInServe).toBe(true);
+  });
+
+  it('safety 配下の未知キーは strict で拒否する (#68)', () => {
+    const result = configSchema.safeParse({
+      owner: 'hexylab',
+      project_number: 1,
+      safety: { allow_bypass_in_serve: true, danger: true },
     });
     expect(result.success).toBe(false);
   });

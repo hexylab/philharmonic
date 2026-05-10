@@ -37,6 +37,8 @@ function fakeConfig(overrides: Partial<Config> = {}): Config {
     agent: { maxConcurrentAgents: 1, maxTurns: 1, stallTimeoutMs: 300_000 },
     hooks: { afterCreate: [], beforeRun: [], afterRun: [], beforeRemove: [] },
     server: null,
+    github: { tokenSource: 'auto' },
+    safety: { allowBypassInServe: false },
     ...overrides,
   };
 }
@@ -86,7 +88,8 @@ describe('philharmonic run CLI コマンド', () => {
     const streams = createStreams();
     const { exit } = await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => {
+      loadConfig: async () => fakeConfig(),
+      resolveGitHubToken: async () => {
         throw new GitHubTokenNotSetError();
       },
     });
@@ -98,7 +101,7 @@ describe('philharmonic run CLI コマンド', () => {
     const streams = createStreams();
     const { exit } = await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: vi.fn(async () => {
         throw new ConfigFileNotFoundError('/tmp/repo/philharmonic.yaml');
       }),
@@ -112,7 +115,7 @@ describe('philharmonic run CLI コマンド', () => {
     const runOnceMock = vi.fn(async (): Promise<RunOnceResult> => ({ kind: 'no_candidate' }));
     await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig(),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
@@ -136,7 +139,7 @@ describe('philharmonic run CLI コマンド', () => {
     );
     await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig(),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
@@ -164,7 +167,7 @@ describe('philharmonic run CLI コマンド', () => {
     );
     const { exit } = await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig(),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
@@ -183,7 +186,7 @@ describe('philharmonic run CLI コマンド', () => {
     const runOnceMock = vi.fn(async (): Promise<RunOnceResult> => ({ kind: 'no_candidate' }));
     await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig({ dispatchStatuses: ['Ready for Agent', 'Todo'] }),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,
@@ -203,7 +206,7 @@ describe('philharmonic run CLI コマンド', () => {
     });
     const { exit } = await runCmd(streams, {
       cwd: () => '/tmp/repo',
-      getToken: () => 'tok',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
       loadConfig: async () => fakeConfig(),
       createGitHubClient: () => fakeGitHub,
       createProjectsClient: () => fakeProjects,

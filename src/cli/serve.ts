@@ -12,10 +12,15 @@ import {
   type LoadConfigOptions,
 } from '../config/index.js';
 import {
+  GITHUB_TOKEN_ENV,
+  GhCliNotAuthenticatedError,
+  GhCliNotFoundError,
   GitHubTokenNotSetError,
   createGitHubClient,
-  getGitHubTokenFromEnv,
+  resolveGitHubToken,
   type GitHubClient,
+  type ResolveGitHubTokenInput,
+  type ResolveGitHubTokenResult,
 } from '../github/index.js';
 import { createLogger, type Logger } from '../logger/index.js';
 import {
@@ -72,6 +77,9 @@ export type CreateServeSignalSubscription = () => ServeSignalSubscription;
 
 /**
  * `permission_mode: bypass` を `serve` で使う場合に opt-in を要求する env 名。
+ *
+ * 推奨経路は `philharmonic.yaml` の `safety.allow_bypass_in_serve: true` だが、
+ * 既存ユーザの後方互換のため env opt-in も引き続き受け付ける。
  * `--dangerously-skip-permissions` が長時間稼働で連続発火するため、明示同意を必須にする。
  */
 export const BYPASS_OPT_IN_ENV = 'PHILHARMONIC_ALLOW_BYPASS_IN_SERVE';
@@ -79,8 +87,9 @@ export const BYPASS_OPT_IN_ENV = 'PHILHARMONIC_ALLOW_BYPASS_IN_SERVE';
 export type ServeCommandDeps = {
   cwd?: () => string;
   loadConfig?: (configPath?: string, options?: LoadConfigOptions) => Promise<Config>;
-  getToken?: () => string;
+  resolveGitHubToken?: (input: ResolveGitHubTokenInput) => Promise<ResolveGitHubTokenResult>;
   getEnv?: (key: string) => string | undefined;
+  setEnv?: (key: string, value: string) => void;
   createGitHubClient?: (token: string) => GitHubClient;
   createProjectsClient?: (token: string) => ProjectsClient;
   createWorkspaceManager?: (input: {
@@ -108,8 +117,11 @@ export type ServeCommandDeps = {
 const DEFAULT_DEPS: Required<ServeCommandDeps> = {
   cwd: () => process.cwd(),
   loadConfig: (configPath, options) => loadConfig(configPath, options),
-  getToken: () => getGitHubTokenFromEnv(),
+  resolveGitHubToken: (input) => resolveGitHubToken(input),
   getEnv: (key) => process.env[key],
+  setEnv: (key, value) => {
+    process.env[key] = value;
+  },
   createGitHubClient: (token) => createGitHubClient({ token }),
   createProjectsClient: (token) => createProjectsClient({ token }),
   createWorkspaceManager: (input) => createWorkspaceManager(input),
@@ -153,20 +165,6 @@ async function runServeCommand(
 ): Promise<void> {
   const cwd = deps.cwd();
 
-  let token: string;
-  try {
-    token = deps.getToken();
-  } catch (error) {
-    if (error instanceof GitHubTokenNotSetError) {
-      deps.stderr.write(`${error.message}\n`);
-      deps.exit(1);
-      return;
-    }
-    deps.stderr.write(`${describeError(error)}\n`);
-    deps.exit(1);
-    return;
-  }
-
   let config: Config;
   let legacyConfigUsed: { legacyPath: string; expectedPath: string } | null = null;
   try {
@@ -192,9 +190,11 @@ async function runServeCommand(
   }
 
   if (config.permissionMode === 'bypass') {
-    if (deps.getEnv(BYPASS_OPT_IN_ENV) !== '1') {
+    const envOptIn = deps.getEnv(BYPASS_OPT_IN_ENV) === '1';
+    const configOptIn = config.safety.allowBypassInServe;
+    if (!envOptIn && !configOptIn) {
       deps.stderr.write(
-        `serve で permission_mode: bypass を使うには ${BYPASS_OPT_IN_ENV}=1 を明示設定してください。` +
+        `serve で permission_mode: bypass を使うには philharmonic.yaml に safety.allow_bypass_in_serve: true を設定するか、環境変数 ${BYPASS_OPT_IN_ENV}=1 を明示してください。` +
           `\n--dangerously-skip-permissions は worktree 外 (ホスト全体) にも副作用が及び得るため、` +
           `daemon で連続発火させる前に隔離 (専用ユーザ / 一時ホスト等) を確認してください。\n`,
       );
@@ -202,6 +202,30 @@ async function runServeCommand(
       return;
     }
   }
+
+  let token: string;
+  let tokenOrigin: ResolveGitHubTokenResult['origin'];
+  try {
+    const resolved = await deps.resolveGitHubToken({ source: config.github.tokenSource });
+    token = resolved.token;
+    tokenOrigin = resolved.origin;
+  } catch (error) {
+    if (
+      error instanceof GitHubTokenNotSetError ||
+      error instanceof GhCliNotFoundError ||
+      error instanceof GhCliNotAuthenticatedError
+    ) {
+      deps.stderr.write(`${error.message}\n`);
+      deps.exit(1);
+      return;
+    }
+    deps.stderr.write(`${describeError(error)}\n`);
+    deps.exit(1);
+    return;
+  }
+  // Runner subprocess は env allowlist 経由で GITHUB_TOKEN を受け取る (ADR-0005)。
+  // gh から取った token も agent の `gh` / `git push` に届くよう process.env に書き戻す。
+  deps.setEnv(GITHUB_TOKEN_ENV, token);
 
   const repoRoot = cwd;
 
@@ -246,10 +270,12 @@ async function runServeCommand(
     logger,
   });
 
+  logger.info('github token resolved', { source: config.github.tokenSource, origin: tokenOrigin });
+
   if (config.permissionMode === 'bypass') {
     logger.warn(
       'permission_mode=bypass で serve を起動します。--dangerously-skip-permissions が tick ごとに発火するため、隔離環境であることを必ず確認してください',
-      { optInEnv: BYPASS_OPT_IN_ENV },
+      { optInEnv: BYPASS_OPT_IN_ENV, configOptIn: config.safety.allowBypassInServe },
     );
   } else {
     // ADR-0005: agent 委譲型では bypass が実用上必須。auto では agent が gh / git push を呼べず

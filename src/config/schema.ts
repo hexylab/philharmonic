@@ -40,6 +40,11 @@ export const DEFAULT_HOOK_ON_FAILURE = 'fail' as const;
 export const SERVER_PORT_MIN = 1;
 export const SERVER_PORT_MAX = 65_535;
 
+export const GITHUB_TOKEN_SOURCES = ['env', 'gh', 'auto'] as const;
+export type GitHubTokenSource = (typeof GITHUB_TOKEN_SOURCES)[number];
+export const DEFAULT_GITHUB_TOKEN_SOURCE: GitHubTokenSource = 'auto';
+export const DEFAULT_SAFETY_ALLOW_BYPASS_IN_SERVE = false;
+
 const pollingSchema = z
   .object({
     interval_ms: z
@@ -118,6 +123,24 @@ const serverSchema = z
   .strict()
   .optional();
 
+const githubSchema = z
+  .object({
+    token_source: z
+      .enum(GITHUB_TOKEN_SOURCES, {
+        message: `github.token_source は ${GITHUB_TOKEN_SOURCES.join(' / ')} のいずれかで指定してください`,
+      })
+      .default(DEFAULT_GITHUB_TOKEN_SOURCE),
+  })
+  .strict()
+  .default({ token_source: DEFAULT_GITHUB_TOKEN_SOURCE });
+
+const safetySchema = z
+  .object({
+    allow_bypass_in_serve: z.boolean().default(DEFAULT_SAFETY_ALLOW_BYPASS_IN_SERVE),
+  })
+  .strict()
+  .default({ allow_bypass_in_serve: DEFAULT_SAFETY_ALLOW_BYPASS_IN_SERVE });
+
 const statusTransitionsSchema = z
   .object({
     in_progress: z
@@ -172,6 +195,8 @@ const rawConfigSchema = z
     agent: agentSchema,
     hooks: hooksSchema,
     server: serverSchema,
+    github: githubSchema,
+    safety: safetySchema,
   })
   .strict();
 
@@ -209,6 +234,8 @@ export const configSchema = rawConfigSchema.transform((raw) => ({
     beforeRemove: raw.hooks.before_remove.map(toHookConfig),
   },
   server: raw.server === undefined ? null : { port: raw.server.port },
+  github: { tokenSource: raw.github.token_source },
+  safety: { allowBypassInServe: raw.safety.allow_bypass_in_serve },
 }));
 
 function toHookConfig(raw: z.infer<typeof hookEntrySchema>): {

@@ -1,6 +1,19 @@
 import { Command, InvalidArgumentError } from 'commander';
 
 import {
+  GITHUB_TOKEN_SOURCES,
+  DEFAULT_GITHUB_TOKEN_SOURCE,
+  type GitHubTokenSource,
+} from '../config/index.js';
+import {
+  GhCliNotAuthenticatedError,
+  GhCliNotFoundError,
+  GitHubTokenNotSetError,
+  resolveGitHubToken,
+  type ResolveGitHubTokenInput,
+  type ResolveGitHubTokenResult,
+} from '../github/index.js';
+import {
   createProjectsClient,
   DEFAULT_STATUS_FIELD_NAME,
   InvalidFirstError,
@@ -10,7 +23,7 @@ import {
 } from '../projects/index.js';
 
 export type ProjectsCommandDeps = {
-  getToken?: () => string | undefined;
+  resolveGitHubToken?: (input: ResolveGitHubTokenInput) => Promise<ResolveGitHubTokenResult>;
   createClient?: (token: string) => ProjectsClient;
   stdout?: NodeJS.WritableStream;
   stderr?: NodeJS.WritableStream;
@@ -18,7 +31,7 @@ export type ProjectsCommandDeps = {
 };
 
 const DEFAULT_DEPS: Required<ProjectsCommandDeps> = {
-  getToken: () => process.env.GITHUB_TOKEN,
+  resolveGitHubToken: (input) => resolveGitHubToken(input),
   createClient: (token) => createProjectsClient({ token }),
   stdout: process.stdout,
   stderr: process.stderr,
@@ -41,6 +54,12 @@ export function createProjectsCommand(deps: ProjectsCommandDeps = {}): Command {
       DEFAULT_STATUS_FIELD_NAME,
     )
     .option('--first <count>', '取得件数 (1〜100)', parseFirst, 100)
+    .option(
+      '--token-source <source>',
+      `GitHub token の取得元 (${GITHUB_TOKEN_SOURCES.join(' / ')})`,
+      parseTokenSource,
+      DEFAULT_GITHUB_TOKEN_SOURCE,
+    )
     .option('--json', '整形 JSON で出力する', false)
     .action(async (options: ListOptions) => {
       await runList(options, resolved);
@@ -54,13 +73,26 @@ type ListOptions = {
   project: number;
   statusField: string;
   first: number;
+  tokenSource: GitHubTokenSource;
   json: boolean;
 };
 
 async function runList(options: ListOptions, deps: Required<ProjectsCommandDeps>): Promise<void> {
-  const token = deps.getToken();
-  if (token === undefined || token === '') {
-    deps.stderr.write('環境変数 GITHUB_TOKEN を設定してください\n');
+  let token: string;
+  try {
+    const resolved = await deps.resolveGitHubToken({ source: options.tokenSource });
+    token = resolved.token;
+  } catch (error) {
+    if (
+      error instanceof GitHubTokenNotSetError ||
+      error instanceof GhCliNotFoundError ||
+      error instanceof GhCliNotAuthenticatedError
+    ) {
+      deps.stderr.write(`${error.message}\n`);
+      deps.exit(1);
+      return;
+    }
+    deps.stderr.write(`${describeError(error)}\n`);
     deps.exit(1);
     return;
   }
@@ -155,4 +187,17 @@ function parseFirst(value: string): number {
     throw new InvalidArgumentError('--first は 1〜100 の範囲で指定してください');
   }
   return n;
+}
+
+function parseTokenSource(value: string): GitHubTokenSource {
+  if ((GITHUB_TOKEN_SOURCES as readonly string[]).includes(value)) {
+    return value as GitHubTokenSource;
+  }
+  throw new InvalidArgumentError(
+    `--token-source は ${GITHUB_TOKEN_SOURCES.join(' / ')} のいずれかで指定してください`,
+  );
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
