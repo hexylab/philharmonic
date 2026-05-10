@@ -10,6 +10,7 @@ Issue body 文字列から DAG-aware scheduler 用の `Depends-On:` 行を抽出
 - #77 — Issue body から `Depends-On:` を抽出する parser (本仕様の実装)
 - 設計前提: [ADR-0007 Issue 依存関係 DAG-aware scheduler](../adr/0007-dependency-dag-aware-scheduler.md)
 - 後続: dependency resolver / cycle detection (ADR-0007 §5 split 2 以降。別 spec で確定する)
+- 利用者向けガイド: [docs/guide/operations.md `依存関係付き Issue を運用する`](../guide/operations.md#依存関係付き-issue-を運用する-dag-scheduling)
 
 ## 用語
 
