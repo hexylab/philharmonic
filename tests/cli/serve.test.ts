@@ -1116,4 +1116,206 @@ describe('philharmonic serve CLI コマンド', () => {
     expect(acquireSignalSpy).toHaveBeenCalled();
     expect(tracker.recordPollTick).toHaveBeenCalled();
   });
+
+  it('serve 起動時に retry queue を state file から復元し、release pass を実行する (ADR-0011)', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const infoSpy = vi.fn();
+    const fakeLogger = {
+      level: 'info' as const,
+      debug: vi.fn(),
+      info: infoSpy,
+      warn: vi.fn(),
+      error: vi.fn(),
+      child: vi.fn(),
+    };
+    fakeLogger.child.mockReturnValue(fakeLogger);
+
+    const restoredEntry = {
+      kind: 'failure' as const,
+      issueNumber: 42,
+      repository: { owner: 'hexylab', name: 'philharmonic' },
+      branch: 'feature/42-foo',
+      workspacePath: '/abs/issue-42',
+      attempt: 3,
+      dueAt: new Date('2026-05-09T00:00:30Z'),
+      scheduledAt: new Date('2026-05-09T00:00:00Z'),
+      failureReason: 'runner_error' as const,
+      lastRunId: 'r1',
+      lastErrorSummary: null,
+    };
+
+    const loadSpy = vi.fn(async () => ({
+      entries: [restoredEntry],
+      outcome: { kind: 'restored' as const, count: 1 },
+      invalidEntries: [],
+    }));
+    const releaseSpy = vi.fn(async () => ({
+      inspected: 1,
+      released: 0,
+      retained: 1,
+      skipped: 0,
+    }));
+    const storeSpy = { save: vi.fn(async () => {}), flush: vi.fn(async () => {}) };
+    const createStoreSpy = vi.fn(() => storeSpy);
+
+    const serveLoopMock = vi.fn(async (deps: { signal: AbortSignal }) => {
+      subscription.emit('SIGTERM');
+      await new Promise<void>((resolve) => {
+        if (deps.signal.aborted) resolve();
+        else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    });
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
+      loadConfig: async () => fakeConfig(),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      createWorkflowSource: fakeCreateWorkflowSource,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: vi.fn(),
+      serveLoop: serveLoopMock as never,
+      createSignalSubscription: () => subscription,
+      createLogger: () => fakeLogger,
+      resolveRetryQueueStatePath: ({ repoRoot }) => `${repoRoot}/state.json`,
+      loadRetryQueueEntries: loadSpy,
+      createRetryQueueFileStore: createStoreSpy,
+      releaseRestoredRetries: releaseSpy as never,
+    });
+
+    expect(loadSpy).toHaveBeenCalledWith('/tmp/repo/state.json');
+    expect(createStoreSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ filePath: '/tmp/repo/state.json' }),
+    );
+    expect(releaseSpy).toHaveBeenCalledTimes(1);
+    const releaseArg = releaseSpy.mock.calls[0]?.[0] as { queue: { has: (n: number) => boolean } };
+    expect(releaseArg.queue.has(42)).toBe(true);
+    expect(infoSpy).toHaveBeenCalledWith(
+      'retry queue restored',
+      expect.objectContaining({ path: '/tmp/repo/state.json', count: 1 }),
+    );
+    expect(infoSpy).toHaveBeenCalledWith(
+      'retry queue restore release pass completed',
+      expect.objectContaining({ released: 0, retained: 1 }),
+    );
+  });
+
+  it('state file 不在のときは release pass を skip し empty で起動する', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const infoSpy = vi.fn();
+    const fakeLogger = {
+      level: 'info' as const,
+      debug: vi.fn(),
+      info: infoSpy,
+      warn: vi.fn(),
+      error: vi.fn(),
+      child: vi.fn(),
+    };
+    fakeLogger.child.mockReturnValue(fakeLogger);
+
+    const loadSpy = vi.fn(async () => ({
+      entries: [] as never[],
+      outcome: { kind: 'empty' as const },
+      invalidEntries: [],
+    }));
+    const releaseSpy = vi.fn();
+
+    const serveLoopMock = vi.fn(async (deps: { signal: AbortSignal }) => {
+      subscription.emit('SIGTERM');
+      await new Promise<void>((resolve) => {
+        if (deps.signal.aborted) resolve();
+        else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    });
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
+      loadConfig: async () => fakeConfig(),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      createWorkflowSource: fakeCreateWorkflowSource,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: vi.fn(),
+      serveLoop: serveLoopMock as never,
+      createSignalSubscription: () => subscription,
+      createLogger: () => fakeLogger,
+      resolveRetryQueueStatePath: () => '/tmp/repo/state.json',
+      loadRetryQueueEntries: loadSpy,
+      releaseRestoredRetries: releaseSpy as never,
+    });
+
+    expect(releaseSpy).not.toHaveBeenCalled();
+    expect(infoSpy).toHaveBeenCalledWith(
+      'retry queue restore empty',
+      expect.objectContaining({ path: '/tmp/repo/state.json' }),
+    );
+  });
+
+  it('state file の parse failure を warn ログにし empty で起動する', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const warnSpy = vi.fn();
+    const fakeLogger = {
+      level: 'info' as const,
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: warnSpy,
+      error: vi.fn(),
+      child: vi.fn(),
+    };
+    fakeLogger.child.mockReturnValue(fakeLogger);
+
+    const loadSpy = vi.fn(async () => ({
+      entries: [] as never[],
+      outcome: {
+        kind: 'parse_failed' as const,
+        backupPath: '/tmp/repo/state.json.bak',
+        error: new Error('bad json'),
+      },
+      invalidEntries: [],
+    }));
+
+    const serveLoopMock = vi.fn(async (deps: { signal: AbortSignal }) => {
+      subscription.emit('SIGTERM');
+      await new Promise<void>((resolve) => {
+        if (deps.signal.aborted) resolve();
+        else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    });
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
+      loadConfig: async () => fakeConfig(),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      createWorkflowSource: fakeCreateWorkflowSource,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: vi.fn(),
+      serveLoop: serveLoopMock as never,
+      createSignalSubscription: () => subscription,
+      createLogger: () => fakeLogger,
+      resolveRetryQueueStatePath: () => '/tmp/repo/state.json',
+      loadRetryQueueEntries: loadSpy,
+    });
+
+    expect(lock.released).toBe(true);
+    expect(warnSpy).toHaveBeenCalledWith(
+      'retry queue restore parse failed',
+      expect.objectContaining({
+        path: '/tmp/repo/state.json',
+        backupPath: '/tmp/repo/state.json.bak',
+      }),
+    );
+  });
 });

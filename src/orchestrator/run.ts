@@ -1367,65 +1367,24 @@ async function processDispatchFailureForRetry(deps: ProcessDispatchResultDeps): 
 
   const nextAttempt = nextAttemptForKind(task, 'failure');
   if (nextAttempt > maxRetryAttempts) {
-    retryQueue.remove(task.candidate.issueNumber);
-    const exhaustedAt = clock();
-    const failureSummaryPath = await emitFailureSummaryArtifact(
-      {
-        runnerLogsRoot: deps.runnerLogsRoot,
-        runId: result.runId,
-        issueNumber: task.candidate.issueNumber,
-        attempt: task.retryAttempt,
-        maxAttempts: maxRetryAttempts,
-        failureReason: result.reason,
-        branch,
-        workspacePath,
-        errorSummary: result.errorSummary,
-        exhaustedAt,
-      },
-      logger,
-    );
-    logger.warn('retry exhausted', {
-      kind: 'failure',
+    await handleFailureExhaustion({
+      retryQueue,
       issueNumber: task.candidate.issueNumber,
-      attempt: task.retryAttempt,
-      failureReason: result.reason,
-      lastRunId: result.runId,
+      repository: { owner: task.repository.owner, name: task.repository.name },
+      itemId: task.candidate.itemId,
       branch,
       workspacePath,
-      failureSummaryPath,
-      summaryPath: `.philharmonic/runs/${result.runId}/summary.md`,
-      streamPath: `.philharmonic/runs/${result.runId}/stream.jsonl`,
-      stderrPath: `.philharmonic/runs/${result.runId}/stderr.log`,
+      attempt: task.retryAttempt,
+      maxAttempts: maxRetryAttempts,
+      failureReason: result.reason,
+      runId: result.runId,
+      errorSummary: result.errorSummary,
+      runnerLogsRoot: deps.runnerLogsRoot,
+      config: deps.config,
+      notifyFailureExhausted: deps.notifyFailureExhausted,
+      logger,
+      clock,
     });
-    if (deps.notifyFailureExhausted !== undefined) {
-      try {
-        await deps.notifyFailureExhausted({
-          owner: deps.config.owner,
-          projectNumber: deps.config.projectNumber,
-          statusFieldName: deps.config.statusField,
-          failedStatus: deps.config.statusTransitions.failed,
-          issueNumber: task.candidate.issueNumber,
-          repository: { owner: task.repository.owner, name: task.repository.name },
-          itemId: task.candidate.itemId,
-          attempt: task.retryAttempt,
-          maxAttempts: maxRetryAttempts,
-          failureReason: result.reason,
-          runId: result.runId,
-          branch,
-          workspacePath,
-          errorSummary: result.errorSummary,
-          failureSummaryPath,
-          runnerLogsRoot: deps.runnerLogsRoot,
-          exhaustedAt,
-        });
-      } catch (error) {
-        logger.warn('exhaustion notify threw', {
-          issueNumber: task.candidate.issueNumber,
-          runId: result.runId,
-          error: describeError(error),
-        });
-      }
-    }
     return;
   }
 
@@ -1559,6 +1518,103 @@ function nextAttemptForKind(task: DispatchTask, newKind: RetryKind): number {
   if (task.retryFrom === null) return 1;
   if (task.retryFrom.kind === newKind) return task.retryAttempt + 1;
   return 1;
+}
+
+export type HandleFailureExhaustionInput = {
+  retryQueue: RetryQueue;
+  issueNumber: number;
+  repository: Repository;
+  /** Project Item ID。recovery 経路で取れないと exhaustion notify は skip される */
+  itemId: string;
+  branch: string;
+  workspacePath: string;
+  /** 直前 attempt 番号 (1-indexed)。failure-summary / コメントに表示される */
+  attempt: number;
+  maxAttempts: number;
+  failureReason: FailureReason;
+  runId: string;
+  errorSummary: string | null;
+  runnerLogsRoot: string;
+  config: Config;
+  notifyFailureExhausted?: NotifyFailureExhaustedFn;
+  logger: Logger;
+  clock: () => Date;
+  /** 構造化ログに `via=recovery` 等を載せたいときに渡す (省略時は記録しない) */
+  via?: string;
+};
+
+/**
+ * `kind=failure` の retry 上限到達を処理する共通ハンドラ。
+ *
+ * 1. retry queue から entry を落とす
+ * 2. `<runnerLogsRoot>/<runId>/failure-summary.md` を書き出す (失敗時 null)
+ * 3. `retry exhausted` warn ログ (spec 通り branch / workspacePath / summary/stream/stderr/failureSummary path を含む)
+ * 4. `notifyFailureExhausted` が DI で渡されていれば Status `Failed` 遷移 + Issue コメントを投稿 (ADR-0010)
+ *
+ * fresh dispatch / recovery / 永続化 restore 後の retry のいずれの経路でも同じ safety-net が走る。
+ */
+export async function handleFailureExhaustion(input: HandleFailureExhaustionInput): Promise<void> {
+  const { retryQueue, issueNumber, attempt, runId, branch, workspacePath, failureReason } = input;
+  retryQueue.remove(issueNumber);
+  const exhaustedAt = input.clock();
+  const failureSummaryPath = await emitFailureSummaryArtifact(
+    {
+      runnerLogsRoot: input.runnerLogsRoot,
+      runId,
+      issueNumber,
+      attempt,
+      maxAttempts: input.maxAttempts,
+      failureReason,
+      branch,
+      workspacePath,
+      errorSummary: input.errorSummary,
+      exhaustedAt,
+    },
+    input.logger,
+  );
+  input.logger.warn('retry exhausted', {
+    kind: 'failure',
+    issueNumber,
+    attempt,
+    failureReason,
+    lastRunId: runId,
+    branch,
+    workspacePath,
+    failureSummaryPath,
+    summaryPath: `.philharmonic/runs/${runId}/summary.md`,
+    streamPath: `.philharmonic/runs/${runId}/stream.jsonl`,
+    stderrPath: `.philharmonic/runs/${runId}/stderr.log`,
+    ...(input.via !== undefined ? { via: input.via } : {}),
+  });
+  if (input.notifyFailureExhausted !== undefined) {
+    try {
+      await input.notifyFailureExhausted({
+        owner: input.config.owner,
+        projectNumber: input.config.projectNumber,
+        statusFieldName: input.config.statusField,
+        failedStatus: input.config.statusTransitions.failed,
+        issueNumber,
+        repository: input.repository,
+        itemId: input.itemId,
+        attempt,
+        maxAttempts: input.maxAttempts,
+        failureReason,
+        runId,
+        branch,
+        workspacePath,
+        errorSummary: input.errorSummary,
+        failureSummaryPath,
+        runnerLogsRoot: input.runnerLogsRoot,
+        exhaustedAt,
+      });
+    } catch (error) {
+      input.logger.warn('exhaustion notify threw', {
+        issueNumber,
+        runId,
+        error: describeError(error),
+      });
+    }
+  }
 }
 
 /**

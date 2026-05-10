@@ -14,13 +14,17 @@ import { parseRepositoryNameWithOwner } from './repository.js';
 import {
   dispatchSelected,
   evaluateContinuationDecision,
+  handleFailureExhaustion,
   isRetryEligibleReason,
+  type NotifyFailureExhaustedFn,
   type RunOnceClock,
   type RunOnceResult,
 } from './run.js';
 import { type RetryQueue } from './retry-queue.js';
 import { isAcceptableIssue } from './select.js';
 import { buildIssueSlug } from './slug.js';
+import type { GhRunner } from '../projects/index.js';
+import { notifyFailureExhausted as defaultNotifyFailureExhausted } from './exhaustion-notify.js';
 
 const RECOVERY_STATUS = 'In Progress';
 
@@ -53,6 +57,15 @@ export type RecoveryDeps = {
   maxRetryAttempts?: number;
   /** retry backoff の clamp 上限 (ms)。default 0 (= computeRetryDelayMs が 0 を返すため retry 0s) */
   maxRetryBackoffMs?: number;
+  /**
+   * recovery 経路で `kind=failure` の retry が exhausted した瞬間に GitHub Projects Status を
+   * `Failed` に倒し、Issue にコメントを残す safety-net (ADR-0010 / #103)。永続化 (ADR-0011 / #104)
+   * で `attempt` が max 直前のまま再起動した場合、recovery 内 dispatch の失敗で即 exhausted に
+   * 到達するケースを通常 tick と同じ取り扱いにするため。`runGh` 未注入なら no-op。
+   */
+  runGh?: GhRunner;
+  /** テストで差し替え可能な exhaustion notify 関数 */
+  notifyFailureExhausted?: NotifyFailureExhaustedFn;
 };
 
 export type RecoverySummary = {
@@ -264,17 +277,21 @@ export async function recoverInProgress(deps: RecoveryDeps): Promise<RecoverySum
         });
       } else {
         summary.failed += 1;
-        scheduleRetryAfterRecovery({
+        await scheduleRetryAfterRecovery({
           retryQueue: deps.retryQueue,
           maxRetryAttempts: deps.maxRetryAttempts ?? 0,
           maxRetryBackoffMs: deps.maxRetryBackoffMs ?? 0,
           issueNumber: candidate.issueNumber,
+          itemId: candidate.itemId,
           repository,
           branch: result.branch ?? '(unknown)',
           workspacePath,
           reason: result.reason,
           runId: result.runId,
           errorSummary: result.errorSummary,
+          runnerLogsRoot: deps.runnerLogsRoot,
+          config: deps.config,
+          notifyFailureExhausted: resolveNotifyFailureExhausted(deps),
           logger,
           clock: deps.clock ?? (() => new Date()),
         });
@@ -326,17 +343,42 @@ function describeError(error: unknown): string {
   return String(error);
 }
 
+/**
+ * recovery 経路用に `notifyFailureExhausted` の関数を組み立てる。
+ *
+ * - `notifyFailureExhausted` を直接渡されたらそれを使う (テスト用)
+ * - そうでなくて `runGh` だけ渡されたら module の default を `runGh` / `projectsClient` で bind
+ * - どちらも未指定なら undefined を返す (= 配線無し)
+ */
+function resolveNotifyFailureExhausted(deps: RecoveryDeps): NotifyFailureExhaustedFn | undefined {
+  if (deps.notifyFailureExhausted !== undefined) return deps.notifyFailureExhausted;
+  if (deps.runGh === undefined) return undefined;
+  const runGh = deps.runGh;
+  const projectsClient = deps.projectsClient;
+  const logger = deps.logger;
+  return (input) =>
+    defaultNotifyFailureExhausted(input, {
+      runGh,
+      projectsClient,
+      logger,
+    });
+}
+
 type ScheduleRetryAfterRecoveryDeps = {
   retryQueue?: RetryQueue;
   maxRetryAttempts: number;
   maxRetryBackoffMs: number;
   issueNumber: number;
+  itemId: string;
   repository: { owner: string; name: string };
   branch: string;
   workspacePath: string;
   reason: FailureReason;
   runId: string;
   errorSummary: string | null;
+  runnerLogsRoot: string;
+  config: Config;
+  notifyFailureExhausted?: NotifyFailureExhaustedFn;
   logger: Logger;
   clock: () => Date;
 };
@@ -344,14 +386,46 @@ type ScheduleRetryAfterRecoveryDeps = {
 /**
  * recovery 経路で `dispatchSelected` が failed を返した場合の retry queue 連携。
  *
- * spec: docs/specs/retry-queue.md
+ * 永続化された retry entry が同 Issue で残っている場合は `kind=failure` の `attempt + 1` を継続する。
+ * 既存 entry が無い (新規 failure) ときは `attempt = 1` から始める。
+ *
+ * 上限到達時は通常 tick と同じ {@link handleFailureExhaustion} を呼び、failure-summary 書き出し
+ * + `retry exhausted` warn + (DI されていれば) ADR-0010 の Failed safety-net を 1 セットで実行する。
+ *
+ * spec: docs/specs/retry-queue.md §永続化 §復元後の release pass
  */
-function scheduleRetryAfterRecovery(deps: ScheduleRetryAfterRecoveryDeps): void {
+async function scheduleRetryAfterRecovery(deps: ScheduleRetryAfterRecoveryDeps): Promise<void> {
   if (deps.retryQueue === undefined) return;
   if (deps.maxRetryAttempts <= 0) return;
   if (!isRetryEligibleReason(deps.reason)) return;
 
-  const nextAttempt = 1;
+  // 永続化された entry が残っているなら attempt counter を継続する (ADR-0011)。
+  // kind が failure と一致するときのみ +1、それ以外 (continuation など) は 1 から始める。
+  const existing = deps.retryQueue.list().find((e) => e.issueNumber === deps.issueNumber);
+  const nextAttempt =
+    existing !== undefined && existing.kind === 'failure' ? existing.attempt + 1 : 1;
+  if (nextAttempt > deps.maxRetryAttempts) {
+    await handleFailureExhaustion({
+      retryQueue: deps.retryQueue,
+      issueNumber: deps.issueNumber,
+      repository: deps.repository,
+      itemId: deps.itemId,
+      branch: deps.branch,
+      workspacePath: deps.workspacePath,
+      attempt: existing?.attempt ?? 0,
+      maxAttempts: deps.maxRetryAttempts,
+      failureReason: deps.reason,
+      runId: deps.runId,
+      errorSummary: deps.errorSummary,
+      runnerLogsRoot: deps.runnerLogsRoot,
+      config: deps.config,
+      notifyFailureExhausted: deps.notifyFailureExhausted,
+      logger: deps.logger,
+      clock: deps.clock,
+      via: 'recovery',
+    });
+    return;
+  }
   const now = deps.clock();
   const entry = deps.retryQueue.schedule({
     kind: 'failure',

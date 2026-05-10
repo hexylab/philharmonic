@@ -2,12 +2,12 @@
 
 ## 概要
 
-`philharmonic serve` daemon の **in-memory retry queue** の仕様。以下 2 種類の自動再 dispatch を 1 本の queue で扱う。
+`philharmonic serve` daemon の **retry queue** の仕様。以下 2 種類の自動再 dispatch を 1 本の queue で扱う。
 
 - **failure retry** (ADR-0008): `workspace_provisioning` / `runner_error` / `timeout` / `stalled` / `hook_failed` のいずれかで失敗した dispatch を、Symphony と同じ指数バックオフ (`10s * 2^(attempt-1)` を `agent.max_retry_backoff_ms` で clamp) で自動的に再 dispatch する
 - **continuation retry** (ADR-0009): agent が正常終了したのに Issue が active (Todo / In Progress) のままなら、短い固定 delay 後に Status を再確認して必要なら再 dispatch する
 
-永続化は **しない** (daemon プロセスを跨いだ retry は recovery が引き受ける)。
+state は in-memory を SoT としつつ、`<repoRoot>/.philharmonic/state/retry-queue.json` に永続化する (ADR-0011 / Issue #104)。serve 再起動を跨いで attempt counter / dueAt / failureReason を維持する。drain → dispatch 間の crash window で 1 attempt が失われ得る挙動は許容し、`recoverInProgress` が `In Progress` Item を引き取って fall-back する (詳細は [永続化](#永続化-adr-0011)）。
 
 ## 関連 Issue
 
@@ -15,7 +15,8 @@
 - Issue #85 — 正常終了後も Issue が active なら continuation retry で再確認する
 - Issue #86 — 自動リトライ上限到達時に失敗情報と手動復旧手順を残す ([Failure summary on exhaustion](#failure-summary-on-exhaustion-issue-86))
 - Issue #103 — retry exhausted 時に Project Status を `Failed` へ遷移し Issue に失敗情報を残す ([Exhaustion notify](#exhaustion-notify-issue-103))
-- ADR: [ADR-0008 失敗 / stalled run を指数バックオフで再 dispatch する in-memory retry queue を導入する](../adr/0008-in-memory-retry-queue.md), [ADR-0009 agent run の正常終了後に Issue が active のままなら continuation retry で再確認する](../adr/0009-continuation-retry-after-success.md), [ADR-0010 retry exhausted (kind=failure) 時に orchestrator が safety-net として GitHub Projects Status を Failed へ遷移し Issue にコメントする](../adr/0010-retry-exhaustion-github-safety-net.md)
+- Issue #104 — retry queue を state file に永続化し serve 再起動を跨いで retry / exhaustion を継続する ([永続化](#永続化-adr-0011))
+- ADR: [ADR-0008 失敗 / stalled run を指数バックオフで再 dispatch する in-memory retry queue を導入する](../adr/0008-in-memory-retry-queue.md), [ADR-0009 agent run の正常終了後に Issue が active のままなら continuation retry で再確認する](../adr/0009-continuation-retry-after-success.md), [ADR-0010 retry exhausted (kind=failure) 時に orchestrator が safety-net として GitHub Projects Status を Failed へ遷移し Issue にコメントする](../adr/0010-retry-exhaustion-github-safety-net.md), [ADR-0011 retry queue を local state file に永続化し serve 再起動を跨いで retry を継続する](../adr/0011-persist-retry-queue-across-restart.md)
 - 関連 spec: [serve-daemon.md](./serve-daemon.md), [orchestration-mvp.md](./orchestration-mvp.md), [snapshot-api.md](./snapshot-api.md), [config-schema.md](./config-schema.md)
 - 関連 ADR: [ADR-0005 §7 worktree cleanup の trigger 簡素化](../adr/0005-thin-orchestrator-agent-delegation.md), [ADR-0005 §8 retry-state は撤廃](../adr/0005-thin-orchestrator-agent-delegation.md)
 
@@ -63,8 +64,8 @@
 ## 非機能要件
 
 - **性能**: 1 retry あたり追加 GitHub API call は `getIssue` 1 回 + `fetchProjectCandidates` 1 回 (= candidate 取得 1 回) のみ。Project items 取得は通常 tick と共有可能だが、本 spec の最小実装では retry ごとに 1 回の overhead を許容する (rate limit 設計は将来要件)
-- **可用性**: queue は in-memory のみ。daemon 再起動で消える。失われた retry は次回 `serve` 起動の recovery で拾う (Status `In Progress` の Item を引き取る既存経路)
-- **セキュリティ**: 永続ファイルを増やさない (`.philharmonic/retry-state.json` 等は作らない)。GitHub token は通常の dispatch 経路と同じく env allowlist で透過させる
+- **可用性**: queue は in-memory を SoT としつつ `<repoRoot>/.philharmonic/state/retry-queue.json` に永続化 (ADR-0011)。daemon 再起動で attempt counter / dueAt / failureReason が維持される。drain → dispatch 間の crash window で 1 attempt が失われ得る挙動は許容し、`recoverInProgress` が `In Progress` Item を引き取って fall-back する
+- **セキュリティ**: 永続 state file は retry queue のみ。Status 書き戻し駆動の旧 `.philharmonic/retry-state.json` 等の復活は **しない** (ADR-0011 は ADR-0005 の Status agent 委譲方針を維持する)。GitHub token は通常の dispatch 経路と同じく env allowlist で透過させる
 - **アクセシビリティ**: 該当しない (機械可読 API + 構造化ログ)
 
 ## データモデル
@@ -401,6 +402,95 @@ retry queue 上の entry は **`/api/v1/<issue_number>` には載せない** (= 
 | `branch`             | feature branch                                        |
 | `workspacePath`      | retry 対象 Issue の worktree path                     |
 
+## 永続化 (ADR-0011)
+
+retry queue の attempt counter / dueAt / failureReason を `<repoRoot>/.philharmonic/state/retry-queue.json` に保存し、daemon 再起動を跨いで復元する (Issue #104)。
+
+### state file の schema
+
+```json
+{
+  "version": 1,
+  "entries": [
+    {
+      "kind": "failure",
+      "issueNumber": 42,
+      "repository": { "owner": "hexylab", "name": "philharmonic" },
+      "branch": "feature/42-foo",
+      "workspacePath": "/abs/.philharmonic/worktrees/issue-42",
+      "attempt": 2,
+      "dueAt": "2026-05-09T00:00:50.000Z",
+      "scheduledAt": "2026-05-09T00:00:30.000Z",
+      "failureReason": "runner_error",
+      "lastRunId": "0190ce80-...",
+      "lastErrorSummary": "claude exited with code 1: ..."
+    }
+  ]
+}
+```
+
+- `version`: 現行は `1`。将来の破壊的変更で bump する
+- `entries`: `Map<issueNumber, RetryEntry>` を flatten した配列。`Date` は ISO 8601 文字列
+- `RetryEntry` の field 構成は [`RetryEntry` (in-memory)](#retryentry-in-memory) と 1:1 で対応
+
+### write 経路 (atomic + 直列化)
+
+queue の mutation (`schedule` / `remove` / `drainDue` / `reschedule`) が実際に in-memory state を変更したときに 1 件 1 write 発生する。
+
+1. `mkdir -p .philharmonic/state/` (初回起動向け)
+2. `<state.json>.tmp` に JSON を書く
+3. `rename(tmp, state.json)` で atomic swap
+
+`save()` の重複呼び出しは store 内部で `lastWrite = lastWrite.then(...)` の chain で直列化し、後勝ち snapshot で確定する。`drainDue` で 0 件 / 存在しない issue に対する `remove` は no-op として save を呼ばない (write 無駄を避ける)。
+
+save が throw した場合は `retry queue persist failed` warn を 1 行残し、**in-memory state はそのまま保持** する (orchestrator 本体は throw しない)。次の mutation で再 save される (degraded behavior)。
+
+### 起動時の load
+
+`philharmonic serve` 起動時、`acquireServeLock` 後、`recoverInProgress` の前に state file を 1 回 load する。
+
+| 状況                         | 挙動                                                                                                                  |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| file 不在                    | `retry queue restore empty` info ログ + empty queue で起動                                                            |
+| JSON parse 失敗              | `<state.json>` を `<state.json>.bak` に rename + `retry queue restore parse failed` warn + empty queue で起動         |
+| `version` mismatch           | `retry queue restore version mismatch` warn + empty queue で起動 (bak には rename しない)                             |
+| entry 単位の schema 違反     | その entry のみ skip + `retry queue restore entry invalid` warn 1 行 (`field` / `reason` を含む)。残りの entry は採用 |
+| entry 単位の重複 issueNumber | 最後に出現したものを採用 (Map 上書きの自然挙動)                                                                       |
+
+load 成功時は `retry queue restored` info を 1 行 (`path` / `count` / `version` を含む) 出す。
+
+### 復元後の release pass
+
+load 直後に queue へ積み戻したあと、startup 1 回限定の release 判定を行う。drain phase で再確認する terminal / inactive status はここでは扱わない (重複削減)。
+
+| 状態                                         | アクション                                                                       |
+| -------------------------------------------- | -------------------------------------------------------------------------------- |
+| `getIssue` が `state === 'closed'`           | drop + `retry skipped reason=closed via=restore` info                            |
+| `listOpenPullRequests` が 1 件以上           | drop + `retry skipped reason=open_pr via=restore` info                           |
+| `getIssue` / `listOpenPullRequests` が throw | queue に残置 + `retry queue restore fetch error` warn (次の drain tick で再判定) |
+
+open PR の特殊性: agent が PR を作ったが Status flip 前という稀ケースで残骸 retry を発射しないための safety-net。`drainRetryQueue` には毎 tick で open PR を fetch するコストを掛けず、復元時の 1 回だけ実施する。
+
+### recovery 経路での attempt counter 継続
+
+`recoverInProgress` (`src/orchestrator/recovery.ts`) が `In Progress` Item を引き取って failed を返したとき、persisted entry が同 Issue に残っていれば **`attempt + 1` を継続** する。kind が `failure` と一致するときのみ +1、それ以外 (continuation など) は 1 から始める。`nextAttempt > max_retry_attempts` のときは `retry exhausted via=recovery` warn を残し queue から落とす。
+
+これにより serve 起動 → recovery 再 dispatch → 再失敗 → persisted attempt が 1 に潰される事故が起きない。
+
+### 永続化ログ
+
+| level | msg                                          | fields                                                                |
+| ----- | -------------------------------------------- | --------------------------------------------------------------------- |
+| info  | `retry queue restored`                       | `path`, `count`, `version`                                            |
+| info  | `retry queue restore empty`                  | `path`                                                                |
+| info  | `retry queue restore release pass completed` | `inspected`, `released`, `retained`, `skipped`                        |
+| info  | `retry skipped` `reason=open_pr`             | `issueNumber`, `kind`, `attempt`, `via=restore`                       |
+| warn  | `retry queue restore parse failed`           | `path`, `backupPath`, `error`                                         |
+| warn  | `retry queue restore version mismatch`       | `path`, `version`, `expected`                                         |
+| warn  | `retry queue restore entry invalid`          | `index`, `issueNumber`, `reason`, `field`                             |
+| warn  | `retry queue restore fetch error`            | `issueNumber`, `stage` (`getIssue` / `listOpenPullRequests`), `error` |
+| warn  | `retry queue persist failed`                 | `path`, `error`                                                       |
+
 ## 構造化ログ
 
 | level | msg                             | fields                                                                                                                                                                                                                                                                                                                                 |
@@ -445,7 +535,7 @@ retry queue 上の entry は **`/api/v1/<issue_number>` には載せない** (= 
 
 ## MVP でやらないこと
 
-- retry queue の永続化 (`.philharmonic/retry-queue.jsonl` 等)
+- ~~retry queue の永続化 (`.philharmonic/retry-queue.jsonl` 等)~~ — ADR-0011 / Issue #104 で実装済み ([永続化](#永続化-adr-0011))
 - retry の即時 sleep (`philharmonic run` の同期 retry)
 - failure reason 別の retry on/off 切り替え
 - jitter の追加 (固定 backoff のみ)

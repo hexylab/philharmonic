@@ -1,15 +1,16 @@
 import type { FailureReason } from './errors.js';
+import type { RetryQueueStore } from './retry-queue-store.js';
 
 /**
- * `philharmonic serve` の in-memory retry queue。
+ * `philharmonic serve` の retry queue。
  *
- * - daemon プロセス起動以降の retry 待機状態のみを保持する (再起動で消える)
+ * - daemon プロセス内の in-memory state を SoT としつつ、`store` 注入時は mutation のたびに
+ *   local state file へ永続化する (ADR-0011 / Issue #104)
  * - 同一 `issueNumber` は 1 件しか保持しない (Map で dedup; kind 違いも上書き)
- * - 永続化 / Status 書き戻しは行わない (ADR-0008 §3)
  * - kind=`failure` (ADR-0008) と kind=`continuation` (ADR-0009) を 1 本の queue で扱う
  *
  * spec: docs/specs/retry-queue.md
- * adr: docs/adr/0008-in-memory-retry-queue.md, docs/adr/0009-continuation-retry-after-success.md
+ * adr: docs/adr/0008-in-memory-retry-queue.md, docs/adr/0009-continuation-retry-after-success.md, docs/adr/0011-persist-retry-queue-across-restart.md
  */
 
 const BASE_DELAY_MS = 10_000;
@@ -83,8 +84,33 @@ export function computeRetryDelayMs(attempt: number, maxBackoffMs: number): numb
   return Math.min(base, maxBackoffMs);
 }
 
-export function createRetryQueue(): RetryQueue {
+export type CreateRetryQueueOptions = {
+  /**
+   * 永続化 store。`schedule` / `remove` / `drainDue` / `reschedule` が成功するたび、現 in-memory
+   * snapshot を `store.save()` で書き出す。並列 save は store 側で直列化されるため呼び出し側は
+   * 同期的に mutation を続けてよい。未指定なら in-memory only (= ADR-0008 の旧挙動互換)。
+   */
+  store?: RetryQueueStore;
+  /**
+   * 起動時に store から復元した entry。`createRetryQueue` 内で Map に投入し、初期 save は走らない
+   * (= ファイルとメモリは既に一致している前提)。
+   */
+  initialEntries?: readonly RetryEntry[];
+};
+
+export function createRetryQueue(options: CreateRetryQueueOptions = {}): RetryQueue {
   const entries = new Map<number, RetryEntry>();
+  if (options.initialEntries !== undefined) {
+    for (const entry of options.initialEntries) {
+      entries.set(entry.issueNumber, entry);
+    }
+  }
+
+  const persist = (): void => {
+    if (options.store === undefined) return;
+    // 戻り値は捨てる: save は store 側で直列化済み、失敗時は store 内部で warn ログを出す
+    void options.store.save(Array.from(entries.values()).sort(compareEntries));
+  };
 
   return {
     schedule(input) {
@@ -111,6 +137,7 @@ export function createRetryQueue(): RetryQueue {
         lastErrorSummary,
       };
       entries.set(input.issueNumber, entry);
+      persist();
       return entry;
     },
     drainDue(now) {
@@ -120,10 +147,13 @@ export function createRetryQueue(): RetryQueue {
       }
       due.sort(compareEntries);
       for (const entry of due) entries.delete(entry.issueNumber);
+      if (due.length > 0) persist();
       return due;
     },
     remove(issueNumber) {
-      return entries.delete(issueNumber);
+      const removed = entries.delete(issueNumber);
+      if (removed) persist();
+      return removed;
     },
     has(issueNumber) {
       return entries.has(issueNumber);
@@ -134,6 +164,7 @@ export function createRetryQueue(): RetryQueue {
       const dueAt = new Date(input.now.getTime() + Math.max(0, input.delayMs));
       const updated: RetryEntry = { ...existing, dueAt };
       entries.set(input.issueNumber, updated);
+      persist();
       return updated;
     },
     list() {
