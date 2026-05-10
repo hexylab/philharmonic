@@ -20,3 +20,7 @@ pnpm-debug.log*
 .philharmonic/worktrees/
 .philharmonic/runs/
 .philharmonic/serve.lock
+
+# 個人ローカル設定 (dogfooding 用、commit しない)
+/.philharmonic/philharmonic.yaml
+/.philharmonic/WORKFLOW.md
