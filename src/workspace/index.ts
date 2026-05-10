@@ -50,6 +50,7 @@ export {
   type PlanStaleWorktreeCleanupInput,
   type RepositoryRef,
   type StaleCleanupCandidate,
+  type StaleCleanupOutcome,
   type StaleCleanupPlan,
   type StaleCleanupReason,
   type StaleCleanupSkip,

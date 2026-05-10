@@ -203,7 +203,12 @@ export type ExecuteStaleCleanupInput = {
   logger?: Logger;
 };
 
+export type StaleCleanupOutcome =
+  | { kind: 'removed'; candidate: StaleCleanupCandidate }
+  | { kind: 'failed'; candidate: StaleCleanupCandidate; error: string };
+
 export type ExecuteStaleCleanupResult = {
+  outcomes: readonly StaleCleanupOutcome[];
   removed: number;
   failed: number;
   skipped: number;
@@ -219,6 +224,7 @@ export async function executeStaleCleanup(
   let removed = 0;
   let failed = 0;
   const skipped = input.plan.skips.length;
+  const outcomes: StaleCleanupOutcome[] = [];
 
   for (const skip of input.plan.skips) {
     input.logger?.info('stale cleanup skip', {
@@ -246,19 +252,22 @@ export async function executeStaleCleanup(
         branchDeleted: c.branchDeletable,
       });
       removed += 1;
+      outcomes.push({ kind: 'removed', candidate: c });
     } catch (error) {
+      const message = describeError(error);
       input.logger?.warn('stale cleanup failed', {
         issueNumber: c.issueNumber,
         status: c.status,
         reason: c.reason,
         workspacePath: c.worktree.path,
-        error: describeError(error),
+        error: message,
       });
       failed += 1;
+      outcomes.push({ kind: 'failed', candidate: c, error: message });
     }
   }
 
-  return { removed, failed, skipped };
+  return { outcomes, removed, failed, skipped };
 }
 
 function describeError(error: unknown): string {

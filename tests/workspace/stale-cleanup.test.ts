@@ -208,7 +208,9 @@ describe('executeStaleCleanup', () => {
       plan: { cleanups, skips: [] },
       workspaceManager: manager,
     });
-    expect(result).toEqual({ removed: 1, failed: 0, skipped: 0 });
+    expect(result).toMatchObject({ removed: 1, failed: 0, skipped: 0 });
+    expect(result.outcomes).toHaveLength(1);
+    expect(result.outcomes[0]!.kind).toBe('removed');
     expect(manager.cleanupWorkspace).toHaveBeenCalledWith({
       taskKey: 'issue-1',
       branch: 'feature/1-foo',
@@ -270,7 +272,19 @@ describe('executeStaleCleanup', () => {
       plan,
       workspaceManager: manager,
     });
-    expect(result).toEqual({ removed: 1, failed: 1, skipped: 0 });
+    expect(result.removed).toBe(1);
+    expect(result.failed).toBe(1);
+    expect(result.skipped).toBe(0);
+    expect(result.outcomes).toHaveLength(2);
+    expect(result.outcomes[0]).toMatchObject({
+      kind: 'failed',
+      candidate: { issueNumber: 1 },
+      error: 'boom',
+    });
+    expect(result.outcomes[1]).toMatchObject({
+      kind: 'removed',
+      candidate: { issueNumber: 2 },
+    });
     expect(manager.cleanupWorkspace).toHaveBeenCalledTimes(2);
   });
 });

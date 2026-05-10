@@ -232,10 +232,15 @@ async function runCleanStale(
     workspaceManager,
   });
 
-  for (const c of plan.cleanups) {
-    deps.stdout.write(
-      `removed ${c.worktree.taskKey} status=${c.status ?? '(none)'} reason=${c.reason} path=${c.worktree.path}\n`,
-    );
+  for (const outcome of result.outcomes) {
+    const c = outcome.candidate;
+    if (outcome.kind === 'removed') {
+      deps.stdout.write(
+        `removed ${c.worktree.taskKey} status=${c.status ?? '(none)'} reason=${c.reason} path=${c.worktree.path}\n`,
+      );
+    } else {
+      deps.stderr.write(`failed ${c.worktree.taskKey}: ${outcome.error}\n`);
+    }
   }
 
   deps.stdout.write(

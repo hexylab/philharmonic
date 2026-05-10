@@ -317,6 +317,41 @@ describe('philharmonic clean-stale CLI コマンド', () => {
     expect(cleanupSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('cleanup が一部失敗した worktree は stdout の removed 行に出さず stderr に failed を書いて exit 1', async () => {
+    const streams = createStreams();
+    const manager = fakeWorkspaceManager();
+    (manager.cleanupWorkspace as ReturnType<typeof vi.fn>).mockImplementation(
+      async (input: { taskKey: string }) => {
+        if (input.taskKey === 'issue-1') throw new Error('lock held');
+      },
+    );
+
+    const { exit } = await runCmd(
+      streams,
+      BASE_DEPS({
+        listIssueWorktrees: async () => [
+          fakeWorktree('issue-1', 'feature/1-foo'),
+          fakeWorktree('issue-2', 'feature/2-bar'),
+        ],
+        createProjectsClient: () =>
+          fakeProjectsClient([
+            fakeCandidate({ issueNumber: 1, status: 'Done' }),
+            fakeCandidate({ issueNumber: 2, status: 'Done' }),
+          ]),
+        createWorkspaceManager: () => manager,
+      }),
+    );
+    const stdout = streams.stdout.write.mock.calls.map((c) => c[0] as string).join('');
+    const stderr = streams.stderr.write.mock.calls.map((c) => c[0] as string).join('');
+    expect(stdout).not.toMatch(/^removed issue-1\b/m);
+    expect(stdout).toMatch(/^removed issue-2\b/m);
+    expect(stderr).toContain('failed issue-1');
+    expect(stderr).toContain('lock held');
+    expect(stdout).toContain('removed=1');
+    expect(stdout).toContain('failed=1');
+    expect(exit).toHaveBeenCalledWith(1);
+  });
+
   it('cleanup 対象がゼロなら "nothing to remove" を出して exit 0', async () => {
     const streams = createStreams();
     const manager = fakeWorkspaceManager();
