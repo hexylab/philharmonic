@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 
 import { createCleanCommand } from './cli/clean.js';
+import { createDashboardCommand } from './cli/dashboard.js';
 import { createInitCommand } from './cli/init.js';
 import { createProjectsCommand } from './cli/projects.js';
 import { createRunCommand } from './cli/run.js';
@@ -24,6 +25,7 @@ export function createProgram(): Command {
   program.addCommand(createRunCommand());
   program.addCommand(createServeCommand());
   program.addCommand(createCleanCommand());
+  program.addCommand(createDashboardCommand());
 
   return program;
 }

@@ -76,11 +76,11 @@ philharmonic init --dry-run --owner foo --project 1         # 書かずに内容
 
 ### `philharmonic serve` (常駐デーモン)
 
-| キー                          | 既定            | 何が変わるか                                                                                            |
-| ----------------------------- | --------------- | ------------------------------------------------------------------------------------------------------- |
-| `polling.interval_ms`         | `30000` (30 秒) | 1 tick 終了後の sleep 時間。**下限 1000ms**。1000〜4999ms は起動時に warning が出る                     |
-| `agent.max_concurrent_agents` | `1`             | 1 tick で並列 dispatch する Issue 件数。`1` で逐次 (MVP 互換)                                           |
-| `server.port`                 | -               | Snapshot HTTP API の listen port。**未指定なら API 自体を起動しない**。指定時は `127.0.0.1` 固定で bind |
+| キー                          | 既定            | 何が変わるか                                                                                                                                                                                  |
+| ----------------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `polling.interval_ms`         | `30000` (30 秒) | 1 tick 終了後の sleep 時間。**下限 1000ms**。1000〜4999ms は起動時に warning が出る                                                                                                           |
+| `agent.max_concurrent_agents` | `1`             | 1 tick で並列 dispatch する Issue 件数。`1` で逐次 (MVP 互換)                                                                                                                                 |
+| `server.port`                 | -               | Snapshot HTTP API の listen port。**未指定なら API 自体を起動しない**。指定時は `127.0.0.1` 固定で bind。`philharmonic dashboard` が default で繋ぐ port もここを見ます (`--port` で上書き可) |
 
 > 自動 retry はサポートしていません。Failed を再実行する場合は人手で `Todo` に戻すか、別 Issue で起票しなおします。
 

@@ -11,6 +11,7 @@
 | `philharmonic run`           | 1 ターン分の orchestration を実行する (1 件処理して exit)                                               |
 | `philharmonic serve`         | 一定間隔でポーリングして候補があれば run を回す常駐デーモン (SIGTERM/SIGINT で graceful shutdown)       |
 | `philharmonic clean`         | retention 経過済みの `issue-*` worktree とローカルブランチを掃除する (失敗 worktree のクリーンアップ用) |
+| `philharmonic dashboard`     | `philharmonic serve` の Snapshot HTTP API を購読する read-only TUI dashboard を起動する                 |
 
 `init` 以外のコマンドは `--config <path>` が使えます (cwd 以外の `.philharmonic/philharmonic.yaml` を指定するとき)。`init` の手順詳細は [getting-started.md](./getting-started.md#4-対象リポジトリで-philharmonic-init-を実行する) を参照してください。
 
@@ -172,6 +173,40 @@ curl -s -X POST http://127.0.0.1:4000/api/v1/refresh
 - LAN 越しに見たい場合は SSH トンネル (`ssh -L 4000:127.0.0.1:4000 <host>`) を経由してください
 
 レスポンス全フィールドは [`docs/specs/snapshot-api.md`](../specs/snapshot-api.md)。設計判断の背景は [`docs/adr/0004-snapshot-http-api.md`](../adr/0004-snapshot-http-api.md)。
+
+## `philharmonic dashboard` — Snapshot を TUI で見る
+
+`philharmonic serve` が Snapshot HTTP API (`server.port`) を出している間、別ターミナルから `philharmonic dashboard` を起動すると、daemon の uptime / polling / running runs / totals を一定間隔で再描画する **read-only な TUI** が立ち上がります。
+
+```sh
+# config (server.port) の設定を流用して 127.0.0.1:<port> に繋ぐ
+philharmonic dashboard
+
+# port を一時的に上書きする (config.server.port は触らない)
+philharmonic dashboard --port 4001
+
+# refresh 間隔を上書き (省略時は polling.interval_ms。最小 500ms)
+philharmonic dashboard --interval 5000
+
+# CI / cron / 動作確認向け: 1 回だけ snapshot を取得して text を出力して exit する
+philharmonic dashboard --once
+```
+
+接続先は **`127.0.0.1` 固定** (Snapshot API の bind と一致)。`--port` も `server.port` も決まらない場合は `philharmonic.yaml` に `server.port` を追加するか `--port` を指定するよう案内して exit 1 します。
+
+| キー         | 動作                                                                                        |
+| ------------ | ------------------------------------------------------------------------------------------- |
+| `q`          | 終了 (exit 0)                                                                               |
+| `Ctrl+C`     | 終了 (exit 0)                                                                               |
+| `r`          | 即時 refresh (`GET /api/v1/state`)                                                          |
+| `R` (大文字) | `POST /api/v1/refresh` で daemon の sleep を起こした上で即時 refresh (副作用は `wake` のみ) |
+
+接続失敗 (daemon が未起動 / API server が応答しない) のときの挙動:
+
+- TUI モードでは画面下部にエラーメッセージを表示し、interval ごとに自動 retry します (Ctrl+C / `q` で exit 0)
+- `--once` モードでは `dashboard: <理由>` を stderr に書いて exit 1 します
+
+詳細仕様 (フィールド構造 / state machine / `--once` の出力形式) は [`docs/specs/dashboard.md`](../specs/dashboard.md)。設計判断の背景は [`docs/adr/0006-tui-dashboard.md`](../adr/0006-tui-dashboard.md)。
 
 ## トラブルシュート
 
