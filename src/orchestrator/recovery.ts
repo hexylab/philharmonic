@@ -13,6 +13,7 @@ import { type FailureReason } from './errors.js';
 import { parseRepositoryNameWithOwner } from './repository.js';
 import {
   dispatchSelected,
+  evaluateContinuationDecision,
   isRetryEligibleReason,
   type RunOnceClock,
   type RunOnceResult,
@@ -247,7 +248,20 @@ export async function recoverInProgress(deps: RecoveryDeps): Promise<RecoverySum
       logRunResult(logger, candidate, result);
       if (result.kind === 'success') {
         summary.succeeded += 1;
-        deps.retryQueue?.remove(candidate.issueNumber);
+        await scheduleContinuationAfterRecovery({
+          retryQueue: deps.retryQueue,
+          maxRetryAttempts: deps.maxRetryAttempts ?? 0,
+          projectsClient: deps.projectsClient,
+          config: deps.config,
+          dispatchStatuses: deps.config.dispatchStatuses,
+          issueNumber: candidate.issueNumber,
+          repository,
+          branch: result.branch,
+          workspacePath,
+          runId: result.runId,
+          logger,
+          clock: deps.clock ?? (() => new Date()),
+        });
       } else {
         summary.failed += 1;
         scheduleRetryAfterRecovery({
@@ -340,6 +354,7 @@ function scheduleRetryAfterRecovery(deps: ScheduleRetryAfterRecoveryDeps): void 
   const nextAttempt = 1;
   const now = deps.clock();
   const entry = deps.retryQueue.schedule({
+    kind: 'failure',
     issueNumber: deps.issueNumber,
     repository: deps.repository,
     branch: deps.branch,
@@ -352,12 +367,109 @@ function scheduleRetryAfterRecovery(deps: ScheduleRetryAfterRecoveryDeps): void 
     maxBackoffMs: deps.maxRetryBackoffMs,
   });
   deps.logger.info('retry scheduled', {
+    kind: entry.kind,
     issueNumber: entry.issueNumber,
     attempt: entry.attempt,
     delayMs: entry.dueAt.getTime() - now.getTime(),
     dueAt: entry.dueAt.toISOString(),
     failureReason: entry.failureReason,
     lastRunId: entry.lastRunId,
+    via: 'recovery',
+  });
+}
+
+type ScheduleContinuationAfterRecoveryDeps = {
+  retryQueue?: RetryQueue;
+  maxRetryAttempts: number;
+  projectsClient: ProjectsClient;
+  config: Config;
+  dispatchStatuses: readonly string[];
+  issueNumber: number;
+  repository: { owner: string; name: string };
+  branch: string;
+  workspacePath: string;
+  runId: string;
+  logger: Logger;
+  clock: () => Date;
+};
+
+/**
+ * recovery 経路で `dispatchSelected` が success を返した場合の continuation retry 連携 (ADR-0009)。
+ *
+ * 通常 tick の `processDispatchSuccessForContinuation` と同じ規則で動かす。serve 起動直後の
+ * recovery 後に start する `serveLoop` でこの continuation entry が消化される。
+ */
+async function scheduleContinuationAfterRecovery(
+  deps: ScheduleContinuationAfterRecoveryDeps,
+): Promise<void> {
+  if (deps.retryQueue === undefined) return;
+  if (deps.maxRetryAttempts <= 0) {
+    deps.retryQueue.remove(deps.issueNumber);
+    return;
+  }
+
+  let candidates: readonly Candidate[];
+  try {
+    candidates = await deps.projectsClient.fetchProjectCandidates({
+      owner: deps.config.owner,
+      projectNumber: deps.config.projectNumber,
+      statusFieldName: deps.config.statusField,
+    });
+  } catch (error) {
+    deps.retryQueue.remove(deps.issueNumber);
+    deps.logger.info('continuation released', {
+      issueNumber: deps.issueNumber,
+      reason: 'fetch_error',
+      lastRunId: deps.runId,
+      via: 'recovery',
+      error: describeError(error),
+    });
+    return;
+  }
+
+  const candidate = candidates.find((c) => c.issueNumber === deps.issueNumber);
+  const decision = evaluateContinuationDecision({
+    candidate,
+    config: deps.config,
+    dispatchStatuses: deps.dispatchStatuses,
+  });
+
+  if (decision.kind === 'release') {
+    deps.retryQueue.remove(deps.issueNumber);
+    deps.logger.info('continuation released', {
+      issueNumber: deps.issueNumber,
+      reason: decision.reason,
+      status: candidate?.status ?? null,
+      lastRunId: deps.runId,
+      via: 'recovery',
+    });
+    return;
+  }
+
+  const nextAttempt = 1;
+  const now = deps.clock();
+  const entry = deps.retryQueue.schedule({
+    kind: 'continuation',
+    issueNumber: deps.issueNumber,
+    repository: deps.repository,
+    branch: deps.branch,
+    workspacePath: deps.workspacePath,
+    attempt: nextAttempt,
+    failureReason: null,
+    lastRunId: deps.runId,
+    lastErrorSummary: null,
+    now,
+    maxBackoffMs: 0,
+  });
+  deps.logger.info('retry scheduled', {
+    kind: entry.kind,
+    issueNumber: entry.issueNumber,
+    attempt: entry.attempt,
+    delayMs: entry.dueAt.getTime() - now.getTime(),
+    dueAt: entry.dueAt.toISOString(),
+    failureReason: entry.failureReason,
+    lastRunId: entry.lastRunId,
+    activeStatus: decision.status,
     via: 'recovery',
   });
 }

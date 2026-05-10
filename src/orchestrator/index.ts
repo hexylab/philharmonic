@@ -25,9 +25,11 @@ export {
 export { recoverInProgress, type RecoveryDeps, type RecoverySummary } from './recovery.js';
 export {
   computeRetryDelayMs,
+  CONTINUATION_RETRY_DELAY_MS,
   createRetryQueue,
   type RescheduleInput as RetryQueueRescheduleInput,
   type RetryEntry,
+  type RetryKind,
   type RetryQueue,
   type ScheduleInput as RetryQueueScheduleInput,
 } from './retry-queue.js';

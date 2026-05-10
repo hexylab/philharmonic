@@ -55,22 +55,28 @@ export function isAcceptableIssue(input: IsAcceptableIssueInput): IsAcceptableIs
 }
 
 /**
- * 二重 dispatch ガード (ADR-0005)。
+ * 二重 dispatch ガード (ADR-0005 + ADR-0009)。
  *
  * agent が `Todo → In Progress` flip を行うようになったため、orchestrator が同 Issue を
- * 次 tick で再 pick するリスクがある。candidate selection の最終フィルタとして以下二段で skip する。
+ * 次 tick で再 pick するリスクがある。candidate selection の最終フィルタとして以下三段で skip する。
  *
- * - (a) worktree 既存: `<workspace_root>/issue-<番号>` が存在する場合 skip
- * - (b) in-flight tracker: 同 daemon の他 dispatch が走っている場合 skip
+ * - (a) in-flight tracker: 同 daemon の他 dispatch が走っている場合 skip (`tracker_in_flight`)
+ * - (b) retry queue: failure / continuation の retry 待機中の場合 skip (`retry_queued`) — ADR-0009 §5
+ * - (c) worktree 既存: `<workspace_root>/issue-<番号>` が存在する場合 skip (`workspace_exists`)
  *
- * いずれかにヒットすれば skip。両方とも false なら dispatch 可能。
+ * いずれかにヒットすれば skip。すべて false なら dispatch 可能。
+ *
+ * `retry_queued` は continuation retry (success 直後の Status 再確認待ち) の窓を守るために必須。
+ * failure retry は `workspaceExists` でも弾けるが、continuation は worktree が cleanup 済みのため
+ * queue 参照が唯一の防御線になる。
  */
 export type DispatchGuard = {
   workspaceExists(issueNumber: number): Promise<boolean>;
   isRunning(issueNumber: number): boolean;
+  inRetryQueue(issueNumber: number): boolean;
 };
 
-export type DispatchGuardSkipReason = 'workspace_exists' | 'tracker_in_flight';
+export type DispatchGuardSkipReason = 'workspace_exists' | 'tracker_in_flight' | 'retry_queued';
 
 export type CheckDispatchGuardResult =
   | { ok: true }
@@ -82,6 +88,9 @@ export async function checkDispatchGuard(
 ): Promise<CheckDispatchGuardResult> {
   if (guard.isRunning(issueNumber)) {
     return { ok: false, reason: 'tracker_in_flight' };
+  }
+  if (guard.inRetryQueue(issueNumber)) {
+    return { ok: false, reason: 'retry_queued' };
   }
   if (await guard.workspaceExists(issueNumber)) {
     return { ok: false, reason: 'workspace_exists' };

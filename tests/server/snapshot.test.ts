@@ -145,10 +145,11 @@ describe('buildStateSnapshot', () => {
     });
   });
 
-  it('retryQueue が渡されると retry_queue field を返す (#84 / ADR-0008)', async () => {
+  it('retryQueue が渡されると retry_queue field を返す (#84 / ADR-0008, #85 / ADR-0009)', async () => {
     const { createRetryQueue } = await import('../../src/orchestrator/retry-queue.js');
     const queue = createRetryQueue();
     queue.schedule({
+      kind: 'failure',
       issueNumber: 42,
       repository: { owner: 'hexylab', name: 'philharmonic' },
       branch: 'feature/42-foo',
@@ -159,6 +160,19 @@ describe('buildStateSnapshot', () => {
       lastErrorSummary: 'claude exited with code 1',
       now: new Date('2026-05-09T00:00:30Z'),
       maxBackoffMs: 300_000,
+    });
+    queue.schedule({
+      kind: 'continuation',
+      issueNumber: 43,
+      repository: { owner: 'hexylab', name: 'philharmonic' },
+      branch: 'feature/43-bar',
+      workspacePath: '/tmp/issue-43',
+      attempt: 1,
+      failureReason: null,
+      lastRunId: 'cont-run',
+      lastErrorSummary: null,
+      now: new Date('2026-05-09T00:00:50Z'),
+      maxBackoffMs: 0,
     });
 
     const tracker = createRunTracker({ startedAt: new Date('2026-05-09T00:00:00Z') });
@@ -171,11 +185,12 @@ describe('buildStateSnapshot', () => {
     });
 
     expect(snapshot.retry_queue).toEqual({
-      size: 1,
+      size: 2,
       max_attempts: 5,
       max_backoff_ms: 300_000,
       entries: [
         {
+          kind: 'failure',
           issue_number: 42,
           attempt: 2,
           due_at: '2026-05-09T00:00:50.000Z',
@@ -183,6 +198,16 @@ describe('buildStateSnapshot', () => {
           failure_reason: 'runner_error',
           last_run_id: 'last-run',
           last_error_summary: 'claude exited with code 1',
+        },
+        {
+          kind: 'continuation',
+          issue_number: 43,
+          attempt: 1,
+          due_at: '2026-05-09T00:01:00.000Z',
+          scheduled_at: '2026-05-09T00:00:50.000Z',
+          failure_reason: null,
+          last_run_id: 'cont-run',
+          last_error_summary: null,
         },
       ],
     });

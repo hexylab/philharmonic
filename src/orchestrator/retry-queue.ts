@@ -4,41 +4,53 @@ import type { FailureReason } from './errors.js';
  * `philharmonic serve` の in-memory retry queue。
  *
  * - daemon プロセス起動以降の retry 待機状態のみを保持する (再起動で消える)
- * - 同一 `issueNumber` は 1 件しか保持しない (Map で dedup)
+ * - 同一 `issueNumber` は 1 件しか保持しない (Map で dedup; kind 違いも上書き)
  * - 永続化 / Status 書き戻しは行わない (ADR-0008 §3)
+ * - kind=`failure` (ADR-0008) と kind=`continuation` (ADR-0009) を 1 本の queue で扱う
  *
  * spec: docs/specs/retry-queue.md
- * adr: docs/adr/0008-in-memory-retry-queue.md
+ * adr: docs/adr/0008-in-memory-retry-queue.md, docs/adr/0009-continuation-retry-after-success.md
  */
 
 const BASE_DELAY_MS = 10_000;
 const ERROR_SUMMARY_MAX_LEN = 500;
 
+/** continuation retry の固定 delay (ADR-0009 §3)。指数バックオフは使わない。 */
+export const CONTINUATION_RETRY_DELAY_MS = 10_000;
+
+export type RetryKind = 'failure' | 'continuation';
+
 export type RetryEntry = {
+  readonly kind: RetryKind;
   readonly issueNumber: number;
   readonly repository: { readonly owner: string; readonly name: string };
   readonly branch: string;
   readonly workspacePath: string;
-  /** 1-indexed retry attempt 番号 (= 直前に失敗した attempt) */
+  /** 1-indexed retry attempt 番号 (kind 内で独立にカウント) */
   readonly attempt: number;
   readonly dueAt: Date;
   readonly scheduledAt: Date;
-  readonly failureReason: FailureReason;
+  /** kind=`continuation` のとき null */
+  readonly failureReason: FailureReason | null;
   readonly lastRunId: string;
+  /** kind=`continuation` のとき null */
   readonly lastErrorSummary: string | null;
 };
 
 export type ScheduleInput = {
+  kind: RetryKind;
   issueNumber: number;
   repository: { owner: string; name: string };
   branch: string;
   workspacePath: string;
   /** schedule する attempt 番号 (1-indexed)。1 未満は 1 に clamp する */
   attempt: number;
-  failureReason: FailureReason;
+  /** kind=`continuation` のときは null を渡す */
+  failureReason: FailureReason | null;
   lastRunId: string;
   lastErrorSummary: string | null;
   now: Date;
+  /** kind=`failure` の backoff clamp 上限。kind=`continuation` では無視 (固定 delay) */
   maxBackoffMs: number;
 };
 
@@ -52,6 +64,8 @@ export type RetryQueue = {
   schedule(input: ScheduleInput): RetryEntry;
   drainDue(now: Date): RetryEntry[];
   remove(issueNumber: number): boolean;
+  /** dispatch ガード用: 該当 Issue が queue に居るかどうか (kind 問わず)。 */
+  has(issueNumber: number): boolean;
   reschedule(input: RescheduleInput): RetryEntry | null;
   /** dueAt 昇順 (同時刻なら issueNumber 昇順) */
   list(): readonly RetryEntry[];
@@ -59,7 +73,7 @@ export type RetryQueue = {
 };
 
 /**
- * `attempt = 1, 2, 3...` に対する backoff (ms) を計算する純粋関数。
+ * `attempt = 1, 2, 3...` に対する failure retry の backoff (ms) を計算する純粋関数。
  *
  * `min(10_000 * 2^(attempt - 1), maxBackoffMs)`。Symphony と同じ式。
  */
@@ -75,9 +89,16 @@ export function createRetryQueue(): RetryQueue {
   return {
     schedule(input) {
       const attempt = Math.max(1, Math.floor(input.attempt));
-      const delayMs = computeRetryDelayMs(attempt, input.maxBackoffMs);
+      const delayMs =
+        input.kind === 'continuation'
+          ? CONTINUATION_RETRY_DELAY_MS
+          : computeRetryDelayMs(attempt, input.maxBackoffMs);
       const dueAt = new Date(input.now.getTime() + delayMs);
+      const failureReason = input.kind === 'continuation' ? null : input.failureReason;
+      const lastErrorSummary =
+        input.kind === 'continuation' ? null : truncateSummary(input.lastErrorSummary);
       const entry: RetryEntry = {
+        kind: input.kind,
         issueNumber: input.issueNumber,
         repository: { owner: input.repository.owner, name: input.repository.name },
         branch: input.branch,
@@ -85,9 +106,9 @@ export function createRetryQueue(): RetryQueue {
         attempt,
         dueAt,
         scheduledAt: input.now,
-        failureReason: input.failureReason,
+        failureReason,
         lastRunId: input.lastRunId,
-        lastErrorSummary: truncateSummary(input.lastErrorSummary),
+        lastErrorSummary,
       };
       entries.set(input.issueNumber, entry);
       return entry;
@@ -103,6 +124,9 @@ export function createRetryQueue(): RetryQueue {
     },
     remove(issueNumber) {
       return entries.delete(issueNumber);
+    },
+    has(issueNumber) {
+      return entries.has(issueNumber);
     },
     reschedule(input) {
       const existing = entries.get(input.issueNumber);

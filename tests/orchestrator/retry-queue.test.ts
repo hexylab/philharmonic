@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   computeRetryDelayMs,
+  CONTINUATION_RETRY_DELAY_MS,
   createRetryQueue,
   type RetryQueueScheduleInput,
 } from '../../src/orchestrator/index.js';
@@ -10,6 +11,7 @@ const REPO = { owner: 'hexylab', name: 'philharmonic' };
 
 function baseInput(overrides: Partial<RetryQueueScheduleInput> = {}): RetryQueueScheduleInput {
   return {
+    kind: 'failure',
     issueNumber: 42,
     repository: REPO,
     branch: 'feature/42-foo',
@@ -150,5 +152,75 @@ describe('createRetryQueue', () => {
         now: new Date(),
       }),
     ).toBeNull();
+  });
+
+  it('has は queue 内 issueNumber に対して true / false を返す', () => {
+    const queue = createRetryQueue();
+    expect(queue.has(42)).toBe(false);
+    queue.schedule(baseInput({ issueNumber: 42 }));
+    expect(queue.has(42)).toBe(true);
+    expect(queue.has(99)).toBe(false);
+    queue.remove(42);
+    expect(queue.has(42)).toBe(false);
+  });
+
+  it('kind=continuation は固定 delay (10s) で schedule され、attempt や maxBackoffMs に左右されない', () => {
+    const queue = createRetryQueue();
+    const now = new Date('2026-05-09T00:00:00Z');
+    // attempt=1 / 5 / maxBackoffMs=0 / 1_000_000 のいずれでも 10s 固定
+    const cases = [
+      { attempt: 1, maxBackoffMs: 0 },
+      { attempt: 5, maxBackoffMs: 0 },
+      { attempt: 1, maxBackoffMs: 1_000_000 },
+      { attempt: 5, maxBackoffMs: 1_000_000 },
+    ];
+    for (const { attempt, maxBackoffMs } of cases) {
+      const entry = queue.schedule(
+        baseInput({
+          kind: 'continuation',
+          attempt,
+          maxBackoffMs,
+          failureReason: null,
+          lastErrorSummary: null,
+          now,
+        }),
+      );
+      expect(entry.kind).toBe('continuation');
+      expect(entry.dueAt.getTime() - now.getTime()).toBe(CONTINUATION_RETRY_DELAY_MS);
+      expect(entry.failureReason).toBeNull();
+      expect(entry.lastErrorSummary).toBeNull();
+    }
+  });
+
+  it('kind=continuation で failureReason / lastErrorSummary を渡しても null に正規化される', () => {
+    const queue = createRetryQueue();
+    const entry = queue.schedule(
+      baseInput({
+        kind: 'continuation',
+        // null 許容に変えたものの、誤って渡された値は無視して null にする (defensive)
+        failureReason: 'runner_error',
+        lastErrorSummary: 'some leftover',
+      }),
+    );
+    expect(entry.failureReason).toBeNull();
+    expect(entry.lastErrorSummary).toBeNull();
+  });
+
+  it('同一 Issue を kind=failure → kind=continuation で schedule すると後勝ちで上書きされる', () => {
+    const queue = createRetryQueue();
+    queue.schedule(baseInput({ kind: 'failure', attempt: 2 }));
+    expect(queue.list()[0]!.kind).toBe('failure');
+    queue.schedule(
+      baseInput({
+        kind: 'continuation',
+        attempt: 1,
+        failureReason: null,
+        lastErrorSummary: null,
+        now: new Date('2026-05-09T00:01:00Z'),
+      }),
+    );
+    expect(queue.size()).toBe(1);
+    expect(queue.list()[0]!.kind).toBe('continuation');
+    expect(queue.list()[0]!.attempt).toBe(1);
   });
 });
