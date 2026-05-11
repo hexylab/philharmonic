@@ -8,11 +8,13 @@ import {
   READY_ISSUES_DISPLAY_LIMIT,
   computeRunningElapsedMs,
   describeStallStatus,
+  formatActivity,
   formatDurationMsShort,
   formatRunningElapsed,
   formatRunningRow,
   formatTotalCost,
   formatUptimeMs,
+  type ActivityDisplay,
   type StallStatus,
 } from './format.js';
 import { formatTimestampJst } from './time.js';
@@ -209,6 +211,7 @@ function RunningSection({
             now,
           });
           const elapsed = formatRunningElapsed(computeRunningElapsedMs(entry.started_at, now));
+          const activity = formatActivity({ activity: entry.activity, now });
           return (
             <Box key={entry.run_id} flexDirection="column">
               <Text>
@@ -247,6 +250,7 @@ function RunningSection({
                   </>
                 ) : null}
               </Text>
+              <ActivityText activity={activity} />
             </Box>
           );
         })
@@ -261,6 +265,35 @@ function StallText({ stall }: { stall: StallStatus }): ReactElement {
     return <Text color="red">STALLED+{formatDurationMsShort(stall.overdueMs)}</Text>;
   }
   return <Text color="cyan">stall in {formatDurationMsShort(stall.remainingMs)}</Text>;
+}
+
+function ActivityText({ activity }: { activity: ActivityDisplay }): ReactElement {
+  if (activity.compat === 'missing') {
+    return (
+      <Text>
+        {'    '}
+        <Text color="yellow">activity unknown (no data — older serve)</Text>
+      </Text>
+    );
+  }
+  const labelColor = activity.isWaiting ? 'yellow' : 'cyan';
+  const sinceLabel = activity.lastActiveLabel ?? '-';
+  return (
+    <Text>
+      {'    '}
+      <Text color="gray">activity: </Text>
+      <Text color={labelColor}>{activity.label}</Text>
+      {'  '}
+      <Text color="gray">last active </Text>
+      <Text color={activity.isWaiting ? 'yellow' : 'gray'}>{sinceLabel} ago</Text>
+      {activity.isWaiting ? (
+        <>
+          {'  '}
+          <Text color="yellow">waiting</Text>
+        </>
+      ) : null}
+    </Text>
+  );
 }
 
 function RetrySection({

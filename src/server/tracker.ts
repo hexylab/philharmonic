@@ -1,4 +1,5 @@
 import type { FailureReason } from '../orchestrator/errors.js';
+import type { ActivityEvent, ActivityKind } from '../runner/stream.js';
 
 /**
  * `philharmonic serve` の in-memory run tracker。
@@ -51,6 +52,24 @@ export type RunningWatchdog = {
   operatorActionReasons: ReadonlyArray<OperatorActionReason>;
 };
 
+/**
+ * Running agent の現在 activity (#98)。
+ *
+ * - runner stdout の stream event 種別を機械的に分類した値のみを保持する (raw payload や prompt は保持しない)
+ * - `kind` は `runner/stream.ts` の `ActivityKind` (`starting` / `assistant` / `tool_use` / `result`)
+ * - `toolName` は `tool_use` のときだけ非 null。それ以外の kind では常に null
+ * - `updatedAt` は activity を最後に更新した時刻 (ISO 8601)。dashboard 側で `now - updatedAt` から
+ *   "waiting / no recent activity" を派生表示する
+ *
+ * `lastActivityAt` (stall detection 用 chunk-level timestamp) とは分けて持つ。chunk が来ても
+ * 分類対象外 event (system / user / parse_error) なら activity は更新しない。
+ */
+export type RunningActivity = {
+  kind: ActivityKind;
+  toolName: string | null;
+  updatedAt: string;
+};
+
 export type OperatorActionReason =
   | 'orphaned_only'
   | 'stale_only'
@@ -87,6 +106,11 @@ export type RunningEntry = {
   runnerPid: number | null;
   /** watchdog (#105) の最新判定結果。1 度も判定が走っていなければ null */
   watchdog: RunningWatchdog | null;
+  /**
+   * 直近に観測された runner activity (#98)。`runStarted` で `starting` を初期値として
+   * 入れるため常に非 null。
+   */
+  activity: RunningActivity;
 };
 
 export type Totals = {
@@ -134,6 +158,14 @@ export type RunTracker = {
    * callback から駆動する (#87)。runId が in-flight でなければ no-op。
    */
   recordActivity(runId: string, at: Date): void;
+  /**
+   * runner stdout の stream event を classify した activity を記録する (#98)。runner subprocess の
+   * onActivityEvent callback から駆動する。activity に影響しない event (system / user 等) は
+   * 呼ばないため、`recordActivity` (chunk-level) と切り分けて持つ。
+   *
+   * runId が in-flight でなければ no-op (べき等)。
+   */
+  recordActivityEvent(runId: string, event: ActivityEvent, at: Date): void;
   /**
    * runner subprocess が spawn された直後に pid を記録する (#105)。runId が in-flight で
    * なければ no-op。同じ runId に対して複数回呼ばれた場合は最後の値で上書きする (multi-turn
@@ -186,12 +218,21 @@ export function createRunTracker(options: CreateRunTrackerOptions = {}): RunTrac
         runLogPath: input.runLogPath,
         runnerPid: null,
         watchdog: null,
+        activity: { kind: 'starting', toolName: null, updatedAt: startedAtIso },
       });
     },
     recordActivity(runId, at) {
       const entry = running.get(runId);
       if (entry === undefined) return;
       running.set(runId, { ...entry, lastActivityAt: at.toISOString() });
+    },
+    recordActivityEvent(runId, event, at) {
+      const entry = running.get(runId);
+      if (entry === undefined) return;
+      running.set(runId, {
+        ...entry,
+        activity: { kind: event.kind, toolName: event.toolName, updatedAt: at.toISOString() },
+      });
     },
     recordRunnerProcess(runId, pid) {
       const entry = running.get(runId);
@@ -245,6 +286,7 @@ export const noopRunTracker: RunTracker = {
   runStarted: () => {},
   runFinished: () => {},
   recordActivity: () => {},
+  recordActivityEvent: () => {},
   recordRunnerProcess: () => {},
   setWatchdog: () => {},
   listRunning: () => [],

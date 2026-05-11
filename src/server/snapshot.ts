@@ -43,6 +43,23 @@ export type StateSnapshot = {
     run_log_path: string;
     /** runner subprocess pid (process group leader)。spawn 前 / 取得失敗で null */
     runner_pid: number | null;
+    /**
+     * runner stdout の stream event から推定した現在 activity (#98)。
+     *
+     * - `kind`: `starting` / `assistant` / `tool_use` / `result` のいずれか
+     * - `tool_name`: `tool_use` のときだけ非 null
+     * - `updated_at`: activity 更新時刻 (ISO 8601)。dashboard は `now - updated_at` から
+     *   "waiting / no recent activity" を派生表示する
+     *
+     * 古い (本フィールドを実装していない) serve に対しても dashboard 側で安全に fall back
+     * できるよう optional とする。現行 serve は `runStarted` 直後に `starting` を入れるため
+     * 常に値を返す。
+     */
+    activity?: {
+      kind: 'starting' | 'assistant' | 'tool_use' | 'result';
+      tool_name: string | null;
+      updated_at: string;
+    };
     /** active run watchdog (#105) の最新判定。1 度も判定が走っていなければ null */
     watchdog: {
       reasons: Array<'orphaned' | 'stale'>;
@@ -262,6 +279,11 @@ function toRunningJson(entry: RunningEntry): StateSnapshot['running'][number] {
     workspace_path: entry.workspacePath,
     run_log_path: entry.runLogPath,
     runner_pid: entry.runnerPid,
+    activity: {
+      kind: entry.activity.kind,
+      tool_name: entry.activity.toolName,
+      updated_at: entry.activity.updatedAt,
+    },
     watchdog:
       entry.watchdog === null
         ? null

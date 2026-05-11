@@ -661,6 +661,7 @@ export async function dispatchSelected(
         logger,
         onActivity: (at) => tracker.recordActivity(runId, at),
         onSpawn: (pid) => tracker.recordRunnerProcess(runId, pid),
+        onActivityEvent: (event, at) => tracker.recordActivityEvent(runId, event, at),
       });
     } catch (error) {
       await runAfterRunHooksSafely(deps.workspaceManager, hookContext, 'failed', logger);

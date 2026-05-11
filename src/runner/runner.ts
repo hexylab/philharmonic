@@ -12,7 +12,12 @@ import {
   InvalidSessionIdError,
 } from './errors.js';
 import { defaultSpawn, type SpawnFn, type SpawnedProcess } from './spawn.js';
-import { StreamEventParser, type ResultEvent } from './stream.js';
+import {
+  classifyActivityFromEvent,
+  StreamEventParser,
+  type ActivityEvent,
+  type ResultEvent,
+} from './stream.js';
 
 export type PermissionMode = 'auto' | 'bypass';
 
@@ -68,6 +73,16 @@ export type RunClaudeOptions = {
    * 呼ばれない。
    */
   onSpawn?: (pid: number) => void;
+  /**
+   * stream event が parse / classify されて activity 種別が確定したタイミングで呼ばれる (#98)。
+   *
+   * - `assistant` event → `kind: 'assistant'` または `kind: 'tool_use'`
+   * - `result` event → `kind: 'result'`
+   * - それ以外 (system / user / parse_error / unknown) は呼ばれない (= activity を更新しない)
+   *
+   * raw payload や prompt は callback に渡らない (tool name のみ短く渡す)。
+   */
+  onActivityEvent?: (event: ActivityEvent, at: Date) => void;
 };
 
 export type RunResult = {
@@ -169,6 +184,7 @@ export async function runClaude(options: RunClaudeOptions): Promise<RunResult> {
           stderrLog,
           onActivity: options.onActivity,
           onSpawn: options.onSpawn,
+          onActivityEvent: options.onActivityEvent,
           // baseLogger は system event 受信時に sessionId 付きに差し替わる。
           // getLogger は呼び出しごとに最新の baseLogger を child するので、
           // sessionId 切替後の intra-turn ログにも sessionId が付与される (#25)。
@@ -272,6 +288,7 @@ type RunTurnInput = {
   stderrLog: WriteStream | null;
   onActivity?: (at: Date) => void;
   onSpawn?: (pid: number) => void;
+  onActivityEvent?: (event: ActivityEvent, at: Date) => void;
   /**
    * 呼び出すたびに最新の logger (sessionId 反映済み) を返す getter。
    * runTurn の内部で `input.getLogger()?.info(...)` のように使う。
@@ -386,6 +403,10 @@ async function runTurn(input: RunTurnInput): Promise<TurnOutcome> {
         } else if (event.type === 'system' && event.sessionId !== undefined) {
           input.onSystemSessionId(event.sessionId);
         }
+        if (input.onActivityEvent !== undefined) {
+          const activity = classifyActivityFromEvent(event);
+          if (activity !== null) input.onActivityEvent(activity, new Date());
+        }
       }
     });
 
@@ -413,6 +434,10 @@ async function runTurn(input: RunTurnInput): Promise<TurnOutcome> {
       const trailing = parser.flush();
       for (const event of trailing) {
         if (event.type === 'result') lastResult = event;
+        if (input.onActivityEvent !== undefined) {
+          const activity = classifyActivityFromEvent(event);
+          if (activity !== null) input.onActivityEvent(activity, new Date());
+        }
       }
 
       const durationMs = Date.now() - startedAt;

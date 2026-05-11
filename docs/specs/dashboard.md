@@ -8,7 +8,7 @@
 
 ## 関連
 
-- 関連 Issue: #31 (Refs: #30), #87 (Retry Queue / Stalled section 追加)
+- 関連 Issue: #31 (Refs: #30), #87 (Retry Queue / Stalled section 追加), #98 (Running entry に activity 行を追加)
 - 設計判断: [ADR-0006 TUI dashboard は Ink で実装する](../adr/0006-tui-dashboard.md), [ADR-0004 Snapshot HTTP API は loopback 固定](../adr/0004-snapshot-http-api.md)
 - 関連 spec: [snapshot-api.md](./snapshot-api.md), [serve-daemon.md](./serve-daemon.md), [config-schema.md](./config-schema.md), [retry-queue.md](./retry-queue.md)
 
@@ -82,7 +82,7 @@ polling.interval_ms=30000 polling.last_tick_at=2026-05-09 09:00:30 JST
 agent.stall_timeout_ms=300000
 
 running:
-  #42 branch=feature/42-foo started_at=2026-05-09 09:00:10 JST elapsed=15s slot=0 retry=- last_activity_at=2026-05-09 09:00:25 JST stall=in 4m35s
+  #42 branch=feature/42-foo started_at=2026-05-09 09:00:10 JST elapsed=15s slot=0 retry=- last_activity_at=2026-05-09 09:00:25 JST stall=in 4m35s activity=tool_use:_Bash last_active=5s watchdog=- operator_action=-
 
 totals:
   runs_completed=12 runs_succeeded=10 runs_failed=2 total_cost_usd=4.32
@@ -102,6 +102,8 @@ retry_queue (1): max_attempts=5 max_backoff_ms=300000
 `running` が空のときは `running: (none)` と書く。`polling.last_tick_at` が `null` のときは `(never)` と書く。parse 不可能な timestamp は `(invalid)` と書く。
 
 `running` の各行は `retry=<kind>#<attempt>` (retry 起源でなければ `-`)、`last_activity_at=<ISO>`、`stall=<状態>` を末尾に追加する (#87)。`stall` の表記は: `agent.stall_timeout_ms` が 0 / 不正値なら `disabled`、残時間内なら `in <短縮表記>`、超過なら `STALLED+<超過時間>`。
+
+`activity=<種別>[:<tool>] last_active=<経過>` も 1 行に並ぶ (#98)。種別ラベルは `starting` / `assistant_responding` / `tool_use:_<short_name>` / `finishing` のいずれか (label 内部の空白は `_` に置換して 1 token に保つ)。`activity=` と `last_active=` は半角空白で区切る。`last_active` は activity が最後に更新されてからの経過 (`5s` / `2m05s`)。30s 以上経過していれば末尾に ` waiting` が追加される。古い serve (`activity` 未提供) は `activity=unknown` のみ出す。
 
 `elapsed=<短縮表記>` は `--once` 実行時刻 - `started_at` から TUI 側で算出する (#97)。表記は `formatUptimeMs` に揃え、0 / 秒 / 分 / 時間 / 日跨ぎを `0s` / `05s` / `12m34s` / `01h02m05s` / `1d01h02m05s` で表す。`started_at` が parse 不能な場合は `-` を出す。Snapshot API には `elapsed_ms` を追加しないため、古い serve に対しても追加 fallback は不要。
 
@@ -123,7 +125,8 @@ retry_queue (1): max_attempts=5 max_backoff_ms=300000
 ├────────────────────────────────────────────────────────────────────┤
 │ Running (1)  stall_timeout=300000ms                                │
 │   #42  feature/42-foo  slot=0  retry=failure#1  elapsed 4m35s  started ... │
-│      last_activity 2026-05-09 09:00:25 JST  stall in 4m35s         │
+│    last_activity 2026-05-09 09:00:25 JST  stall in 4m35s           │
+│    activity: tool use: Bash  last active 5s ago                    │
 ├────────────────────────────────────────────────────────────────────┤
 │ Totals                                                             │
 │   completed=12  succeeded=10  failed=2  cost=$4.32                 │
@@ -163,6 +166,18 @@ retry_queue (1): max_attempts=5 max_backoff_ms=300000
 - 各 entry に 2 行目を追加し、`last_activity <ISO>` と stall 残時間 (または `STALLED+<超過>`) を表示する
 - entry が retry 起源 (`retry_attempt !== null`) のときのみ 1 行目に `retry=<kind>#<attempt>` を表示する
 - 残時間表示は `stall in 4m35s` (live) / `STALLED+30s` (超過) / `stall=off` (無効) のいずれか
+
+### Running section: activity 表示 (#98)
+
+- 各 entry の 3 行目に `activity: <ラベル>  last active <短縮表記> ago` を出す
+- `<ラベル>` は snapshot 上の `kind` に対応:
+  - `starting`: `starting`
+  - `assistant`: `assistant responding`
+  - `tool_use`: `tool use: <短縮 tool 名>` (MCP 形式は最後の `__` 以降のみ採用 + 上限 24 文字で末尾 `…` 省略)
+  - `result`: `finishing`
+- `now - activity.updated_at` が 30s 以上のときは末尾に `waiting` を黄色で追加表示する (派生 UI ラベル — Snapshot API には載らない)
+- 古い (本フィールドを実装していない) serve に接続している (= `activity === undefined`) 場合は `activity unknown (no data — older serve)` を出して fallback 表示する
+- raw payload / prompt / 長文出力は表示しない (#98 要件)
 
 ### Running section: elapsed 表示 (#97)
 
