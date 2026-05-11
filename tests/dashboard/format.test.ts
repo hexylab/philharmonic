@@ -73,8 +73,8 @@ describe('formatRunningRow', () => {
       issue: '#42',
       branch: 'feature/42-foo',
       slot: '-',
-      startedAt: '2026-05-09T00:00:00.000Z',
-      lastActivityAt: '2026-05-09T00:00:00.000Z',
+      startedAt: '2026-05-09 09:00:00 JST',
+      lastActivityAt: '2026-05-09 09:00:00 JST',
       retryAttempt: '-',
       watchdog: '-',
       operatorAction: '-',
@@ -119,7 +119,7 @@ describe('formatRunningRow', () => {
       watchdog: null,
     });
     expect(row.slot).toBe('0');
-    expect(row.lastActivityAt).toBe('2026-05-09T00:00:30.000Z');
+    expect(row.lastActivityAt).toBe('2026-05-09 09:00:30 JST');
     expect(row.retryAttempt).toBe('failure#2');
     expect(row.watchdog).toBe('-');
   });
@@ -294,7 +294,7 @@ describe('formatSnapshotForOnce', () => {
       snapshot: snapshot(),
     });
     expect(text).toContain('host=127.0.0.1 port=4000');
-    expect(text).toContain('started_at=2026-05-09T00:00:00.000Z uptime=01m00s');
+    expect(text).toContain('started_at=2026-05-09 09:00:00 JST uptime=01m00s');
     expect(text).toContain('polling.interval_ms=30000 polling.last_tick_at=(never)');
     expect(text).toContain('running: (none)');
     expect(text).toContain('runs_completed=0 runs_succeeded=0 runs_failed=0 total_cost_usd=0');
@@ -325,7 +325,7 @@ describe('formatSnapshotForOnce', () => {
         },
       }),
     });
-    expect(text).toContain('scheduler: last_evaluated_at=2026-05-09T00:00:30.000Z');
+    expect(text).toContain('scheduler: last_evaluated_at=2026-05-09 09:00:30 JST');
     expect(text).toContain('  ready (0)');
     expect(text).toContain('  blocked (0)');
     expect(text).toContain('  cycles (0)');
@@ -394,10 +394,10 @@ describe('formatSnapshotForOnce', () => {
         polling: { interval_ms: 30_000, last_tick_at: '2026-05-09T00:00:30.000Z' },
       }),
     });
-    expect(text).toContain('polling.last_tick_at=2026-05-09T00:00:30.000Z');
+    expect(text).toContain('polling.last_tick_at=2026-05-09 09:00:30 JST');
     expect(text).toContain('agent.stall_timeout_ms=60000');
     expect(text).toContain(
-      '  #42 branch=feature/42-foo started_at=2026-05-09T00:00:10.000Z elapsed=50s slot=0 retry=failure#1 last_activity_at=2026-05-09T00:00:30.000Z stall=in 30s watchdog=-',
+      '  #42 branch=feature/42-foo started_at=2026-05-09 09:00:10 JST elapsed=50s slot=0 retry=failure#1 last_activity_at=2026-05-09 09:00:30 JST stall=in 30s watchdog=- operator_action=-',
     );
   });
 
@@ -504,10 +504,10 @@ describe('formatSnapshotForOnce', () => {
     });
     expect(text).toContain('retry_queue (2): max_attempts=5 max_backoff_ms=300000');
     expect(text).toContain(
-      '  #42 kind=failure attempt=2 reason=runner_error due_at=2026-05-09T00:01:00.000Z (in 30s) branch=feature/42-foo workspace_path=/tmp/issue-42 last_run_id=run-x',
+      '  #42 kind=failure attempt=2 reason=runner_error due_at=2026-05-09 09:01:00 JST (in 30s) branch=feature/42-foo workspace_path=/tmp/issue-42 last_run_id=run-x',
     );
     expect(text).toContain(
-      '  #43 kind=continuation attempt=1 reason=- due_at=2026-05-09T00:00:00.000Z (overdue 30s) branch=feature/43-bar workspace_path=/tmp/issue-43 last_run_id=run-y',
+      '  #43 kind=continuation attempt=1 reason=- due_at=2026-05-09 09:00:00 JST (overdue 30s) branch=feature/43-bar workspace_path=/tmp/issue-43 last_run_id=run-y',
     );
   });
 });

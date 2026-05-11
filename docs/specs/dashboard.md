@@ -29,6 +29,7 @@
   | `Ctrl+C` | 終了 (exit 0) |
   | `r` | 即時 refresh (`GET /api/v1/state`) |
   | `R` (大文字) | `POST /api/v1/refresh` で daemon の sleep を起こした上で即時 refresh (副作用は `wake` のみ) |
+- 表示上の時刻は **日本時刻 (Asia/Tokyo / JST)** で `YYYY-MM-DD HH:mm:ss JST` に揃える (#96)。Snapshot API 内部表現は ISO 8601 UTC のまま変更しない
 - 接続失敗 / HTTP エラー / JSON parse 失敗時の挙動:
   - **TUI モード**: 最後に取得した snapshot (あれば) を残しつつ、画面下部に 1 行のエラーメッセージを表示する。次回の自動 refresh で再試行する。Ctrl+C / `q` での exit code は 0
   - **`--once` モード**: 1 行エラーメッセージを stderr に書いて exit 1
@@ -72,21 +73,21 @@ Options:
 
 ### `--once` の出力
 
-stdout に以下のような human-readable text を出して exit 0。Snapshot API のフィールドを 1 対 1 で写像する。
+stdout に以下のような human-readable text を出して exit 0。Snapshot API のフィールドを 1 対 1 で写像する。表示上の時刻は **日本時刻 (Asia/Tokyo / JST)** で `YYYY-MM-DD HH:mm:ss JST` 形式に揃える (#96)。Snapshot API 内部の表現は ISO 8601 UTC のまま変更しない。
 
 ```
 host=127.0.0.1 port=4000
-started_at=2026-05-09T00:00:00.000Z uptime=1h00m00s
-polling.interval_ms=30000 polling.last_tick_at=2026-05-09T00:00:30.000Z
+started_at=2026-05-09 09:00:00 JST uptime=1h00m00s
+polling.interval_ms=30000 polling.last_tick_at=2026-05-09 09:00:30 JST
 agent.stall_timeout_ms=300000
 
 running:
-  #42 branch=feature/42-foo started_at=2026-05-09T00:00:10.000Z elapsed=15s slot=0 retry=- last_activity_at=2026-05-09T00:00:25.000Z stall=in 4m35s
+  #42 branch=feature/42-foo started_at=2026-05-09 09:00:10 JST elapsed=15s slot=0 retry=- last_activity_at=2026-05-09 09:00:25 JST stall=in 4m35s
 
 totals:
   runs_completed=12 runs_succeeded=10 runs_failed=2 total_cost_usd=4.32
 
-scheduler: last_evaluated_at=2026-05-09T00:00:30.000Z
+scheduler: last_evaluated_at=2026-05-09 09:00:30 JST
   ready (2): #104, #105
   blocked (1):
     #102 blocked_by=#101
@@ -95,10 +96,10 @@ scheduler: last_evaluated_at=2026-05-09T00:00:30.000Z
   invalid (0)
 
 retry_queue (1): max_attempts=5 max_backoff_ms=300000
-  #42 kind=failure attempt=2 reason=runner_error due_at=2026-05-09T00:00:50.000Z (in 20s) branch=feature/42-foo workspace_path=/home/user/.philharmonic/worktrees/issue-42 last_run_id=0190ce80-...
+  #42 kind=failure attempt=2 reason=runner_error due_at=2026-05-09 09:00:50 JST (in 20s) branch=feature/42-foo workspace_path=/home/user/.philharmonic/worktrees/issue-42 last_run_id=0190ce80-...
 ```
 
-`running` が空のときは `running: (none)` と書く。`polling.last_tick_at` が `null` のときは `(never)` と書く。
+`running` が空のときは `running: (none)` と書く。`polling.last_tick_at` が `null` のときは `(never)` と書く。parse 不可能な timestamp は `(invalid)` と書く。
 
 `running` の各行は `retry=<kind>#<attempt>` (retry 起源でなければ `-`)、`last_activity_at=<ISO>`、`stall=<状態>` を末尾に追加する (#87)。`stall` の表記は: `agent.stall_timeout_ms` が 0 / 不正値なら `disabled`、残時間内なら `in <短縮表記>`、超過なら `STALLED+<超過時間>`。
 
@@ -117,17 +118,17 @@ retry_queue (1): max_attempts=5 max_backoff_ms=300000
 │ Philharmonic Dashboard                                             │
 │ http://127.0.0.1:4000   refresh=30000ms                            │
 ├────────────────────────────────────────────────────────────────────┤
-│ started 2026-05-09T00:00:00.000Z   uptime 1h00m00s                 │
-│ polling 30000ms   last tick 2026-05-09T00:00:30.000Z                │
+│ started 2026-05-09 09:00:00 JST   uptime 1h00m00s                  │
+│ polling 30000ms   last tick 2026-05-09 09:00:30 JST                │
 ├────────────────────────────────────────────────────────────────────┤
 │ Running (1)  stall_timeout=300000ms                                │
 │   #42  feature/42-foo  slot=0  retry=failure#1  elapsed 4m35s  started ... │
-│      last_activity 2026-05-09T00:00:25.000Z  stall in 4m35s        │
+│      last_activity 2026-05-09 09:00:25 JST  stall in 4m35s         │
 ├────────────────────────────────────────────────────────────────────┤
 │ Totals                                                             │
 │   completed=12  succeeded=10  failed=2  cost=$4.32                 │
 ├────────────────────────────────────────────────────────────────────┤
-│ Scheduler  last evaluated 2026-05-09T00:00:30.000Z                 │
+│ Scheduler  last evaluated 2026-05-09 09:00:30 JST                  │
 │   Ready (2)   #104, #105                                           │
 │   Blocked (1)                                                      │
 │     #102 ← #101                                                    │
@@ -137,10 +138,10 @@ retry_queue (1): max_attempts=5 max_backoff_ms=300000
 ├────────────────────────────────────────────────────────────────────┤
 │ Retry Queue (1)  max_attempts=5 max_backoff_ms=300000              │
 │   #42  failure  attempt=2  reason=runner_error  in 20s             │
-│      due 2026-05-09T00:00:50.000Z  branch=feature/42-foo           │
+│      due 2026-05-09 09:00:50 JST  branch=feature/42-foo            │
 ├────────────────────────────────────────────────────────────────────┤
 │ q quit  r refresh  R wake-and-refresh                              │
-│ last fetch ok @ 13:00:42                                           │
+│ last fetch ok @ 2026-05-09 22:00:42 JST                            │
 └────────────────────────────────────────────────────────────────────┘
 ```
 

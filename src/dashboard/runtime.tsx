@@ -15,6 +15,7 @@ import {
   formatUptimeMs,
   type StallStatus,
 } from './format.js';
+import { formatTimestampJst } from './time.js';
 
 /**
  * `philharmonic dashboard` の TUI runtime (Ink/React)。
@@ -168,12 +169,13 @@ function DaemonSection({ snapshot }: { snapshot: StateSnapshot }): ReactElement 
   return (
     <Box paddingX={1} borderStyle="round" borderColor="gray" flexDirection="column">
       <Text>
-        started <Text color="cyan">{snapshot.started_at}</Text>
+        started <Text color="cyan">{formatTimestampJst(snapshot.started_at)}</Text>
         {'   '}uptime <Text color="cyan">{formatUptimeMs(snapshot.uptime_ms)}</Text>
       </Text>
       <Text>
         polling <Text color="cyan">{snapshot.polling.interval_ms}ms</Text>
-        {'   '}last tick <Text color="cyan">{snapshot.polling.last_tick_at ?? '(never)'}</Text>
+        {'   '}last tick{' '}
+        <Text color="cyan">{formatTimestampJst(snapshot.polling.last_tick_at)}</Text>
       </Text>
     </Box>
   );
@@ -326,7 +328,7 @@ function RetrySection({
               </Text>
               <Text>
                 {'    '}
-                <Text color="gray">due {entry.due_at}</Text>
+                <Text color="gray">due {formatTimestampJst(entry.due_at)}</Text>
                 {'  '}
                 <Text color="gray">branch={entry.branch}</Text>
               </Text>
@@ -371,7 +373,8 @@ function SchedulerSection({
   return (
     <Box paddingX={1} borderStyle="round" borderColor="gray" flexDirection="column">
       <Text>
-        Scheduler <Text color="gray">last evaluated {scheduler.last_evaluated_at}</Text>
+        Scheduler{' '}
+        <Text color="gray">last evaluated {formatTimestampJst(scheduler.last_evaluated_at)}</Text>
       </Text>
       <Text>
         {'  '}Ready{' '}
@@ -449,7 +452,7 @@ function Footer({
       {errorMessage !== null ? (
         <Text color="red">error: {errorMessage}</Text>
       ) : state.kind === 'ok' ? (
-        <Text color="gray">last fetch ok @ {state.fetchedAt.toISOString()}</Text>
+        <Text color="gray">last fetch ok @ {formatTimestampJst(state.fetchedAt)}</Text>
       ) : null}
       {refreshNotice !== null ? <Text color="yellow">{refreshNotice}</Text> : null}
     </Box>
