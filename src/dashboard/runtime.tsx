@@ -6,8 +6,10 @@ import type { RetryQueueStateJson, SchedulerStateJson, StateSnapshot } from '../
 import { describeFetchError, type DashboardClient } from './client.js';
 import {
   READY_ISSUES_DISPLAY_LIMIT,
+  computeRunningElapsedMs,
   describeStallStatus,
   formatDurationMsShort,
+  formatRunningElapsed,
   formatRunningRow,
   formatTotalCost,
   formatUptimeMs,
@@ -204,6 +206,7 @@ function RunningSection({
             stallTimeoutMs,
             now,
           });
+          const elapsed = formatRunningElapsed(computeRunningElapsedMs(entry.started_at, now));
           return (
             <Box key={entry.run_id} flexDirection="column">
               <Text>
@@ -219,6 +222,8 @@ function RunningSection({
                     <Text color="yellow">retry={row.retryAttempt}</Text>
                   </>
                 ) : null}
+                {'  '}
+                <Text color="cyan">elapsed {elapsed}</Text>
                 {'  '}
                 <Text color="gray">started {row.startedAt}</Text>
               </Text>

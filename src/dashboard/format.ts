@@ -60,6 +60,27 @@ export function formatRunningRow(entry: StateSnapshot['running'][number]): {
   };
 }
 
+/**
+ * Running entry の `started_at` と `now` から経過時間 (ms) を算出する (#97)。
+ *
+ * - `started_at` が parse 不能なら `null` (display 側で `-` に fall back する)
+ * - `now < started_at` (時計逆走) は 0 ms 扱い
+ *
+ * 表示用 string への変換は `formatUptimeMs(elapsedMs)` を流用する。Snapshot API
+ * に `elapsed_ms` を増やすと外部 client / 古い serve の互換に handling が増えるため、
+ * 互換性を優先して TUI 側計算とする。
+ */
+export function computeRunningElapsedMs(startedAt: string, now: Date): number | null {
+  const startMs = Date.parse(startedAt);
+  if (!Number.isFinite(startMs)) return null;
+  return Math.max(0, now.getTime() - startMs);
+}
+
+/** `computeRunningElapsedMs` の結果を表示用 string に変換する (`null` は `-`)。 */
+export function formatRunningElapsed(elapsedMs: number | null): string {
+  return elapsedMs === null ? '-' : formatUptimeMs(elapsedMs);
+}
+
 function formatWatchdogShort(
   watchdog: StateSnapshot['running'][number]['watchdog'] | undefined,
 ): string {
@@ -163,8 +184,9 @@ export function formatSnapshotForOnce(input: {
         stallTimeoutMs,
         now,
       });
+      const elapsed = formatRunningElapsed(computeRunningElapsedMs(entry.started_at, now));
       lines.push(
-        `  ${row.issue} branch=${row.branch} started_at=${row.startedAt} slot=${row.slot} retry=${row.retryAttempt} last_activity_at=${row.lastActivityAt} stall=${formatStallForOnce(stall)} watchdog=${row.watchdog} operator_action=${row.operatorAction}`,
+        `  ${row.issue} branch=${row.branch} started_at=${row.startedAt} elapsed=${elapsed} slot=${row.slot} retry=${row.retryAttempt} last_activity_at=${row.lastActivityAt} stall=${formatStallForOnce(stall)} watchdog=${row.watchdog} operator_action=${row.operatorAction}`,
       );
     }
   }

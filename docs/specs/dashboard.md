@@ -81,7 +81,7 @@ polling.interval_ms=30000 polling.last_tick_at=2026-05-09T00:00:30.000Z
 agent.stall_timeout_ms=300000
 
 running:
-  #42 branch=feature/42-foo started_at=2026-05-09T00:00:10.000Z slot=0 retry=- last_activity_at=2026-05-09T00:00:25.000Z stall=in 4m35s
+  #42 branch=feature/42-foo started_at=2026-05-09T00:00:10.000Z elapsed=15s slot=0 retry=- last_activity_at=2026-05-09T00:00:25.000Z stall=in 4m35s
 
 totals:
   runs_completed=12 runs_succeeded=10 runs_failed=2 total_cost_usd=4.32
@@ -102,6 +102,8 @@ retry_queue (1): max_attempts=5 max_backoff_ms=300000
 
 `running` の各行は `retry=<kind>#<attempt>` (retry 起源でなければ `-`)、`last_activity_at=<ISO>`、`stall=<状態>` を末尾に追加する (#87)。`stall` の表記は: `agent.stall_timeout_ms` が 0 / 不正値なら `disabled`、残時間内なら `in <短縮表記>`、超過なら `STALLED+<超過時間>`。
 
+`elapsed=<短縮表記>` は `--once` 実行時刻 - `started_at` から TUI 側で算出する (#97)。表記は `formatUptimeMs` に揃え、0 / 秒 / 分 / 時間 / 日跨ぎを `0s` / `05s` / `12m34s` / `01h02m05s` / `1d01h02m05s` で表す。`started_at` が parse 不能な場合は `-` を出す。Snapshot API には `elapsed_ms` を追加しないため、古い serve に対しても追加 fallback は不要。
+
 `scheduler` が `null` (現行 serve だがまだ評価していない) のときは `scheduler: (not evaluated yet)` と 1 行だけ書く。`scheduler` が `undefined` (古い serve に接続していてフィールドそのものが無い) のときは `scheduler: (not provided by daemon)` と 1 行だけ書いて、API 未対応であることを明示する。
 
 `retry_queue` も同じパターン (#87): `undefined` (古い serve) は `retry_queue: (not provided by daemon)`、`null` (`agent.max_retry_attempts == 0`) は `retry_queue: (disabled)`、entries が空なら `retry_queue (0): max_attempts=N max_backoff_ms=N` のヘッダのみ。
@@ -119,7 +121,7 @@ retry_queue (1): max_attempts=5 max_backoff_ms=300000
 │ polling 30000ms   last tick 2026-05-09T00:00:30.000Z                │
 ├────────────────────────────────────────────────────────────────────┤
 │ Running (1)  stall_timeout=300000ms                                │
-│   #42  feature/42-foo  slot=0  retry=failure#1  started ...        │
+│   #42  feature/42-foo  slot=0  retry=failure#1  elapsed 4m35s  started ... │
 │      last_activity 2026-05-09T00:00:25.000Z  stall in 4m35s        │
 ├────────────────────────────────────────────────────────────────────┤
 │ Totals                                                             │
@@ -160,6 +162,13 @@ retry_queue (1): max_attempts=5 max_backoff_ms=300000
 - 各 entry に 2 行目を追加し、`last_activity <ISO>` と stall 残時間 (または `STALLED+<超過>`) を表示する
 - entry が retry 起源 (`retry_attempt !== null`) のときのみ 1 行目に `retry=<kind>#<attempt>` を表示する
 - 残時間表示は `stall in 4m35s` (live) / `STALLED+30s` (超過) / `stall=off` (無効) のいずれか
+
+### Running section: elapsed 表示 (#97)
+
+- 1 行目の `started <ISO>` の直前に `elapsed <短縮表記>` を表示する。値は `now - started_at` を `formatUptimeMs` で整形したもの (`0s` / `12m34s` / `01h02m05s` / `1d01h02m05s`)
+- `started_at` が parse 不能な entry は `elapsed -` を表示する。古い Snapshot API (= field 構成は同じだが値が壊れている) でも dashboard 自体は落とさない
+- dashboard refresh ごとに `clock()` を読み直して算出するため、自動 refresh / `r` / `R` のいずれでも値が更新される
+- Snapshot API には `elapsed_ms` を追加しない。互換のため TUI 側計算とする (Issue #97 の方針)
 
 ### Retry Queue section の表示ルール (#87)
 
