@@ -49,6 +49,64 @@ export type StreamEvent =
   | UnknownEvent
   | ParseErrorEvent;
 
+/**
+ * Running agent の活動状態 (#98)。runner stdout の stream event をもとに分類する。
+ *
+ * - `starting`: runner 起動直後 / まだ assistant / result どちらも受け取っていない
+ * - `assistant`: assistant event を受信 (text content のみ)
+ * - `tool_use`: assistant event 内に `tool_use` content を検出
+ * - `result`: result event を受信 (finishing 中)
+ *
+ * `waiting` (= no recent activity) は dashboard 側で `updatedAt` と現時刻の差分から
+ * 派生表示する。tracker / snapshot にはこの 4 種類しか乗せない。
+ *
+ * raw payload / 長文出力 / prompt は本 type には載せない (#98 要件)。tool name のみを短く保持する。
+ */
+export type ActivityKind = 'starting' | 'assistant' | 'tool_use' | 'result';
+
+export type ActivityEvent = {
+  kind: ActivityKind;
+  /** `kind === 'tool_use'` のときの tool 名。それ以外は null */
+  toolName: string | null;
+};
+
+/**
+ * `StreamEvent` から activity 分類を抽出する。activity に影響しない event (system /
+ * user / parse_error / unknown) は null を返す。
+ *
+ * assistant event の `message.content[]` に `type: 'tool_use'` がある場合は `tool_use`
+ * とし、最後の `tool_use` item の name を採用する (= 1 メッセージ内で複数 tool が呼ばれた
+ * ときは最後に announce された tool を表示する)。tool_use と text が混在する場合も
+ * tool_use を優先する (= "考えて → ツール呼び出し" のフローを表示するため)。
+ */
+export function classifyActivityFromEvent(event: StreamEvent): ActivityEvent | null {
+  if (event.type === 'assistant') {
+    const toolName = extractLastToolName(event.raw);
+    if (toolName !== null) return { kind: 'tool_use', toolName };
+    return { kind: 'assistant', toolName: null };
+  }
+  if (event.type === 'result') return { kind: 'result', toolName: null };
+  return null;
+}
+
+function extractLastToolName(raw: unknown): string | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const message = (raw as Record<string, unknown>).message;
+  if (typeof message !== 'object' || message === null) return null;
+  const content = (message as Record<string, unknown>).content;
+  if (!Array.isArray(content)) return null;
+  let lastName: string | null = null;
+  for (const item of content) {
+    if (typeof item !== 'object' || item === null) continue;
+    const obj = item as Record<string, unknown>;
+    if (obj.type !== 'tool_use') continue;
+    if (typeof obj.name === 'string' && obj.name.length > 0) {
+      lastName = obj.name;
+    }
+  }
+  return lastName;
+}
+
 export class StreamEventParser {
   private buffer = '';
 

@@ -6,7 +6,10 @@ export {
 } from './errors.js';
 export { ALLOWED_ENV_KEYS, ALLOWED_ENV_PREFIXES, buildRunnerEnv } from './env.js';
 export {
+  classifyActivityFromEvent,
   StreamEventParser,
+  type ActivityEvent,
+  type ActivityKind,
   type AssistantEvent,
   type ParseErrorEvent,
   type ResultEvent,

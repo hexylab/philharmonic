@@ -3,12 +3,15 @@ import { describe, expect, it } from 'vitest';
 import {
   computeRunningElapsedMs,
   describeStallStatus,
+  formatActivity,
   formatDurationMsShort,
   formatRunningElapsed,
   formatRunningRow,
   formatSnapshotForOnce,
   formatTotalCost,
   formatUptimeMs,
+  shortenToolName,
+  ACTIVITY_WAITING_THRESHOLD_MS,
 } from '../../src/dashboard/format.js';
 import type { StateSnapshot } from '../../src/server/index.js';
 
@@ -225,6 +228,131 @@ describe('formatRunningElapsed', () => {
   });
 });
 
+describe('shortenToolName (#98)', () => {
+  it('単純な tool 名はそのまま返す', () => {
+    expect(shortenToolName('Bash')).toBe('Bash');
+    expect(shortenToolName('Read')).toBe('Read');
+  });
+
+  it('`__` を含む MCP tool 名は最後の `__` 以降を採用する', () => {
+    expect(shortenToolName('mcp__plugin_chrome-devtools-mcp_chrome-devtools__click')).toBe('click');
+    expect(shortenToolName('mcp__claude_ai_Gmail__create_label')).toBe('create_label');
+  });
+
+  it('長い tail は ACTIVITY_TOOL_NAME_MAX_LEN で切って末尾 … を付ける', () => {
+    const name = `mcp__svc__${'a'.repeat(40)}`;
+    const out = shortenToolName(name);
+    expect(out.endsWith('…')).toBe(true);
+    expect(out.length).toBeLessThanOrEqual(24);
+  });
+
+  it('空文字 / 空白のみは "" を返す', () => {
+    expect(shortenToolName('')).toBe('');
+    expect(shortenToolName('   ')).toBe('');
+  });
+});
+
+describe('formatActivity (#98)', () => {
+  const baseNow = new Date('2026-05-09T00:01:00.000Z');
+
+  it('activity 未提供 (undefined) は compat=missing で label=unknown', () => {
+    const got = formatActivity({ activity: undefined, now: baseNow });
+    expect(got.compat).toBe('missing');
+    expect(got.label).toBe('unknown');
+    expect(got.lastActiveLabel).toBeNull();
+    expect(got.isWaiting).toBe(false);
+  });
+
+  it('kind=starting は label=starting', () => {
+    const got = formatActivity({
+      activity: {
+        kind: 'starting',
+        tool_name: null,
+        updated_at: '2026-05-09T00:00:59.000Z',
+      },
+      now: baseNow,
+    });
+    expect(got.label).toBe('starting');
+    expect(got.lastActiveLabel).toBe('1s');
+    expect(got.isWaiting).toBe(false);
+  });
+
+  it('kind=assistant / tool_name=null は label=assistant responding', () => {
+    const got = formatActivity({
+      activity: {
+        kind: 'assistant',
+        tool_name: null,
+        updated_at: '2026-05-09T00:00:55.000Z',
+      },
+      now: baseNow,
+    });
+    expect(got.label).toBe('assistant responding');
+    expect(got.lastActiveLabel).toBe('5s');
+  });
+
+  it('kind=tool_use / tool_name は label=tool use: <name>', () => {
+    const got = formatActivity({
+      activity: {
+        kind: 'tool_use',
+        tool_name: 'Bash',
+        updated_at: '2026-05-09T00:00:58.000Z',
+      },
+      now: baseNow,
+    });
+    expect(got.label).toBe('tool use: Bash');
+  });
+
+  it('tool_name が MCP 形式なら短縮した名前を表示する', () => {
+    const got = formatActivity({
+      activity: {
+        kind: 'tool_use',
+        tool_name: 'mcp__plugin_chrome-devtools-mcp_chrome-devtools__click',
+        updated_at: '2026-05-09T00:00:58.000Z',
+      },
+      now: baseNow,
+    });
+    expect(got.label).toBe('tool use: click');
+  });
+
+  it('kind=result は label=finishing', () => {
+    const got = formatActivity({
+      activity: {
+        kind: 'result',
+        tool_name: null,
+        updated_at: '2026-05-09T00:00:58.000Z',
+      },
+      now: baseNow,
+    });
+    expect(got.label).toBe('finishing');
+  });
+
+  it('updated_at から ACTIVITY_WAITING_THRESHOLD_MS 以上経過なら isWaiting=true', () => {
+    const farPast = new Date(baseNow.getTime() - ACTIVITY_WAITING_THRESHOLD_MS - 5_000);
+    const got = formatActivity({
+      activity: {
+        kind: 'tool_use',
+        tool_name: 'Read',
+        updated_at: farPast.toISOString(),
+      },
+      now: baseNow,
+    });
+    expect(got.isWaiting).toBe(true);
+  });
+
+  it('parse 不能な updated_at は lastActiveLabel=null / isWaiting=false', () => {
+    const got = formatActivity({
+      activity: {
+        kind: 'tool_use',
+        tool_name: 'Read',
+        updated_at: 'not-a-date',
+      },
+      now: baseNow,
+    });
+    expect(got.lastActiveLabel).toBeNull();
+    expect(got.isWaiting).toBe(false);
+  });
+});
+
 describe('describeStallStatus', () => {
   it('stallTimeoutMs <= 0 / NaN は disabled', () => {
     expect(
@@ -397,8 +525,40 @@ describe('formatSnapshotForOnce', () => {
     expect(text).toContain('polling.last_tick_at=2026-05-09 09:00:30 JST');
     expect(text).toContain('agent.stall_timeout_ms=60000');
     expect(text).toContain(
-      '  #42 branch=feature/42-foo started_at=2026-05-09 09:00:10 JST elapsed=50s slot=0 retry=failure#1 last_activity_at=2026-05-09 09:00:30 JST stall=in 30s watchdog=- operator_action=-',
+      '  #42 branch=feature/42-foo started_at=2026-05-09 09:00:10 JST elapsed=50s slot=0 retry=failure#1 last_activity_at=2026-05-09 09:00:30 JST stall=in 30s activity=unknown watchdog=- operator_action=-',
     );
+  });
+
+  it('running entry の activity が tool_use なら `activity=tool_use:...` を表記する (#98)', () => {
+    const text = formatSnapshotForOnce({
+      host: '127.0.0.1',
+      port: 4000,
+      now: new Date('2026-05-09T00:00:30.000Z'),
+      snapshot: snapshot({
+        agent: { stall_timeout_ms: 60_000 },
+        running: [
+          {
+            run_id: 'run-1',
+            issue_number: 42,
+            branch: 'feature/42-foo',
+            started_at: '2026-05-09T00:00:10.000Z',
+            slot: 0,
+            last_activity_at: '2026-05-09T00:00:25.000Z',
+            retry_attempt: null,
+            workspace_path: '/tmp/ws/issue-42',
+            run_log_path: '/tmp/runs/run-1',
+            runner_pid: 12345,
+            activity: {
+              kind: 'tool_use',
+              tool_name: 'Bash',
+              updated_at: '2026-05-09T00:00:25.000Z',
+            },
+            watchdog: null,
+          },
+        ],
+      }),
+    });
+    expect(text).toContain('activity=tool_use:_Bash last_active=5s');
   });
 
   it('running の watchdog reasons があれば "watchdog=orphaned,stale" のように出す (#105)', () => {

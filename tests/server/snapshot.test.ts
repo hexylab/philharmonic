@@ -68,6 +68,11 @@ describe('buildStateSnapshot', () => {
           workspace_path: '/tmp/ws/issue-7',
           run_log_path: '/tmp/runs/run-2',
           runner_pid: null,
+          activity: {
+            kind: 'starting',
+            tool_name: null,
+            updated_at: '2026-05-09T00:00:20.000Z',
+          },
           watchdog: null,
         },
         {
@@ -81,6 +86,11 @@ describe('buildStateSnapshot', () => {
           workspace_path: '/tmp/ws/issue-42',
           run_log_path: '/tmp/runs/run-1',
           runner_pid: null,
+          activity: {
+            kind: 'starting',
+            tool_name: null,
+            updated_at: '2026-05-09T00:00:10.000Z',
+          },
           watchdog: null,
         },
       ],
@@ -352,6 +362,11 @@ describe('buildIssueSnapshot', () => {
         workspace_path: '/tmp/ws/issue-42',
         run_log_path: '/tmp/runs/r',
         runner_pid: null,
+        activity: {
+          kind: 'starting',
+          tool_name: null,
+          updated_at: '2026-05-09T00:00:00.000Z',
+        },
         watchdog: null,
       },
     });
@@ -361,5 +376,29 @@ describe('buildIssueSnapshot', () => {
     const tracker = createRunTracker();
     const snapshot = await buildIssueSnapshot({ issueNumber: 999, tracker });
     expect(snapshot).toEqual({ issue_number: 999, running: null });
+  });
+
+  it('recordActivityEvent で更新した activity が snake_case で乗る (#98)', async () => {
+    const tracker = createRunTracker();
+    tracker.runStarted({
+      runId: 'r',
+      issueNumber: 42,
+      branch: 'b',
+      startedAt: new Date('2026-05-09T00:00:00Z'),
+      workspacePath: '/tmp/ws/issue-42',
+      runLogPath: '/tmp/runs/r',
+    });
+    tracker.recordActivityEvent(
+      'r',
+      { kind: 'tool_use', toolName: 'Bash' },
+      new Date('2026-05-09T00:00:07Z'),
+    );
+
+    const snapshot = await buildIssueSnapshot({ issueNumber: 42, tracker });
+    expect(snapshot.running?.activity).toEqual({
+      kind: 'tool_use',
+      tool_name: 'Bash',
+      updated_at: '2026-05-09T00:00:07.000Z',
+    });
   });
 });

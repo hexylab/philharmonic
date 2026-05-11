@@ -618,6 +618,63 @@ describe('runClaude — stall detection (#25)', () => {
     expect(onActivity.mock.calls[0]![0]).toBeInstanceOf(Date);
   });
 
+  it('onActivityEvent は assistant / result event ごとに classify して呼ばれる (#98)', async () => {
+    const { spawn, calls } = createSpawnFn();
+    const onActivityEvent = vi.fn();
+    const promise = runClaude(
+      baseOptions({
+        spawn,
+        timeoutMs: 60_000,
+        stallTimeoutMs: 0,
+        onActivityEvent,
+      }),
+    );
+    const call = await waitForSpawn(calls);
+    const child = call.child;
+
+    // system event は activity を更新しない
+    child.stdout.write(makeSystemLine(FIXED_SESSION_ID));
+    // assistant event (text only)
+    child.stdout.write(
+      `${JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'hi' }] },
+        session_id: FIXED_SESSION_ID,
+      })}\n`,
+    );
+    // assistant event (tool_use)
+    child.stdout.write(
+      `${JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Bash' }] },
+        session_id: FIXED_SESSION_ID,
+      })}\n`,
+    );
+    // result event
+    child.stdout.write(
+      makeResultLine({
+        sessionId: FIXED_SESSION_ID,
+        subtype: 'success',
+        isError: false,
+        numTurns: 1,
+        totalCostUsd: 0.01,
+        resultText: 'ok',
+      }),
+    );
+    child.stdout.end();
+    child.emit('close', 0, null);
+    await promise;
+
+    expect(onActivityEvent).toHaveBeenCalledTimes(3);
+    const kinds = onActivityEvent.mock.calls.map((c) => c[0]);
+    expect(kinds).toEqual([
+      { kind: 'assistant', toolName: null },
+      { kind: 'tool_use', toolName: 'Bash' },
+      { kind: 'result', toolName: null },
+    ]);
+    expect(onActivityEvent.mock.calls[0]![1]).toBeInstanceOf(Date);
+  });
+
   it('onSpawn は spawn 直後に pid 付きで呼ばれる (#105)', async () => {
     const { spawn, calls } = createSpawnFn({ pid: 12345 });
     const onSpawn = vi.fn();

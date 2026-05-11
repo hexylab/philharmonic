@@ -49,6 +49,11 @@ describe('createRunTracker', () => {
         runLogPath: '/tmp/runs/run-1',
         runnerPid: null,
         watchdog: null,
+        activity: {
+          kind: 'starting',
+          toolName: null,
+          updatedAt: '2026-05-09T00:00:01.000Z',
+        },
       },
     ]);
     expect(tracker.getRunningByIssue(42)).not.toBeNull();
@@ -73,6 +78,63 @@ describe('createRunTracker', () => {
   it('recordActivity は in-flight でない runId を no-op にする (#87)', () => {
     const tracker = createRunTracker();
     expect(() => tracker.recordActivity('unknown', new Date())).not.toThrow();
+  });
+
+  it('runStarted 直後の activity は starting で startedAt と同じ updatedAt を持つ (#98)', () => {
+    const tracker = createRunTracker();
+    tracker.runStarted(
+      makeStartedInput({
+        runId: 'r',
+        issueNumber: 1,
+        branch: 'b',
+        startedAt: new Date('2026-05-09T00:00:00Z'),
+      }),
+    );
+    expect(tracker.getRunningByIssue(1)?.activity).toEqual({
+      kind: 'starting',
+      toolName: null,
+      updatedAt: '2026-05-09T00:00:00.000Z',
+    });
+  });
+
+  it('recordActivityEvent で activity が更新される (#98)', () => {
+    const tracker = createRunTracker();
+    tracker.runStarted(
+      makeStartedInput({
+        runId: 'r',
+        issueNumber: 1,
+        branch: 'b',
+        startedAt: new Date('2026-05-09T00:00:00Z'),
+      }),
+    );
+    tracker.recordActivityEvent(
+      'r',
+      { kind: 'tool_use', toolName: 'Bash' },
+      new Date('2026-05-09T00:00:05Z'),
+    );
+    expect(tracker.getRunningByIssue(1)?.activity).toEqual({
+      kind: 'tool_use',
+      toolName: 'Bash',
+      updatedAt: '2026-05-09T00:00:05.000Z',
+    });
+
+    tracker.recordActivityEvent(
+      'r',
+      { kind: 'assistant', toolName: null },
+      new Date('2026-05-09T00:00:10Z'),
+    );
+    expect(tracker.getRunningByIssue(1)?.activity).toEqual({
+      kind: 'assistant',
+      toolName: null,
+      updatedAt: '2026-05-09T00:00:10.000Z',
+    });
+  });
+
+  it('recordActivityEvent は in-flight でない runId を no-op にする (#98)', () => {
+    const tracker = createRunTracker();
+    expect(() =>
+      tracker.recordActivityEvent('unknown', { kind: 'assistant', toolName: null }, new Date()),
+    ).not.toThrow();
   });
 
   it('runStarted で retryAttempt を渡すと running entry に保持される (#87)', () => {

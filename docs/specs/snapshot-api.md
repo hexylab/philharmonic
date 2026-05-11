@@ -6,7 +6,7 @@
 
 ## 関連
 
-- 関連 Issue: #30 (Refs: #21, #28), #62 (`retrying` セクション撤廃), #31 (TUI dashboard が本 API を購読する), #84 (`retry_queue` セクション追加 / ADR-0008), #87 (`running[].last_activity_at` / `running[].retry_attempt` / `agent.stall_timeout_ms` / retry entry の `branch` `workspace_path` 追加), #105 (`running[].workspace_path` / `running[].run_log_path` / `running[].runner_pid` / `running[].watchdog` 追加)
+- 関連 Issue: #30 (Refs: #21, #28), #62 (`retrying` セクション撤廃), #31 (TUI dashboard が本 API を購読する), #84 (`retry_queue` セクション追加 / ADR-0008), #87 (`running[].last_activity_at` / `running[].retry_attempt` / `agent.stall_timeout_ms` / retry entry の `branch` `workspace_path` 追加), #105 (`running[].workspace_path` / `running[].run_log_path` / `running[].runner_pid` / `running[].watchdog` 追加), #98 (`running[].activity` 追加)
 - 設計判断: [ADR-0004 Snapshot HTTP API は Node 標準 http で loopback 固定で公開する](../adr/0004-snapshot-http-api.md), [ADR-0005 薄い orchestrator + agent 委譲型 hybrid](../adr/0005-thin-orchestrator-agent-delegation.md), [ADR-0006 TUI dashboard は Ink で実装する](../adr/0006-tui-dashboard.md), [ADR-0008 in-memory retry queue](../adr/0008-in-memory-retry-queue.md)
 - 関連 spec: [serve-daemon.md](./serve-daemon.md), [dashboard.md](./dashboard.md), [config-schema.md](./config-schema.md), [observability.md](./observability.md), [orchestration-mvp.md](./orchestration-mvp.md)
 
@@ -59,6 +59,16 @@ type RunningEntry = {
     orphanedSince: string | null; // ISO 8601
     staleSince: string | null; // ISO 8601
   } | null;
+  /**
+   * runner stdout の stream event から推定した直近の activity (#98)。`runStarted` で
+   * `starting` を初期値として入れるため常に非 null。raw payload / prompt / 長文出力は
+   * 載せない (機械分類できる種別 + tool 名のみ)。
+   */
+  activity: {
+    kind: 'starting' | 'assistant' | 'tool_use' | 'result';
+    toolName: string | null; // `tool_use` のときだけ非 null
+    updatedAt: string; // ISO 8601。最後に activity を更新した時刻
+  };
 };
 
 type Totals = {
@@ -72,6 +82,10 @@ type Totals = {
 各 dispatch (`dispatchSelected`) は開始時に `tracker.runStarted(...)` を、終了時 (success / failure / 想定外 throw) に `tracker.runFinished(...)` を呼ぶ。`runFinished` は **runId が running set に居なければ no-op** (べき等)。
 
 runner subprocess の stdout に新しい chunk が来るたびに `tracker.recordActivity(runId, at)` を呼んで `lastActivityAt` を更新する (#87)。runner からは `onActivity` callback で配線する。`runId` が in-flight でない場合は no-op (べき等)。
+
+runner stdout の stream event が parse / classify されるたびに `tracker.recordActivityEvent(runId, event, at)` を呼んで `activity` を更新する (#98)。runner からは `onActivityEvent` callback で配線する。`assistant` (text のみ / tool_use 含む) と `result` event だけが activity を更新し、system / user / parse_error / unknown event は無視される。`runId` が in-flight でない場合は no-op (べき等)。
+
+`lastActivityAt` (chunk-level, stall detection 用) と `activity.updatedAt` (event-level, dashboard 表示用) は意味が違うため別管理する: stall 判定対象 event 以外も含めた chunk 単位の生存性は前者、人間が「何をやっているか」を読む基準は後者。
 
 runner subprocess を spawn して pid が確定した直後に `tracker.recordRunnerProcess(runId, pid)` を呼んで `runnerPid` を更新する (#105)。runner からは `onSpawn` callback で配線する。multi-turn (`agent.maxTurns > 1`) では turn ごとに新 pid に切り替わるため、turn 数だけ呼ばれる。spawn 失敗 / pid 取得失敗 (`child.pid` が `undefined`) は呼ばれない。`runId` が in-flight でない場合は no-op (べき等)。
 
@@ -157,6 +171,11 @@ type SchedulerSnapshot = {
       "workspace_path": "/home/user/.philharmonic/worktrees/issue-42",
       "run_log_path": "/home/user/repo/.philharmonic/runs/0190ce80-...",
       "runner_pid": 12345,
+      "activity": {
+        "kind": "tool_use",
+        "tool_name": "Bash",
+        "updated_at": "2026-05-09T00:00:25.000Z"
+      },
       "watchdog": null
     }
   ],
@@ -223,6 +242,7 @@ type SchedulerSnapshot = {
 | `running[].workspace_path`   | string              | watchdog (#105) で再構築した worktree path (`<workspace_root>/issue-<n>`)                                                                         |
 | `running[].run_log_path`     | string              | watchdog (#105) で metadata.json を読みに行く runlog dir (`<runner_logs_root>/<run_id>`)                                                          |
 | `running[].runner_pid`       | integer \| null     | runner subprocess pid (process group leader)。spawn 前 / 取得失敗で null (#105)                                                                   |
+| `running[].activity`         | object \| undefined | runner stdout から推定した直近 activity (#98)。詳細は次節。古い (本フィールドを実装していない) serve では undefined                               |
 | `running[].watchdog`         | object \| null      | active run watchdog (#105) の最新判定。1 度も判定が走っていなければ null。詳細は次節                                                              |
 | `totals.runs_completed`      | integer             | daemon プロセス起動以降に完了 (success+failed) した run 数                                                                                        |
 | `totals.runs_succeeded`      | integer             | 成功した run 数                                                                                                                                   |
@@ -232,6 +252,26 @@ type SchedulerSnapshot = {
 | `retry_queue`                | object \| null      | In-memory retry queue (ADR-0008)。`agent.max_retry_attempts == 0` または queue 未注入なら null                                                    |
 
 `retrying` 配列 (旧 #22) は ADR-0005 で撤廃。`retry_queue` (ADR-0008) は別機構として再導入された (永続化しない / Status 駆動でない)。
+
+#### `running[].activity` フィールド (#98)
+
+Running agent が今どの段階の作業をしているかを人間が一目で判別するための marker。runner stdout の stream event を機械的に分類した値のみを保持し、prompt / raw payload / 長文出力は載せない。
+
+| フィールド            | 型                                                    | 説明                                                                                           |
+| --------------------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `activity`            | object \| undefined                                   | 古い (本フィールドを実装していない) serve では undefined。現行 serve は常に非 undefined を返す |
+| `activity.kind`       | `"starting" \| "assistant" \| "tool_use" \| "result"` | runner event 由来の状態種別                                                                    |
+| `activity.tool_name`  | string \| null                                        | `kind === "tool_use"` のときの tool 名。それ以外は null                                        |
+| `activity.updated_at` | ISO 8601                                              | activity を最後に更新した時刻 (`runStarted` 時は `started_at` と同値)                          |
+
+判定ロジック (`runner/stream.ts` の `classifyActivityFromEvent`):
+
+- `starting`: `runStarted` 直後の初期値。stream event を 1 件も受信していない状態
+- `assistant`: assistant event を受信。`message.content[]` に `text` しか含まれていない
+- `tool_use`: assistant event を受信し、`message.content[]` に `type: "tool_use"` がある。複数の tool_use が並ぶときは **配列内最後の name** を採用する (= 同一メッセージ内で複数 tool を呼ぶケースで最新の意図を表示する)
+- `result`: result event を受信。終了処理中
+
+`waiting` 状態は API には含めない。dashboard / 外部 client 側で `now - activity.updated_at` から派生表示する (#98)。判定対象外の event (`system` / `user` / `parse_error` / `unknown`) は `activity` を更新しない。
 
 #### `running[].watchdog` フィールド (#105)
 

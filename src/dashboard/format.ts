@@ -12,6 +12,18 @@ import { formatTimestampJst } from './time.js';
 /** TUI で `Ready (n) #a, #b, ...` 行に並べる issue 番号の上限 */
 export const READY_ISSUES_DISPLAY_LIMIT = 10;
 
+/**
+ * Running agent の activity (#98) が「最後の動きから何秒以上経った」ら waiting 扱いにするかの閾値。
+ *
+ * Issue #98 は「一定時間」と緩く規定しているので、まずは固定 30s で始める。短すぎると tool 呼び出し
+ * 直後の合間でも waiting と表示されるし、長すぎると stall に近づいて気付けないので、agent.stall_timeout
+ * (default 5 分) の 1/10 程度を目安にしている。設定値にするのは将来の Issue 範囲。
+ */
+export const ACTIVITY_WAITING_THRESHOLD_MS = 30_000;
+
+/** `formatActivityTool` で活動表示行を圧迫しすぎないように tool 名を切る上限 (字幅) */
+export const ACTIVITY_TOOL_NAME_MAX_LEN = 24;
+
 export function formatUptimeMs(uptimeMs: number): string {
   if (!Number.isFinite(uptimeMs) || uptimeMs <= 0) return '0s';
   const totalSec = Math.floor(uptimeMs / 1000);
@@ -122,6 +134,73 @@ export function formatDurationMsShort(durationMs: number): string {
   return `${hour}h${pad2(min)}m`;
 }
 
+/**
+ * Snapshot の `running[].activity` を TUI / `--once` 表示用に整形する (#98)。
+ *
+ * 戻り値:
+ * - `label`: そのまま色なしで貼り付ける活動文言 (例: `tool use: Bash`, `assistant responding`, `starting`, `finishing`)
+ * - `lastActiveLabel`: 最後に更新されてから経過した時間 (`8s` / `2m05s`)。parse 不能 / 未提供は null
+ * - `isWaiting`: `now - updated_at` が `ACTIVITY_WAITING_THRESHOLD_MS` 以上なら true
+ * - `compat`: 古い serve が `activity` field を返していなかったら `'missing'` (= TUI で `activity unknown` 表示)
+ */
+export type ActivityDisplay = {
+  label: string;
+  lastActiveLabel: string | null;
+  isWaiting: boolean;
+  compat: 'present' | 'missing';
+};
+
+export function formatActivity(input: {
+  activity: StateSnapshot['running'][number]['activity'] | undefined;
+  now: Date;
+}): ActivityDisplay {
+  const { activity, now } = input;
+  if (activity === undefined) {
+    return { label: 'unknown', lastActiveLabel: null, isWaiting: false, compat: 'missing' };
+  }
+  const updatedMs = Date.parse(activity.updated_at);
+  const sinceMs = Number.isFinite(updatedMs) ? Math.max(0, now.getTime() - updatedMs) : null;
+  const lastActiveLabel = sinceMs === null ? null : formatDurationMsShort(sinceMs);
+  const isWaiting = sinceMs !== null && sinceMs >= ACTIVITY_WAITING_THRESHOLD_MS;
+  const label = describeActivityLabel(activity);
+  return { label, lastActiveLabel, isWaiting, compat: 'present' };
+}
+
+function describeActivityLabel(
+  activity: NonNullable<StateSnapshot['running'][number]['activity']>,
+): string {
+  switch (activity.kind) {
+    case 'starting':
+      return 'starting';
+    case 'assistant':
+      return 'assistant responding';
+    case 'tool_use': {
+      const short = activity.tool_name === null ? null : shortenToolName(activity.tool_name);
+      return short === null || short.length === 0 ? 'tool use' : `tool use: ${short}`;
+    }
+    case 'result':
+      return 'finishing';
+  }
+}
+
+/**
+ * MCP tool 等の長い tool 名を TUI 1 行に収まる短い名前に整形する (#98)。
+ *
+ * - `plugin:foo:bar__my_tool` のような `__` を含む名前は最後の `__` 以降のみ採用
+ *   (= MCP server prefix を捨てる)
+ * - `mcp__plugin_chrome-devtools-mcp_chrome-devtools__click` → `click`
+ * - 残りも `ACTIVITY_TOOL_NAME_MAX_LEN` を超えれば末尾 `…` で省略
+ */
+export function shortenToolName(name: string): string {
+  const trimmed = name.trim();
+  if (trimmed.length === 0) return '';
+  const lastSep = trimmed.lastIndexOf('__');
+  const tail = lastSep >= 0 ? trimmed.slice(lastSep + 2) : trimmed;
+  if (tail.length === 0) return trimmed.slice(0, ACTIVITY_TOOL_NAME_MAX_LEN);
+  if (tail.length <= ACTIVITY_TOOL_NAME_MAX_LEN) return tail;
+  return `${tail.slice(0, ACTIVITY_TOOL_NAME_MAX_LEN - 1)}…`;
+}
+
 export type StallStatus =
   | { kind: 'disabled' }
   | { kind: 'live'; remainingMs: number; sinceMs: number }
@@ -189,8 +268,9 @@ export function formatSnapshotForOnce(input: {
         now,
       });
       const elapsed = formatRunningElapsed(computeRunningElapsedMs(entry.started_at, now));
+      const activity = formatActivity({ activity: entry.activity, now });
       lines.push(
-        `  ${row.issue} branch=${row.branch} started_at=${row.startedAt} elapsed=${elapsed} slot=${row.slot} retry=${row.retryAttempt} last_activity_at=${row.lastActivityAt} stall=${formatStallForOnce(stall)} watchdog=${row.watchdog} operator_action=${row.operatorAction}`,
+        `  ${row.issue} branch=${row.branch} started_at=${row.startedAt} elapsed=${elapsed} slot=${row.slot} retry=${row.retryAttempt} last_activity_at=${row.lastActivityAt} stall=${formatStallForOnce(stall)} activity=${formatActivityForOnce(activity)} watchdog=${row.watchdog} operator_action=${row.operatorAction}`,
       );
     }
   }
@@ -214,6 +294,16 @@ function formatStallForOnce(stall: StallStatus): string {
   if (stall.kind === 'disabled') return 'disabled';
   if (stall.kind === 'stalled') return `STALLED+${formatDurationMsShort(stall.overdueMs)}`;
   return `in ${formatDurationMsShort(stall.remainingMs)}`;
+}
+
+function formatActivityForOnce(activity: ActivityDisplay): string {
+  if (activity.compat === 'missing') return 'unknown';
+  // `tool use: Bash` のような半角空白を含む label を `--once` テキストでも 1 token に保つため
+  // 空白を `_` に置換 (機械パース用)。TUI 上の表示には影響しない。
+  const safeLabel = activity.label.replace(/\s+/g, '_');
+  const sinceLabel = activity.lastActiveLabel === null ? '-' : activity.lastActiveLabel;
+  const waiting = activity.isWaiting ? ' waiting' : '';
+  return `${safeLabel} last_active=${sinceLabel}${waiting}`;
 }
 
 function appendRetryQueueLines(

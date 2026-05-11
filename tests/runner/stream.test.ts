@@ -3,7 +3,12 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import { StreamEventParser, type ResultEvent } from '../../src/runner/index.js';
+import {
+  classifyActivityFromEvent,
+  StreamEventParser,
+  type ResultEvent,
+  type StreamEvent,
+} from '../../src/runner/index.js';
 
 function fixture(name: string): string {
   return readFileSync(
@@ -93,5 +98,87 @@ describe('StreamEventParser', () => {
     const events2 = parser.flush();
     expect(events2).toHaveLength(1);
     expect(events2[0]?.type).toBe('system');
+  });
+});
+
+describe('classifyActivityFromEvent (#98)', () => {
+  function assistantEvent(content: unknown[]): StreamEvent {
+    return {
+      type: 'assistant',
+      raw: { type: 'assistant', message: { content } },
+    };
+  }
+
+  it('system / user / parse_error / unknown は null', () => {
+    expect(
+      classifyActivityFromEvent({
+        type: 'system',
+        subtype: 'init',
+        sessionId: 'abc',
+        raw: null,
+      }),
+    ).toBeNull();
+    expect(classifyActivityFromEvent({ type: 'user', raw: null })).toBeNull();
+    expect(
+      classifyActivityFromEvent({
+        type: 'parse_error',
+        line: 'x',
+        reason: 'oops',
+      }),
+    ).toBeNull();
+    expect(classifyActivityFromEvent({ type: 'unknown', raw: 1 })).toBeNull();
+  });
+
+  it('text のみの assistant event は kind=assistant / toolName=null', () => {
+    const event = assistantEvent([{ type: 'text', text: 'hello' }]);
+    expect(classifyActivityFromEvent(event)).toEqual({ kind: 'assistant', toolName: null });
+  });
+
+  it('tool_use を含む assistant event は kind=tool_use / toolName を取り出す', () => {
+    const event = assistantEvent([
+      { type: 'text', text: 'thinking...' },
+      { type: 'tool_use', name: 'Bash', input: { command: 'ls' } },
+    ]);
+    expect(classifyActivityFromEvent(event)).toEqual({ kind: 'tool_use', toolName: 'Bash' });
+  });
+
+  it('tool_use が複数あるときは最後の name を採用する', () => {
+    const event = assistantEvent([
+      { type: 'tool_use', name: 'Read' },
+      { type: 'tool_use', name: 'Bash' },
+      { type: 'text', text: 'and...' },
+      { type: 'tool_use', name: 'Edit' },
+    ]);
+    expect(classifyActivityFromEvent(event)).toEqual({ kind: 'tool_use', toolName: 'Edit' });
+  });
+
+  it('raw.message.content が壊れていても落ちず kind=assistant に fall back', () => {
+    expect(classifyActivityFromEvent({ type: 'assistant', raw: null })).toEqual({
+      kind: 'assistant',
+      toolName: null,
+    });
+    expect(classifyActivityFromEvent({ type: 'assistant', raw: {} })).toEqual({
+      kind: 'assistant',
+      toolName: null,
+    });
+    expect(
+      classifyActivityFromEvent({
+        type: 'assistant',
+        raw: { message: { content: 'not-an-array' } },
+      }),
+    ).toEqual({
+      kind: 'assistant',
+      toolName: null,
+    });
+  });
+
+  it('result event は kind=result', () => {
+    expect(
+      classifyActivityFromEvent({
+        type: 'result',
+        subtype: 'success',
+        raw: null,
+      }),
+    ).toEqual({ kind: 'result', toolName: null });
   });
 });
