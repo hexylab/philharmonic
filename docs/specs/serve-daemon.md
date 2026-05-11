@@ -376,6 +376,55 @@ agent:
 - `philharmonic retry <issue-number>` のような手動 retry CLI (= 別 Issue)
 - dashboard の Running 詳細活動表示 (= #98)
 
+## orphan recovery (#109)
+
+`active run watchdog` (#105) が立てた marker のうち、**安全条件を満たした entry だけ** を自動的に retry queue / Failed safety-net に接続するフェーズ。`runWatchdog` の直後、`runOnce` / `runConcurrent` の前に `recoverOrphaned` (`src/orchestrator/orphan-recovery.ts`) を 1 回呼ぶ。watchdog 自身は観測専用に維持し、副作用 (`tracker.runFinished` / `retryQueue.schedule` / `handleFailureExhaustion`) は本フェーズに集約する。
+
+### 自動 recovery の合格条件 (AND)
+
+以下を **全て** 満たしたときに限り、`runFinished` → `retryQueue.schedule(kind=failure)` をこの順で発火する。
+
+1. `entry.watchdog.reasons` が `'orphaned'` と `'stale'` の **両方** を含む
+2. retry queue が DI されており、`agent.max_retry_attempts >= 1`
+3. `entry.workspacePath` が `workspaceRoot` 配下 (path traversal を弾く)
+4. `feature/<issueNumber>-` の open PR が 0 件 (agent が PR 作って Status flip 前死亡の稀ケース保護)
+5. Project Items から `repository` / `itemId` が取れる (= 上限到達時の Failed safety-net が動かせる)
+
+合格時の `attempt` 番号は永続化 retry entry が同 Issue に残っていれば `existing.attempt + 1`、それ以外は `1`。`failureReason` は **`stalled`** で固定 (orphaned + stale + activity 停止という事実が最も意味的に一致するため)。
+
+`nextAttempt > maxRetryAttempts` のときは `handleFailureExhaustion` (ADR-0010) を呼んで Project Status を `Failed` に倒し、Issue にコメントする。`via=watchdog` を log field に載せる。
+
+### operator action required
+
+合格条件のいずれかに失敗した entry は **自動 recovery を行わず**、`tracker.setWatchdog` で `operatorActionRequired: true` を立てて理由 (`operatorActionReasons`) を記録する。dashboard / Snapshot API には `running[].watchdog.operator_action_required` / `operator_action_reasons` として露出する。
+
+| reason                  | 発火条件                                                                         |
+| ----------------------- | -------------------------------------------------------------------------------- |
+| `orphaned_only`         | `reasons` が `['orphaned']` のみ (pid 死亡だけ。activity 停止が確認できていない) |
+| `stale_only`            | `reasons` が `['stale']` のみ (pid 生存。Claude の長期 wait の可能性)            |
+| `open_pr`               | `feature/<num>-` の open PR が 1 件以上                                          |
+| `retry_disabled`        | retry queue 未注入 / `max_retry_attempts <= 0`                                   |
+| `unsafe_workspace_path` | `entry.workspacePath` が `workspaceRoot` 配下でない                              |
+| `recover_error`         | `listOpenPullRequests` / `fetchProjectCandidates` が throw / candidate 未発見    |
+
+`orphaned_only` / `stale_only` は `runWatchdog` 内で marker を更新した瞬間に立てる (orphan recovery を経由しない)。それ以外は `recoverOrphaned` 内で entry の既存 `operatorActionReasons` に追記する。
+
+### double-dispatch / unsafe action 防止
+
+- `tracker.runFinished` を `retryQueue.schedule` より **先に** 呼ぶ。`drainRetryQueue` は同 tick 内で再 schedule した entry (dueAt = now + 10s) を pop しないが、順序保証として明示する
+- worktree は **削除しない** (retry queue drain phase で `cleanupWorkspace` する既存挙動に任せる)。orphan recovery で worktree を直接触ると open PR 誤検知時に作業を失う危険があるため
+- `unsafe_workspace_path` のときは `cleanupWorkspace` を呼ばないので、`workspaceRoot` 外への副作用は構造的に発生しない
+
+### 構造化ログ
+
+| level | msg                                        | fields                                                                                              |
+| ----- | ------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| warn  | `orphan recovered`                         | `runId`, `issueNumber`, `attempt`, `dueAt`, `delayMs`, `branch`, `workspacePath`, `via=watchdog`    |
+| warn  | `orphan recovery operator action required` | `runId`, `issueNumber`, `reasons`, `branch`, `workspacePath` (marker が初出 / 変化した tick のみ)   |
+| warn  | `orphan recovery error`                    | `runId`, `issueNumber`, `stage`, `error` (`listOpenPullRequests` / `fetchProjectCandidates` 失敗時) |
+| warn  | `orphan recovery tick failed`              | `error` (`recoverOrphaned` 自体が throw した場合、`cli/serve.ts` 側で catch)                        |
+| warn  | `retry exhausted`                          | `kind=failure`, `via=watchdog`, ...既存 fields (上限到達経路)                                       |
+
 ## GitHub token 解決 (#68)
 
 `serve` 起動前に手動で `export GITHUB_TOKEN=...` を要求しないため、token の取得元を config で選べるようにする。token 文字列そのものは絶対に YAML に書かない (誤 commit リスク)。

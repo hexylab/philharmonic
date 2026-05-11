@@ -75,7 +75,31 @@ describe('formatRunningRow', () => {
       lastActivityAt: '2026-05-09T00:00:00.000Z',
       retryAttempt: '-',
       watchdog: '-',
+      operatorAction: '-',
     });
+  });
+
+  it('operator_action_required が true なら operatorAction = reasons (#109)', () => {
+    const row = formatRunningRow({
+      run_id: 'run-op',
+      issue_number: 11,
+      branch: 'feature/11-y',
+      started_at: '2026-05-09T00:00:00.000Z',
+      slot: null,
+      last_activity_at: '2026-05-09T00:00:00.000Z',
+      retry_attempt: null,
+      workspace_path: '/tmp/ws/issue-11',
+      run_log_path: '/tmp/runs/run-op',
+      runner_pid: 12345,
+      watchdog: {
+        reasons: ['orphaned', 'stale'],
+        orphaned_since: '2026-05-09T00:01:00.000Z',
+        stale_since: '2026-05-09T00:01:00.000Z',
+        operator_action_required: true,
+        operator_action_reasons: ['open_pr'],
+      },
+    });
+    expect(row.operatorAction).toBe('open_pr');
   });
 
   it('slot 数値はそのまま、retry attempt は kind#attempt', () => {
@@ -114,6 +138,8 @@ describe('formatRunningRow', () => {
         reasons: ['orphaned', 'stale'],
         orphaned_since: '2026-05-09T00:01:00.000Z',
         stale_since: '2026-05-09T00:01:00.000Z',
+        operator_action_required: false,
+        operator_action_reasons: [],
       },
     });
     expect(row.watchdog).toBe('orphaned,stale');
@@ -346,6 +372,8 @@ describe('formatSnapshotForOnce', () => {
               reasons: ['orphaned', 'stale'],
               orphaned_since: '2026-05-09T00:00:50.000Z',
               stale_since: '2026-05-09T00:00:50.000Z',
+              operator_action_required: false,
+              operator_action_reasons: [],
             },
           },
         ],

@@ -193,6 +193,8 @@ describe('runWatchdog', () => {
         reasons: ['orphaned'],
         orphanedSince: '2026-05-09T00:00:30.000Z',
         staleSince: null,
+        operatorActionRequired: true,
+        operatorActionReasons: ['orphaned_only'],
       });
     });
 

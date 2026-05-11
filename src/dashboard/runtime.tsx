@@ -233,6 +233,12 @@ function RunningSection({
                     <Text color="red">watchdog={entry.watchdog.reasons.join(',')}</Text>
                   </>
                 ) : null}
+                {entry.watchdog !== null && entry.watchdog.operator_action_required ? (
+                  <>
+                    {'  '}
+                    <Text color="red">operator_action={row.operatorAction}</Text>
+                  </>
+                ) : null}
               </Text>
             </Box>
           );

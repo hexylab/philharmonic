@@ -127,13 +127,23 @@ describe('createRunTracker', () => {
       reasons: ['orphaned'],
       orphanedSince: '2026-05-09T00:01:00.000Z',
       staleSince: null,
+      operatorActionRequired: true,
+      operatorActionReasons: ['orphaned_only'],
     });
     expect(tracker.getRunningByIssue(1)?.watchdog).toEqual({
       reasons: ['orphaned'],
       orphanedSince: '2026-05-09T00:01:00.000Z',
       staleSince: null,
+      operatorActionRequired: true,
+      operatorActionReasons: ['orphaned_only'],
     });
-    tracker.setWatchdog('r', { reasons: [], orphanedSince: null, staleSince: null });
+    tracker.setWatchdog('r', {
+      reasons: [],
+      orphanedSince: null,
+      staleSince: null,
+      operatorActionRequired: false,
+      operatorActionReasons: [],
+    });
     expect(tracker.getRunningByIssue(1)?.watchdog).toBeNull();
     tracker.setWatchdog('r', null);
     expect(tracker.getRunningByIssue(1)?.watchdog).toBeNull();
@@ -146,6 +156,8 @@ describe('createRunTracker', () => {
         reasons: ['stale'],
         orphanedSince: null,
         staleSince: '2026-05-09T00:01:00.000Z',
+        operatorActionRequired: false,
+        operatorActionReasons: [],
       }),
     ).not.toThrow();
   });

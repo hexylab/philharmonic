@@ -42,6 +42,8 @@ export function formatRunningRow(entry: StateSnapshot['running'][number]): {
   retryAttempt: string;
   /** active run watchdog (#105) marker。"-" は marker 無し */
   watchdog: string;
+  /** orphan recovery (#109) で operator の手動 intervention 待ちの理由 (空配列なら "-") */
+  operatorAction: string;
 } {
   return {
     issue: `#${entry.issue_number}`,
@@ -54,6 +56,7 @@ export function formatRunningRow(entry: StateSnapshot['running'][number]): {
         ? '-'
         : `${entry.retry_attempt.kind}#${entry.retry_attempt.attempt}`,
     watchdog: formatWatchdogShort(entry.watchdog),
+    operatorAction: formatOperatorActionShort(entry.watchdog),
   };
 }
 
@@ -63,6 +66,16 @@ function formatWatchdogShort(
   // 古い serve は watchdog field を持たない (undefined) ため null と同じく "-" を返す
   if (watchdog === null || watchdog === undefined || watchdog.reasons.length === 0) return '-';
   return watchdog.reasons.join(',');
+}
+
+function formatOperatorActionShort(
+  watchdog: StateSnapshot['running'][number]['watchdog'] | undefined,
+): string {
+  // 古い serve は operator_action_required field を持たないため "-" 扱い
+  if (watchdog === null || watchdog === undefined) return '-';
+  if (!watchdog.operator_action_required) return '-';
+  if (watchdog.operator_action_reasons.length === 0) return 'required';
+  return watchdog.operator_action_reasons.join(',');
 }
 
 /**
@@ -151,7 +164,7 @@ export function formatSnapshotForOnce(input: {
         now,
       });
       lines.push(
-        `  ${row.issue} branch=${row.branch} started_at=${row.startedAt} slot=${row.slot} retry=${row.retryAttempt} last_activity_at=${row.lastActivityAt} stall=${formatStallForOnce(stall)} watchdog=${row.watchdog}`,
+        `  ${row.issue} branch=${row.branch} started_at=${row.startedAt} slot=${row.slot} retry=${row.retryAttempt} last_activity_at=${row.lastActivityAt} stall=${formatStallForOnce(stall)} watchdog=${row.watchdog} operator_action=${row.operatorAction}`,
       );
     }
   }

@@ -41,6 +41,12 @@ export {
 } from './run.js';
 export { recoverInProgress, type RecoveryDeps, type RecoverySummary } from './recovery.js';
 export {
+  recoverOrphaned,
+  type OrphanRecoveryDeps,
+  type OrphanRecoveryOutcome,
+  type OrphanRecoveryResult,
+} from './orphan-recovery.js';
+export {
   cleanupStaleWorktreesAtStartup,
   type CleanupStaleWorktreesAtStartupDeps,
   type CleanupStaleWorktreesSummary,

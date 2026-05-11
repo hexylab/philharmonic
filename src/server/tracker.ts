@@ -22,7 +22,10 @@ export type RunningRetryAttempt = {
  * - `stale`: runner stdout 無音時間が `agent.stall_timeout_ms * 2` を超えている。
  *   runner 自身の stall 検出 (= stallTimeoutMs 経過で SIGTERM) を超えても tracker から消えていない異常を捕まえる
  *
- * watchdog はあくまで marker 表示用で、kill / cleanup / retry dispatch は行わない (Issue #105 「今回やらない」)。
+ * watchdog 本体 (`runWatchdog`) は marker 表示と terminal repair のみで、kill / cleanup / retry
+ * dispatch は行わない。orphaned + stale が同時に立つ場合に限り、後段の `recoverOrphaned` (#109)
+ * が安全条件を確認したうえで retry queue / Failed safety-net へ接続する。自動 recovery しない
+ * ケースでは `operatorActionRequired: true` を立てて理由 (`operatorActionReasons`) を残す。
  */
 export type RunningWatchdog = {
   reasons: ReadonlyArray<'orphaned' | 'stale'>;
@@ -30,7 +33,31 @@ export type RunningWatchdog = {
   orphanedSince: string | null;
   /** 初めて stale 判定に切り替わった時刻 (ISO 8601)。reasons に `stale` が含まれない間は null */
   staleSince: string | null;
+  /**
+   * 安全条件を満たさず自動 recovery を諦め、運用者の手動 intervention 待ちであることを示す flag (#109)。
+   * `false` のときは「まだ評価中」または「次 tick で recover される予定」のいずれか。
+   */
+  operatorActionRequired: boolean;
+  /**
+   * `operatorActionRequired` が立った具体的な理由 (複合可)。dashboard / Snapshot API に表示する。
+   *
+   * - `orphaned_only`: pid だけ消失。activity 停止が確認できていないため tool/advisor wait の誤判定リスク
+   * - `stale_only`: stallTimeoutMs * 2 超えで活動停止だが pid は生存。Claude の長期 wait の可能性
+   * - `open_pr`: agent が PR を立てた後で死亡した稀ケース。worktree wipe を避ける
+   * - `retry_disabled`: retry queue 未注入 / `agent.max_retry_attempts == 0` のため出口無し
+   * - `unsafe_workspace_path`: workspace path が workspaceRoot 配下でない
+   * - `recover_error`: orphan-recovery 中に想定外の throw が出た
+   */
+  operatorActionReasons: ReadonlyArray<OperatorActionReason>;
 };
+
+export type OperatorActionReason =
+  | 'orphaned_only'
+  | 'stale_only'
+  | 'open_pr'
+  | 'retry_disabled'
+  | 'unsafe_workspace_path'
+  | 'recover_error';
 
 export type RunningEntry = {
   runId: string;
