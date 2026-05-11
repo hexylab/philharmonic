@@ -34,6 +34,7 @@ import {
   RETRY_QUEUE_STATE_VERSION,
   runConcurrent,
   runOnce,
+  runWatchdog,
   serveLoop,
   type ConcurrentDispatchOutcome,
   type CreateRetryQueueOptions,
@@ -124,6 +125,7 @@ export type ServeCommandDeps = {
   runOnce?: typeof runOnce;
   runConcurrent?: typeof runConcurrent;
   serveLoop?: typeof serveLoop;
+  runWatchdog?: typeof runWatchdog;
   recoverInProgress?: typeof recoverInProgress;
   cleanupStaleWorktreesAtStartup?: typeof cleanupStaleWorktreesAtStartup;
   gitRunner?: GitRunner;
@@ -164,6 +166,7 @@ const DEFAULT_DEPS: Required<ServeCommandDeps> = {
   runOnce,
   runConcurrent,
   serveLoop,
+  runWatchdog,
   recoverInProgress,
   cleanupStaleWorktreesAtStartup,
   gitRunner: defaultGitRunner,
@@ -444,6 +447,19 @@ async function runServeCommand(
   const maxConcurrent = config.agent.maxConcurrentAgents;
 
   const wrappedRunOnce = async (): Promise<RunOnceResult | undefined> => {
+    // active run watchdog (#105): poll tick に piggyback で 1 回走らせる。新 timer は持たない。
+    // terminal metadata がある entry は repair (= runFinished で tracker から外す)、pid 消失 /
+    // activity 停止は marker を tracker に書き込むだけで kill / cleanup / retry はしない。
+    try {
+      await deps.runWatchdog({
+        tracker: runTracker,
+        stallTimeoutMs: config.agent.stallTimeoutMs,
+        logger,
+      });
+    } catch (error) {
+      logger.warn('watchdog tick failed', { error: describeError(error) });
+    }
+
     if (maxConcurrent === 1) {
       return await deps.runOnce({
         config,

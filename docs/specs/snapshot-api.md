@@ -6,7 +6,7 @@
 
 ## 関連
 
-- 関連 Issue: #30 (Refs: #21, #28), #62 (`retrying` セクション撤廃), #31 (TUI dashboard が本 API を購読する), #84 (`retry_queue` セクション追加 / ADR-0008), #87 (`running[].last_activity_at` / `running[].retry_attempt` / `agent.stall_timeout_ms` / retry entry の `branch` `workspace_path` 追加)
+- 関連 Issue: #30 (Refs: #21, #28), #62 (`retrying` セクション撤廃), #31 (TUI dashboard が本 API を購読する), #84 (`retry_queue` セクション追加 / ADR-0008), #87 (`running[].last_activity_at` / `running[].retry_attempt` / `agent.stall_timeout_ms` / retry entry の `branch` `workspace_path` 追加), #105 (`running[].workspace_path` / `running[].run_log_path` / `running[].runner_pid` / `running[].watchdog` 追加)
 - 設計判断: [ADR-0004 Snapshot HTTP API は Node 標準 http で loopback 固定で公開する](../adr/0004-snapshot-http-api.md), [ADR-0005 薄い orchestrator + agent 委譲型 hybrid](../adr/0005-thin-orchestrator-agent-delegation.md), [ADR-0006 TUI dashboard は Ink で実装する](../adr/0006-tui-dashboard.md), [ADR-0008 in-memory retry queue](../adr/0008-in-memory-retry-queue.md)
 - 関連 spec: [serve-daemon.md](./serve-daemon.md), [dashboard.md](./dashboard.md), [config-schema.md](./config-schema.md), [observability.md](./observability.md), [orchestration-mvp.md](./orchestration-mvp.md)
 
@@ -47,6 +47,18 @@ type RunningEntry = {
   lastActivityAt: string;
   /** 直前 attempt が retry 起源 (failure / continuation) のとき非 null。fresh dispatch は null (#87) */
   retryAttempt: { kind: 'failure' | 'continuation'; attempt: number } | null;
+  /** active run watchdog (#105) の判定材料: runtime 中の worktree path */
+  workspacePath: string;
+  /** active run watchdog (#105) の判定材料: runlog dir (`<runnerLogsRoot>/<runId>`) */
+  runLogPath: string;
+  /** runner subprocess pid (process group leader, #105)。spawn 前 / 取得失敗で null */
+  runnerPid: number | null;
+  /** active run watchdog (#105) の最新判定。1 度も判定が走っていなければ null */
+  watchdog: {
+    reasons: ReadonlyArray<'orphaned' | 'stale'>;
+    orphanedSince: string | null; // ISO 8601
+    staleSince: string | null; // ISO 8601
+  } | null;
 };
 
 type Totals = {
@@ -60,6 +72,16 @@ type Totals = {
 各 dispatch (`dispatchSelected`) は開始時に `tracker.runStarted(...)` を、終了時 (success / failure / 想定外 throw) に `tracker.runFinished(...)` を呼ぶ。`runFinished` は **runId が running set に居なければ no-op** (べき等)。
 
 runner subprocess の stdout に新しい chunk が来るたびに `tracker.recordActivity(runId, at)` を呼んで `lastActivityAt` を更新する (#87)。runner からは `onActivity` callback で配線する。`runId` が in-flight でない場合は no-op (べき等)。
+
+runner subprocess を spawn して pid が確定した直後に `tracker.recordRunnerProcess(runId, pid)` を呼んで `runnerPid` を更新する (#105)。runner からは `onSpawn` callback で配線する。multi-turn (`agent.maxTurns > 1`) では turn ごとに新 pid に切り替わるため、turn 数だけ呼ばれる。spawn 失敗 / pid 取得失敗 (`child.pid` が `undefined`) は呼ばれない。`runId` が in-flight でない場合は no-op (べき等)。
+
+watchdog (`runWatchdog`, #105) は poll tick に piggyback で 1 回走り、tracker の各 entry について以下を判定して `tracker.setWatchdog(runId, ...)` で結果を書き戻す (詳細は [serve-daemon.md#active-run-watchdog-105](./serve-daemon.md#active-run-watchdog-105)):
+
+- **terminal repair**: `<runLogPath>/metadata.json` の `status` が `success` / `failed` なら `runFinished` をべき等に呼んで tracker から外す
+- **orphaned**: `runnerPid` が記録済みかつ `process.kill(pid, 0)` が ESRCH なら marker
+- **stale**: `agent.stall_timeout_ms > 0` かつ `now - lastActivityAt > stall_timeout_ms * 2` なら marker
+
+`reasons` が空配列のとき `setWatchdog` は `watchdog: null` に倒す (= marker 解消)。watchdog は kill / cleanup / retry dispatch を行わない (Issue #105 「今回やらない」)。
 
 ### `RetryStateEntry` の撤廃 (ADR-0005) と `retry_queue` の追加 (ADR-0008)
 
@@ -131,7 +153,11 @@ type SchedulerSnapshot = {
       "started_at": "2026-05-09T00:00:10.000Z",
       "slot": 0,
       "last_activity_at": "2026-05-09T00:00:25.000Z",
-      "retry_attempt": { "kind": "failure", "attempt": 2 }
+      "retry_attempt": { "kind": "failure", "attempt": 2 },
+      "workspace_path": "/home/user/.philharmonic/worktrees/issue-42",
+      "run_log_path": "/home/user/repo/.philharmonic/runs/0190ce80-...",
+      "runner_pid": 12345,
+      "watchdog": null
     }
   ],
   "totals": {
@@ -194,6 +220,10 @@ type SchedulerSnapshot = {
 | `running[].slot`             | integer \| null     | 並列 dispatch (#24) の slot index。`max_concurrent_agents == 1` の互換動作なら null                                                               |
 | `running[].last_activity_at` | ISO 8601            | runner stdout に最後に chunk が来た時刻 (#87)。stalled 残時間 = `agent.stall_timeout_ms - (now - last_activity_at)` を client 側で算出する        |
 | `running[].retry_attempt`    | object \| null      | retry 起源の dispatch なら `{ kind, attempt }`。fresh dispatch は null (#87)                                                                      |
+| `running[].workspace_path`   | string              | watchdog (#105) で再構築した worktree path (`<workspace_root>/issue-<n>`)                                                                         |
+| `running[].run_log_path`     | string              | watchdog (#105) で metadata.json を読みに行く runlog dir (`<runner_logs_root>/<run_id>`)                                                          |
+| `running[].runner_pid`       | integer \| null     | runner subprocess pid (process group leader)。spawn 前 / 取得失敗で null (#105)                                                                   |
+| `running[].watchdog`         | object \| null      | active run watchdog (#105) の最新判定。1 度も判定が走っていなければ null。詳細は次節                                                              |
 | `totals.runs_completed`      | integer             | daemon プロセス起動以降に完了 (success+failed) した run 数                                                                                        |
 | `totals.runs_succeeded`      | integer             | 成功した run 数                                                                                                                                   |
 | `totals.runs_failed`         | integer             | 失敗した run 数                                                                                                                                   |
@@ -202,6 +232,23 @@ type SchedulerSnapshot = {
 | `retry_queue`                | object \| null      | In-memory retry queue (ADR-0008)。`agent.max_retry_attempts == 0` または queue 未注入なら null                                                    |
 
 `retrying` 配列 (旧 #22) は ADR-0005 で撤廃。`retry_queue` (ADR-0008) は別機構として再導入された (永続化しない / Status 駆動でない)。
+
+#### `running[].watchdog` フィールド (#105)
+
+active run の孤児化を運用者が判別するための marker。watchdog (`runWatchdog`) が poll tick に piggyback で評価し、pid 消失 / activity 停止のいずれか (または両方) を検出したときだけ非 null になる。watchdog は **kill / cleanup / retry dispatch を行わない** (Issue #105「今回やらない」)。
+
+| フィールド                | 型                          | 説明                                                                                                          |
+| ------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `watchdog`                | object \| null              | marker 無しなら null                                                                                          |
+| `watchdog.reasons`        | `('orphaned' \| 'stale')[]` | 検出された marker (両方同時にありうる)。空配列にはならない (空なら field 全体が null)                         |
+| `watchdog.orphaned_since` | ISO 8601 \| null            | `process.kill(runner_pid, 0)` が初めて ESRCH を返した瞬間。orphaned が解消すると null に戻る                  |
+| `watchdog.stale_since`    | ISO 8601 \| null            | `now - last_activity_at > agent.stall_timeout_ms * 2` を初めて満たした瞬間。activity が再開すると null に戻る |
+
+判定ロジック:
+
+- **orphaned**: `runner_pid !== null` かつ `process.kill(pid, 0)` が ESRCH。EPERM 等は alive 扱い (= 他人 process との pid 再利用衝突を誤検知しない)。`runner_pid === null` のときは判定しない (= orphaned が出ない)
+- **stale**: `agent.stall_timeout_ms > 0` のときのみ評価する。runner 自身が `stall_timeout_ms` 経過で SIGTERM を送る設計なので、その 2 倍を超えても tracker から消えていない異常を捕まえる意図 (`stall_timeout_ms === 0` で判定 off)
+- **terminal repair** (marker ではなく自動修復): `<run_log_path>/metadata.json` の `status` が `success` / `failed` なら、その entry はその tick で `tracker.runFinished` 経由で removed される (snapshot に残らない)
 
 PR 番号 (`pr_number`) は orchestrator が知れなくなったため `running` entry にも含めない。
 

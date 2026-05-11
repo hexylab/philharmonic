@@ -28,12 +28,16 @@ describe('buildStateSnapshot', () => {
       branch: 'feature/42-foo',
       startedAt: new Date('2026-05-09T00:00:10Z'),
       slot: 1,
+      workspacePath: '/tmp/ws/issue-42',
+      runLogPath: '/tmp/runs/run-1',
     });
     tracker.runStarted({
       runId: 'run-2',
       issueNumber: 7,
       branch: 'feature/7-bar',
       startedAt: new Date('2026-05-09T00:00:20Z'),
+      workspacePath: '/tmp/ws/issue-7',
+      runLogPath: '/tmp/runs/run-2',
     });
     tracker.runFinished({ kind: 'success', runId: 'completed', issueNumber: 5, totalCostUsd: 1 });
     tracker.recordPollTick(new Date('2026-05-09T00:00:30Z'));
@@ -61,6 +65,10 @@ describe('buildStateSnapshot', () => {
           slot: null,
           last_activity_at: '2026-05-09T00:00:20.000Z',
           retry_attempt: null,
+          workspace_path: '/tmp/ws/issue-7',
+          run_log_path: '/tmp/runs/run-2',
+          runner_pid: null,
+          watchdog: null,
         },
         {
           run_id: 'run-1',
@@ -70,6 +78,10 @@ describe('buildStateSnapshot', () => {
           slot: 1,
           last_activity_at: '2026-05-09T00:00:10.000Z',
           retry_attempt: null,
+          workspace_path: '/tmp/ws/issue-42',
+          run_log_path: '/tmp/runs/run-1',
+          runner_pid: null,
+          watchdog: null,
         },
       ],
       totals: {
@@ -252,6 +264,8 @@ describe('buildStateSnapshot', () => {
       branch: 'feature/9-foo',
       startedAt: new Date('2026-05-09T00:00:10Z'),
       retryAttempt: { kind: 'continuation', attempt: 3 },
+      workspacePath: '/tmp/ws/issue-9',
+      runLogPath: '/tmp/runs/r-1',
     });
     tracker.recordActivity('r-1', new Date('2026-05-09T00:00:55Z'));
 
@@ -291,6 +305,8 @@ describe('buildStateSnapshot', () => {
       issueNumber: 1,
       branch: 'b',
       startedAt: new Date('2026-05-09T00:00:01Z'),
+      workspacePath: '/tmp/ws/issue-1',
+      runLogPath: '/tmp/runs/r',
     });
     tracker.runFinished({ kind: 'success', runId: 'r', issueNumber: 1, totalCostUsd: 0.42 });
 
@@ -318,6 +334,8 @@ describe('buildIssueSnapshot', () => {
       branch: 'b',
       startedAt: new Date('2026-05-09T00:00:00Z'),
       slot: 0,
+      workspacePath: '/tmp/ws/issue-42',
+      runLogPath: '/tmp/runs/r',
     });
 
     const snapshot = await buildIssueSnapshot({ issueNumber: 42, tracker });
@@ -331,6 +349,10 @@ describe('buildIssueSnapshot', () => {
         slot: 0,
         last_activity_at: '2026-05-09T00:00:00.000Z',
         retry_attempt: null,
+        workspace_path: '/tmp/ws/issue-42',
+        run_log_path: '/tmp/runs/r',
+        runner_pid: null,
+        watchdog: null,
       },
     });
   });

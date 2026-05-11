@@ -539,6 +539,11 @@ export async function dispatchSelected(
   });
 
   const branch = `feature/${candidate.issueNumber}-${buildIssueSlug(candidate.issueTitle)}`;
+  const taskKey = `issue-${candidate.issueNumber}`;
+  // workspaceManager.createWorkspace の前に「期待される」 worktree path を求める。watchdog
+  // (#105) が orphaned / stale 判定で workspace path を参照するため runStarted に乗せる。
+  // workspace_provisioning が失敗しても markFailed で runFinished されるので副作用は無い。
+  const expectedWorkspacePath = deps.workspaceManager.resolveWorkspacePath(taskKey);
   tracker.runStarted({
     runId,
     issueNumber: candidate.issueNumber,
@@ -546,8 +551,9 @@ export async function dispatchSelected(
     startedAt,
     slot: deps.slot ?? null,
     retryAttempt: deps.retryAttempt ?? null,
+    workspacePath: expectedWorkspacePath,
+    runLogPath: runLog.dir,
   });
-  const taskKey = `issue-${candidate.issueNumber}`;
   const baseRef = `${remote}/${deps.config.baseBranch}`;
   const failureContext: FailureContext = {
     runId,
@@ -654,6 +660,7 @@ export async function dispatchSelected(
         logDir: runLog.dir,
         logger,
         onActivity: (at) => tracker.recordActivity(runId, at),
+        onSpawn: (pid) => tracker.recordRunnerProcess(runId, pid),
       });
     } catch (error) {
       await runAfterRunHooksSafely(deps.workspaceManager, hookContext, 'failed', logger);

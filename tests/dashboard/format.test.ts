@@ -52,7 +52,7 @@ describe('formatTotalCost', () => {
 });
 
 describe('formatRunningRow', () => {
-  it('issue は # prefix、slot null は -, retry なしは -', () => {
+  it('issue は # prefix、slot null は -, retry なしは -, watchdog なしは -', () => {
     expect(
       formatRunningRow({
         run_id: 'run-1',
@@ -62,6 +62,10 @@ describe('formatRunningRow', () => {
         slot: null,
         last_activity_at: '2026-05-09T00:00:00.000Z',
         retry_attempt: null,
+        workspace_path: '/tmp/ws/issue-42',
+        run_log_path: '/tmp/runs/run-1',
+        runner_pid: null,
+        watchdog: null,
       }),
     ).toEqual({
       issue: '#42',
@@ -70,6 +74,7 @@ describe('formatRunningRow', () => {
       startedAt: '2026-05-09T00:00:00.000Z',
       lastActivityAt: '2026-05-09T00:00:00.000Z',
       retryAttempt: '-',
+      watchdog: '-',
     });
   });
 
@@ -82,10 +87,36 @@ describe('formatRunningRow', () => {
       slot: 0,
       last_activity_at: '2026-05-09T00:00:30.000Z',
       retry_attempt: { kind: 'failure', attempt: 2 },
+      workspace_path: '/tmp/ws/issue-99',
+      run_log_path: '/tmp/runs/run-2',
+      runner_pid: 12345,
+      watchdog: null,
     });
     expect(row.slot).toBe('0');
     expect(row.lastActivityAt).toBe('2026-05-09T00:00:30.000Z');
     expect(row.retryAttempt).toBe('failure#2');
+    expect(row.watchdog).toBe('-');
+  });
+
+  it('watchdog reasons があれば カンマ区切りで返す (#105)', () => {
+    const row = formatRunningRow({
+      run_id: 'run-3',
+      issue_number: 7,
+      branch: 'feature/7-x',
+      started_at: '2026-05-09T00:00:00.000Z',
+      slot: null,
+      last_activity_at: '2026-05-09T00:00:00.000Z',
+      retry_attempt: null,
+      workspace_path: '/tmp/ws/issue-7',
+      run_log_path: '/tmp/runs/run-3',
+      runner_pid: 12345,
+      watchdog: {
+        reasons: ['orphaned', 'stale'],
+        orphaned_since: '2026-05-09T00:01:00.000Z',
+        stale_since: '2026-05-09T00:01:00.000Z',
+      },
+    });
+    expect(row.watchdog).toBe('orphaned,stale');
   });
 });
 
@@ -276,6 +307,10 @@ describe('formatSnapshotForOnce', () => {
             slot: 0,
             last_activity_at: '2026-05-09T00:00:30.000Z',
             retry_attempt: { kind: 'failure', attempt: 1 },
+            workspace_path: '/tmp/ws/issue-42',
+            run_log_path: '/tmp/runs/run-1',
+            runner_pid: 12345,
+            watchdog: null,
           },
         ],
         polling: { interval_ms: 30_000, last_tick_at: '2026-05-09T00:00:30.000Z' },
@@ -284,8 +319,39 @@ describe('formatSnapshotForOnce', () => {
     expect(text).toContain('polling.last_tick_at=2026-05-09T00:00:30.000Z');
     expect(text).toContain('agent.stall_timeout_ms=60000');
     expect(text).toContain(
-      '  #42 branch=feature/42-foo started_at=2026-05-09T00:00:10.000Z slot=0 retry=failure#1 last_activity_at=2026-05-09T00:00:30.000Z stall=in 30s',
+      '  #42 branch=feature/42-foo started_at=2026-05-09T00:00:10.000Z slot=0 retry=failure#1 last_activity_at=2026-05-09T00:00:30.000Z stall=in 30s watchdog=-',
     );
+  });
+
+  it('running の watchdog reasons があれば "watchdog=orphaned,stale" のように出す (#105)', () => {
+    const text = formatSnapshotForOnce({
+      host: '127.0.0.1',
+      port: 4000,
+      now: new Date('2026-05-09T00:01:00.000Z'),
+      snapshot: snapshot({
+        agent: { stall_timeout_ms: 60_000 },
+        running: [
+          {
+            run_id: 'run-1',
+            issue_number: 42,
+            branch: 'feature/42-foo',
+            started_at: '2026-05-09T00:00:10.000Z',
+            slot: null,
+            last_activity_at: '2026-05-09T00:00:10.000Z',
+            retry_attempt: null,
+            workspace_path: '/tmp/ws/issue-42',
+            run_log_path: '/tmp/runs/run-1',
+            runner_pid: 12345,
+            watchdog: {
+              reasons: ['orphaned', 'stale'],
+              orphaned_since: '2026-05-09T00:00:50.000Z',
+              stale_since: '2026-05-09T00:00:50.000Z',
+            },
+          },
+        ],
+      }),
+    });
+    expect(text).toContain('watchdog=orphaned,stale');
   });
 
   it('retry_queue が undefined のときは "(not provided by daemon)"', () => {
