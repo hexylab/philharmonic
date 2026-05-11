@@ -37,6 +37,18 @@ export type StateSnapshot = {
     slot: number | null;
     last_activity_at: string;
     retry_attempt: { kind: 'failure' | 'continuation'; attempt: number } | null;
+    /** watchdog (#105) で再構築した worktree path。recovery / debug 用 */
+    workspace_path: string;
+    /** watchdog (#105) で metadata.json を読みに行く runlog dir */
+    run_log_path: string;
+    /** runner subprocess pid (process group leader)。spawn 前 / 取得失敗で null */
+    runner_pid: number | null;
+    /** active run watchdog (#105) の最新判定。1 度も判定が走っていなければ null */
+    watchdog: {
+      reasons: Array<'orphaned' | 'stale'>;
+      orphaned_since: string | null;
+      stale_since: string | null;
+    } | null;
   }>;
   totals: {
     runs_completed: number;
@@ -236,6 +248,17 @@ function toRunningJson(entry: RunningEntry): StateSnapshot['running'][number] {
     slot: entry.slot,
     last_activity_at: entry.lastActivityAt,
     retry_attempt: entry.retryAttempt === null ? null : { ...entry.retryAttempt },
+    workspace_path: entry.workspacePath,
+    run_log_path: entry.runLogPath,
+    runner_pid: entry.runnerPid,
+    watchdog:
+      entry.watchdog === null
+        ? null
+        : {
+            reasons: [...entry.watchdog.reasons],
+            orphaned_since: entry.watchdog.orphanedSince,
+            stale_since: entry.watchdog.staleSince,
+          },
   };
 }
 

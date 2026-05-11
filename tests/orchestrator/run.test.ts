@@ -458,6 +458,9 @@ describe('runOnce (ADR-0005: 薄い orchestrator)', () => {
     const tracker: RunTracker = {
       runStarted: vi.fn(),
       runFinished: vi.fn(),
+      recordActivity: vi.fn(),
+      recordRunnerProcess: vi.fn(),
+      setWatchdog: vi.fn(),
       listRunning: () => [],
       getRunningByIssue: () => ({
         runId: 'r',
@@ -465,6 +468,12 @@ describe('runOnce (ADR-0005: 薄い orchestrator)', () => {
         branch: 'feature/19-x',
         startedAt: new Date().toISOString(),
         slot: null,
+        lastActivityAt: new Date().toISOString(),
+        retryAttempt: null,
+        workspacePath: '/tmp/ws/issue-19',
+        runLogPath: '/tmp/runs/r',
+        runnerPid: null,
+        watchdog: null,
       }),
       getTotals: () => ({
         runsCompleted: 0,
@@ -662,6 +671,9 @@ describe('runOnce (ADR-0005: 薄い orchestrator)', () => {
     const tracker: RunTracker = {
       runStarted: startedSpy,
       runFinished: finishedSpy,
+      recordActivity: vi.fn(),
+      recordRunnerProcess: vi.fn(),
+      setWatchdog: vi.fn(),
       listRunning: () => [],
       getRunningByIssue: () => null,
       getTotals: () => ({
@@ -695,6 +707,113 @@ describe('runOnce (ADR-0005: 薄い orchestrator)', () => {
     // success 経路 + finally の防御発火 = 2 回呼ばれるが、tracker 自身が idempotent
     expect(finishedSpy).toHaveBeenCalled();
     expect(finishedSpy.mock.calls[0]?.[0]).toMatchObject({ kind: 'success', runId: FIXED_RUN_ID });
+  });
+
+  it('runStarted に workspacePath / runLogPath を渡す (#105)', async () => {
+    const projects = makeProjectsMock();
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+    const runClaudeMock = vi.fn(async () => makeRunResult());
+
+    const startedSpy = vi.fn();
+    const tracker: RunTracker = {
+      runStarted: startedSpy,
+      runFinished: vi.fn(),
+      recordActivity: vi.fn(),
+      recordRunnerProcess: vi.fn(),
+      setWatchdog: vi.fn(),
+      listRunning: () => [],
+      getRunningByIssue: () => null,
+      getTotals: () => ({
+        runsCompleted: 0,
+        runsSucceeded: 0,
+        runsFailed: 0,
+        totalCostUsd: 0,
+      }),
+      recordPollTick: vi.fn(),
+      getLastPollTickAt: () => null,
+      getStartedAt: () => new Date(0).toISOString(),
+    };
+
+    await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
+      runTracker: tracker,
+    });
+
+    expect(startedSpy).toHaveBeenCalledTimes(1);
+    const arg = startedSpy.mock.calls[0]![0];
+    expect(arg).toMatchObject({
+      runId: FIXED_RUN_ID,
+      // makeWorkspaceMock の resolveWorkspacePath は固定 path を返すモックなので、
+      // issue 番号を含まない (実装は workspaceManager.resolveWorkspacePath の戻り値をそのまま使う)。
+      workspacePath: path.join(tempDir, 'wt'),
+      runLogPath: expect.stringContaining(FIXED_RUN_ID),
+    });
+    expect(workspace.resolveWorkspacePath).toHaveBeenCalledWith(
+      `issue-${SAMPLE_CANDIDATE.issueNumber}`,
+    );
+  });
+
+  it('runner に onSpawn を渡し、tracker.recordRunnerProcess に配線する (#105)', async () => {
+    const projects = makeProjectsMock();
+    const github = makeGitHubMock();
+    const workspace = makeWorkspaceMock(path.join(tempDir, 'wt'));
+
+    let capturedOnSpawn: ((pid: number) => void) | undefined;
+    const runClaudeMock = vi.fn(async (opts) => {
+      capturedOnSpawn = opts.onSpawn;
+      // sim: spawn が pid 9999 を返したと仮定
+      capturedOnSpawn?.(9999);
+      return makeRunResult();
+    });
+    const recordRunnerProcessSpy = vi.fn();
+    const tracker: RunTracker = {
+      runStarted: vi.fn(),
+      runFinished: vi.fn(),
+      recordActivity: vi.fn(),
+      recordRunnerProcess: recordRunnerProcessSpy,
+      setWatchdog: vi.fn(),
+      listRunning: () => [],
+      getRunningByIssue: () => null,
+      getTotals: () => ({
+        runsCompleted: 0,
+        runsSucceeded: 0,
+        runsFailed: 0,
+        totalCostUsd: 0,
+      }),
+      recordPollTick: vi.fn(),
+      getLastPollTickAt: () => null,
+      getStartedAt: () => new Date(0).toISOString(),
+    };
+
+    await runOnce({
+      config: makeConfig(),
+      repoRoot: tempDir,
+      githubClient: github,
+      projectsClient: projects,
+      workspaceManager: workspace,
+      workflowSource,
+      runnerLogsRoot: path.join(tempDir, 'runs'),
+      gitRunner: noopGitRunner,
+      runClaude: runClaudeMock,
+      generateRunId: () => FIXED_RUN_ID,
+      clock: () => new Date('2026-05-09T00:00:00Z'),
+      pathExists: async () => false,
+      runTracker: tracker,
+    });
+
+    expect(recordRunnerProcessSpy).toHaveBeenCalledWith(FIXED_RUN_ID, 9999);
   });
 });
 

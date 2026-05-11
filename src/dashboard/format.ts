@@ -40,6 +40,8 @@ export function formatRunningRow(entry: StateSnapshot['running'][number]): {
   startedAt: string;
   lastActivityAt: string;
   retryAttempt: string;
+  /** active run watchdog (#105) marker。"-" は marker 無し */
+  watchdog: string;
 } {
   return {
     issue: `#${entry.issue_number}`,
@@ -51,7 +53,16 @@ export function formatRunningRow(entry: StateSnapshot['running'][number]): {
       entry.retry_attempt === null
         ? '-'
         : `${entry.retry_attempt.kind}#${entry.retry_attempt.attempt}`,
+    watchdog: formatWatchdogShort(entry.watchdog),
   };
+}
+
+function formatWatchdogShort(
+  watchdog: StateSnapshot['running'][number]['watchdog'] | undefined,
+): string {
+  // 古い serve は watchdog field を持たない (undefined) ため null と同じく "-" を返す
+  if (watchdog === null || watchdog === undefined || watchdog.reasons.length === 0) return '-';
+  return watchdog.reasons.join(',');
 }
 
 /**
@@ -140,7 +151,7 @@ export function formatSnapshotForOnce(input: {
         now,
       });
       lines.push(
-        `  ${row.issue} branch=${row.branch} started_at=${row.startedAt} slot=${row.slot} retry=${row.retryAttempt} last_activity_at=${row.lastActivityAt} stall=${formatStallForOnce(stall)}`,
+        `  ${row.issue} branch=${row.branch} started_at=${row.startedAt} slot=${row.slot} retry=${row.retryAttempt} last_activity_at=${row.lastActivityAt} stall=${formatStallForOnce(stall)} watchdog=${row.watchdog}`,
       );
     }
   }

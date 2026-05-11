@@ -1068,6 +1068,9 @@ describe('philharmonic serve CLI コマンド', () => {
     const tracker = {
       runStarted: vi.fn(),
       runFinished: vi.fn(),
+      recordActivity: vi.fn(),
+      recordRunnerProcess: vi.fn(),
+      setWatchdog: vi.fn(),
       listRunning: vi.fn(() => []),
       getRunningByIssue: vi.fn(() => null),
       getTotals: vi.fn(() => ({
@@ -1115,6 +1118,119 @@ describe('philharmonic serve CLI コマンド', () => {
 
     expect(acquireSignalSpy).toHaveBeenCalled();
     expect(tracker.recordPollTick).toHaveBeenCalled();
+  });
+
+  it('wrappedRunOnce の冒頭で watchdog を呼び、tracker / stallTimeoutMs を渡す (#105)', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const watchdogSpy = vi.fn(async () => ({ repaired: [], markers: [] }));
+    const runOnceSpy = vi.fn(async () => ({ kind: 'no_candidate' as const }));
+
+    const serveLoopMock = vi.fn(
+      async (deps: { signal: AbortSignal; runOnce: () => Promise<unknown> }) => {
+        // 1 tick だけ runOnce を回し、その後 SIGTERM で抜ける
+        await deps.runOnce();
+        subscription.emit('SIGTERM');
+        await new Promise<void>((resolve) => {
+          if (deps.signal.aborted) resolve();
+          else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+      },
+    );
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
+      loadConfig: async () =>
+        fakeConfig({
+          agent: {
+            maxConcurrentAgents: 1,
+            maxTurns: 1,
+            stallTimeoutMs: 120_000,
+            maxRetryAttempts: 5,
+            maxRetryBackoffMs: 300_000,
+          },
+        }),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      createWorkflowSource: fakeCreateWorkflowSource,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: runOnceSpy,
+      runWatchdog: watchdogSpy as never,
+      serveLoop: serveLoopMock as never,
+      createSignalSubscription: () => subscription,
+    });
+
+    expect(watchdogSpy).toHaveBeenCalledTimes(1);
+    const args = watchdogSpy.mock.calls[0]![0];
+    expect(args).toEqual(
+      expect.objectContaining({
+        stallTimeoutMs: 120_000,
+        tracker: expect.any(Object),
+        logger: expect.any(Object),
+      }),
+    );
+    // watchdog → runOnce の順 (= watchdog が tick 冒頭)
+    expect(watchdogSpy.mock.invocationCallOrder[0]).toBeLessThan(
+      runOnceSpy.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it('watchdog が throw しても daemon は落ちず warn ログのみで runOnce に進む (#105)', async () => {
+    const streams = createStreams();
+    const subscription = createFakeSubscription();
+    const lock = createFakeLock();
+    const warnSpy = vi.fn();
+    const fakeLogger = {
+      level: 'info' as const,
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: warnSpy,
+      error: vi.fn(),
+      child: vi.fn(),
+    };
+    fakeLogger.child.mockReturnValue(fakeLogger);
+
+    const watchdogSpy = vi.fn(async () => {
+      throw new Error('boom-watchdog');
+    });
+    const runOnceSpy = vi.fn(async () => ({ kind: 'no_candidate' as const }));
+
+    const serveLoopMock = vi.fn(
+      async (deps: { signal: AbortSignal; runOnce: () => Promise<unknown> }) => {
+        await deps.runOnce();
+        subscription.emit('SIGTERM');
+        await new Promise<void>((resolve) => {
+          if (deps.signal.aborted) resolve();
+          else deps.signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+      },
+    );
+
+    await runCmd(streams, {
+      cwd: () => '/tmp/repo',
+      resolveGitHubToken: async () => ({ token: 'tok', origin: 'env' }),
+      loadConfig: async () => fakeConfig(),
+      createGitHubClient: () => fakeGitHub,
+      createProjectsClient: () => fakeProjects,
+      createWorkspaceManager: () => fakeWorkspace,
+      createWorkflowSource: fakeCreateWorkflowSource,
+      acquireServeLock: lock.acquireSpy,
+      runOnce: runOnceSpy,
+      runWatchdog: watchdogSpy as never,
+      serveLoop: serveLoopMock as never,
+      createLogger: () => fakeLogger,
+      createSignalSubscription: () => subscription,
+    });
+
+    expect(watchdogSpy).toHaveBeenCalled();
+    expect(runOnceSpy).toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      'watchdog tick failed',
+      expect.objectContaining({ error: 'boom-watchdog' }),
+    );
   });
 
   it('serve 起動時に retry queue を state file から復元し、release pass を実行する (ADR-0011)', async () => {

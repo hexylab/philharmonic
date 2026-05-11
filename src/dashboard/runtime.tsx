@@ -227,6 +227,12 @@ function RunningSection({
                 <Text color="gray">last_activity {row.lastActivityAt}</Text>
                 {'  '}
                 <StallText stall={stall} />
+                {entry.watchdog !== null && entry.watchdog.reasons.length > 0 ? (
+                  <>
+                    {'  '}
+                    <Text color="red">watchdog={entry.watchdog.reasons.join(',')}</Text>
+                  </>
+                ) : null}
               </Text>
             </Box>
           );

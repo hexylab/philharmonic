@@ -315,6 +315,67 @@ agent:
 | warn  | `polling.interval_ms が低く設定されています...`   | `intervalMs`, `recommendedMinMs` | `intervalMs < 5000` のときの起動時 1 回                                                                            |
 | warn  | `serve lock release に失敗`                       | `error`                          | shutdown 時の release 失敗 (race / FS エラー等)                                                                    |
 
+## active run watchdog (#105)
+
+`philharmonic serve` が tracker 上 `In Progress` と認識している run について、孤児化 (= サイレント停止) を運用者が判別できる最小スコープの安全機構。
+
+### 目的
+
+- **terminal repair**: run dir に `metadata.json` (status: `success` / `failed`) が既にあるのに tracker が running のままという「明確に修復可能な状態」を検出し、`tracker.runFinished` をべき等に呼んで in-flight set から外す
+- **可視化**: pid 消失 / activity 停止の疑いを Snapshot API / dashboard に `orphaned` / `stale` marker として表示する
+- **誤検知ガード**: pid 消失 / activity 停止だけを根拠に runner kill / worktree cleanup / retry dispatch を **行わない**。長時間の tool wait / advisor wait を誤って止めない
+
+### 起動契機
+
+`serveLoop` は新しい独立 timer を持たず、**poll tick の冒頭** (= `wrappedRunOnce` の最初) で `runWatchdog` を 1 回呼ぶ。実装は `src/orchestrator/watchdog.ts`。watchdog 中の例外は warn ログ 1 行に握って次フェーズ (`runOnce` / `runConcurrent`) に進む (daemon は落とさない)。
+
+### 入出力
+
+入力 (DI):
+
+- `tracker: RunTracker` — `listRunning()` / `runFinished()` / `setWatchdog()` を使う
+- `stallTimeoutMs: number` — `agent.stall_timeout_ms` の現値。`<= 0` で stale 判定 off
+- `now: Date` — 現在時刻 (テスト用)
+- `readMetadata: (runLogPath) => Promise<RunMetadataSnapshot | null>` — `<runLogPath>/metadata.json` を読む default 実装あり
+- `processAlive: (pid) => boolean` — `process.kill(pid, 0)` の wrapper。default は ESRCH のみ dead 扱い
+
+出力:
+
+- `repaired[]` — 当 tick で terminal metadata により tracker から外した entry
+- `markers[]` — 当 tick で marker が立っている (orphaned / stale) entry の最新状態
+
+### 判定ルール
+
+各 `running entry` について順に評価する。
+
+1. `<entry.runLogPath>/metadata.json` を読む
+   - 読めて `status` が `success` / `failed`: `tracker.runFinished({ kind: status, ..., reason: failureReason ?? 'runner_error', totalCostUsd })` を呼んで repair。次の entry へ
+   - ENOENT / parse 不能 / status が他値: 続行
+   - その他 IO エラー: warn ログを残して続行 (repair は次 tick で再試行)
+2. `entry.runnerPid !== null` かつ `process.kill(pid, 0)` が ESRCH: `reasons` に `'orphaned'` を追加
+3. `stallTimeoutMs > 0` かつ `now - lastActivityAt > stallTimeoutMs * 2`: `reasons` に `'stale'` を追加
+4. `reasons` の状態に応じて `tracker.setWatchdog(runId, ...)` を呼ぶ
+   - `reasons.length === 0` かつ既存 `entry.watchdog !== null`: `null` で marker 解消
+   - `reasons.length > 0`: `{ reasons, orphanedSince, staleSince }` で書き戻す。`orphanedSince` / `staleSince` は **初出時刻を保持** する (active な間は同じ値、非活性に戻ったら次回 active 化で新しい時刻)
+
+### 副作用
+
+- `tracker.runFinished` (terminal repair 時のみ)
+- `tracker.setWatchdog` (orphaned / stale で marker を立てる / 解除する)
+- 構造化ログ:
+  - `info`: `watchdog terminal repair` (repair した瞬間 1 回)
+  - `warn`: `watchdog marker` (marker の組み合わせが切り替わった瞬間 1 回。tick ごとの再出力は無し)
+  - `warn`: `watchdog metadata read failed` (IO エラーで repair を skip した tick)
+  - `warn`: `watchdog tick failed` (`runWatchdog` 自体が throw、cli/serve.ts 側で catch)
+
+### やらないこと (Issue #105)
+
+- pid 消失だけを根拠に worktree cleanup
+- pid 消失だけを根拠に retry dispatch
+- activity 停止だけを根拠に Project Status を `Failed` に倒す
+- `philharmonic retry <issue-number>` のような手動 retry CLI (= 別 Issue)
+- dashboard の Running 詳細活動表示 (= #98)
+
 ## GitHub token 解決 (#68)
 
 `serve` 起動前に手動で `export GITHUB_TOKEN=...` を要求しないため、token の取得元を config で選べるようにする。token 文字列そのものは絶対に YAML に書かない (誤 commit リスク)。

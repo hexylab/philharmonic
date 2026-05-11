@@ -61,6 +61,13 @@ export type RunClaudeOptions = {
    * tracker / snapshot に伝えるために使う (#87)。activity 1 回ごとに 1 度呼ばれる。
    */
   onActivity?: (at: Date) => void;
+  /**
+   * subprocess を spawn して pid が確定した直後に呼ばれる (#105)。watchdog の orphaned 判定
+   * (`process.kill(pid, 0)` で alive 確認) で使うため tracker に渡す。multi-turn では turn
+   * ごとに新 pid に切り替わるので turn の数だけ呼ばれる。pid が取れない (= 即時 spawn 失敗) は
+   * 呼ばれない。
+   */
+  onSpawn?: (pid: number) => void;
 };
 
 export type RunResult = {
@@ -161,6 +168,7 @@ export async function runClaude(options: RunClaudeOptions): Promise<RunResult> {
           streamLog,
           stderrLog,
           onActivity: options.onActivity,
+          onSpawn: options.onSpawn,
           // baseLogger は system event 受信時に sessionId 付きに差し替わる。
           // getLogger は呼び出しごとに最新の baseLogger を child するので、
           // sessionId 切替後の intra-turn ログにも sessionId が付与される (#25)。
@@ -263,6 +271,7 @@ type RunTurnInput = {
   streamLog: WriteStream | null;
   stderrLog: WriteStream | null;
   onActivity?: (at: Date) => void;
+  onSpawn?: (pid: number) => void;
   /**
    * 呼び出すたびに最新の logger (sessionId 反映済み) を返す getter。
    * runTurn の内部で `input.getLogger()?.info(...)` のように使う。
@@ -296,6 +305,10 @@ async function runTurn(input: RunTurnInput): Promise<TurnOutcome> {
     stallTimeoutMs: input.stallTimeoutMs,
     sessionMode: input.sessionArg.mode,
   });
+
+  if (typeof child.pid === 'number' && child.pid > 0) {
+    input.onSpawn?.(child.pid);
+  }
 
   const parser = new StreamEventParser();
   let lastResult: ResultEvent | null = null;

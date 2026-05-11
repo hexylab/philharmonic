@@ -95,3 +95,12 @@ export {
   type SelectCandidateInput,
 } from './select.js';
 export { buildIssueSlug, FALLBACK_SLUG } from './slug.js';
+export {
+  runWatchdog,
+  type RunMetadataSnapshot,
+  type RunWatchdogDeps,
+  type WatchdogMarker,
+  type WatchdogReason,
+  type WatchdogRepair,
+  type WatchdogResult,
+} from './watchdog.js';

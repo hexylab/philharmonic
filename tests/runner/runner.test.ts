@@ -37,10 +37,18 @@ type SpawnCall = {
   child: FakeChild;
 };
 
-function createSpawnFn(): { spawn: SpawnFn; calls: SpawnCall[] } {
+function createSpawnFn(opts: { pid?: number } = {}): {
+  spawn: SpawnFn;
+  calls: SpawnCall[];
+} {
   const calls: SpawnCall[] = [];
   const spawn: SpawnFn = (command, args, options) => {
     const child = new FakeChild();
+    if (typeof opts.pid === 'number') {
+      // SpawnedProcess は pid?: number を持つ。FakeChild は EventEmitter ベースなので
+      // ここで生やして spawn 後の参照経路 (onSpawn / sendSignalToTree 等) で使えるようにする。
+      (child as unknown as { pid: number }).pid = opts.pid;
+    }
     calls.push({ command, args, options, child });
     return child as unknown as SpawnedProcess;
   };
@@ -608,6 +616,69 @@ describe('runClaude — stall detection (#25)', () => {
     expect(result.status).toBe('success');
     expect(onActivity).toHaveBeenCalledTimes(2);
     expect(onActivity.mock.calls[0]![0]).toBeInstanceOf(Date);
+  });
+
+  it('onSpawn は spawn 直後に pid 付きで呼ばれる (#105)', async () => {
+    const { spawn, calls } = createSpawnFn({ pid: 12345 });
+    const onSpawn = vi.fn();
+    const promise = runClaude(
+      baseOptions({
+        spawn,
+        timeoutMs: 60_000,
+        stallTimeoutMs: 0,
+        onSpawn,
+      }),
+    );
+    const call = await waitForSpawn(calls);
+    const child = call.child;
+
+    child.stdout.write(makeSystemLine(FIXED_SESSION_ID));
+    child.stdout.write(
+      makeResultLine({
+        sessionId: FIXED_SESSION_ID,
+        subtype: 'success',
+        isError: false,
+        numTurns: 1,
+        totalCostUsd: 0.01,
+        resultText: 'ok',
+      }),
+    );
+    child.stdout.end();
+    child.emit('close', 0, null);
+    await promise;
+
+    expect(onSpawn).toHaveBeenCalledTimes(1);
+    expect(onSpawn).toHaveBeenCalledWith(12345);
+  });
+
+  it('child.pid が undefined なら onSpawn は呼ばれない (#105)', async () => {
+    const { spawn, calls } = createSpawnFn(); // pid 未指定
+    const onSpawn = vi.fn();
+    const promise = runClaude(
+      baseOptions({
+        spawn,
+        timeoutMs: 60_000,
+        stallTimeoutMs: 0,
+        onSpawn,
+      }),
+    );
+    const call = await waitForSpawn(calls);
+    const child = call.child;
+    child.stdout.write(makeSystemLine(FIXED_SESSION_ID));
+    child.stdout.write(
+      makeResultLine({
+        sessionId: FIXED_SESSION_ID,
+        subtype: 'success',
+        isError: false,
+        numTurns: 1,
+        totalCostUsd: 0.01,
+        resultText: 'ok',
+      }),
+    );
+    child.stdout.end();
+    child.emit('close', 0, null);
+    await promise;
+    expect(onSpawn).not.toHaveBeenCalled();
   });
 
   it('stallTimeoutMs=0 で stall detection が無効化される', async () => {

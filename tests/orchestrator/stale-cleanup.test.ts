@@ -164,6 +164,8 @@ describe('cleanupStaleWorktreesAtStartup', () => {
       issueNumber: 42,
       branch: 'feature/42-foo',
       startedAt: new Date(),
+      workspacePath: '/tmp/ws/issue-42',
+      runLogPath: '/tmp/runs/r1',
     });
     await cleanupStaleWorktreesAtStartup({
       config: fakeConfig(),
