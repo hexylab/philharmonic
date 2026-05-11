@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  computeRunningElapsedMs,
   describeStallStatus,
   formatDurationMsShort,
+  formatRunningElapsed,
   formatRunningRow,
   formatSnapshotForOnce,
   formatTotalCost,
@@ -170,6 +172,56 @@ describe('formatDurationMsShort', () => {
   it('NaN / 負数は 0ms', () => {
     expect(formatDurationMsShort(Number.NaN)).toBe('0s');
     expect(formatDurationMsShort(-1)).toBe('0ms');
+  });
+});
+
+describe('computeRunningElapsedMs', () => {
+  it('started_at から経過した ms を返す (0秒)', () => {
+    expect(
+      computeRunningElapsedMs('2026-05-09T00:00:00.000Z', new Date('2026-05-09T00:00:00.000Z')),
+    ).toBe(0);
+  });
+
+  it('分単位の経過 (12分34秒)', () => {
+    expect(
+      computeRunningElapsedMs('2026-05-09T00:00:00.000Z', new Date('2026-05-09T00:12:34.000Z')),
+    ).toBe(12 * 60_000 + 34_000);
+  });
+
+  it('時間単位の経過 (2時間)', () => {
+    expect(
+      computeRunningElapsedMs('2026-05-09T00:00:00.000Z', new Date('2026-05-09T02:00:00.000Z')),
+    ).toBe(2 * 60 * 60_000);
+  });
+
+  it('日跨ぎの経過 (1日3時間)', () => {
+    expect(
+      computeRunningElapsedMs('2026-05-09T00:00:00.000Z', new Date('2026-05-10T03:00:00.000Z')),
+    ).toBe(27 * 60 * 60_000);
+  });
+
+  it('now < started_at (時計逆走) は 0', () => {
+    expect(
+      computeRunningElapsedMs('2026-05-09T00:01:00.000Z', new Date('2026-05-09T00:00:30.000Z')),
+    ).toBe(0);
+  });
+
+  it('parse 不能な started_at は null', () => {
+    expect(computeRunningElapsedMs('not-an-iso', new Date('2026-05-09T00:00:00.000Z'))).toBeNull();
+  });
+});
+
+describe('formatRunningElapsed', () => {
+  it('null は "-"', () => {
+    expect(formatRunningElapsed(null)).toBe('-');
+  });
+
+  it('0 / 秒 / 分 / 時間 / 日 で formatUptimeMs と一致する', () => {
+    expect(formatRunningElapsed(0)).toBe('0s');
+    expect(formatRunningElapsed(5_000)).toBe('05s');
+    expect(formatRunningElapsed(12 * 60_000 + 34_000)).toBe('12m34s');
+    expect(formatRunningElapsed(3_725_000)).toBe('01h02m05s');
+    expect(formatRunningElapsed(90_125_000)).toBe('1d01h02m05s');
   });
 });
 
@@ -345,7 +397,7 @@ describe('formatSnapshotForOnce', () => {
     expect(text).toContain('polling.last_tick_at=2026-05-09 09:00:30 JST');
     expect(text).toContain('agent.stall_timeout_ms=60000');
     expect(text).toContain(
-      '  #42 branch=feature/42-foo started_at=2026-05-09 09:00:10 JST slot=0 retry=failure#1 last_activity_at=2026-05-09 09:00:30 JST stall=in 30s watchdog=-',
+      '  #42 branch=feature/42-foo started_at=2026-05-09 09:00:10 JST elapsed=50s slot=0 retry=failure#1 last_activity_at=2026-05-09 09:00:30 JST stall=in 30s watchdog=- operator_action=-',
     );
   });
 
