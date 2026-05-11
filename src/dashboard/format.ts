@@ -1,5 +1,7 @@
 import type { RetryQueueStateJson, SchedulerStateJson, StateSnapshot } from '../server/index.js';
 
+import { formatTimestampJst } from './time.js';
+
 /**
  * Snapshot を表示用文字列へ変換する pure helper。
  * Ink を import せずに unit test できるよう分離してある。
@@ -49,8 +51,8 @@ export function formatRunningRow(entry: StateSnapshot['running'][number]): {
     issue: `#${entry.issue_number}`,
     branch: entry.branch,
     slot: entry.slot === null ? '-' : String(entry.slot),
-    startedAt: entry.started_at,
-    lastActivityAt: entry.last_activity_at,
+    startedAt: formatTimestampJst(entry.started_at),
+    lastActivityAt: formatTimestampJst(entry.last_activity_at),
     retryAttempt:
       entry.retry_attempt === null
         ? '-'
@@ -143,9 +145,11 @@ export function formatSnapshotForOnce(input: {
   const lines: string[] = [];
 
   lines.push(`host=${host} port=${port}`);
-  lines.push(`started_at=${snapshot.started_at} uptime=${formatUptimeMs(snapshot.uptime_ms)}`);
   lines.push(
-    `polling.interval_ms=${snapshot.polling.interval_ms} polling.last_tick_at=${formatNullable(
+    `started_at=${formatTimestampJst(snapshot.started_at)} uptime=${formatUptimeMs(snapshot.uptime_ms)}`,
+  );
+  lines.push(
+    `polling.interval_ms=${snapshot.polling.interval_ms} polling.last_tick_at=${formatTimestampJst(
       snapshot.polling.last_tick_at,
     )}`,
   );
@@ -216,7 +220,9 @@ function appendRetryQueueLines(
     const due = formatRetryDueIn(entry.due_at, now);
     const reason = entry.failure_reason === null ? 'reason=-' : `reason=${entry.failure_reason}`;
     lines.push(
-      `  #${entry.issue_number} kind=${entry.kind} attempt=${entry.attempt} ${reason} due_at=${entry.due_at} (${due}) branch=${entry.branch} workspace_path=${entry.workspace_path} last_run_id=${entry.last_run_id}`,
+      `  #${entry.issue_number} kind=${entry.kind} attempt=${entry.attempt} ${reason} due_at=${formatTimestampJst(
+        entry.due_at,
+      )} (${due}) branch=${entry.branch} workspace_path=${entry.workspace_path} last_run_id=${entry.last_run_id}`,
     );
   }
 }
@@ -242,7 +248,7 @@ function appendSchedulerLines(
     return;
   }
 
-  lines.push(`scheduler: last_evaluated_at=${scheduler.last_evaluated_at}`);
+  lines.push(`scheduler: last_evaluated_at=${formatTimestampJst(scheduler.last_evaluated_at)}`);
   if (scheduler.ready.length === 0) {
     lines.push('  ready (0)');
   } else {
@@ -287,8 +293,4 @@ function appendSchedulerLines(
 
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : String(n);
-}
-
-function formatNullable(value: string | null): string {
-  return value === null ? '(never)' : value;
 }
