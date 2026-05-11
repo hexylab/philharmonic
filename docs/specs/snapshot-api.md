@@ -237,18 +237,33 @@ type SchedulerSnapshot = {
 
 active run の孤児化を運用者が判別するための marker。watchdog (`runWatchdog`) が poll tick に piggyback で評価し、pid 消失 / activity 停止のいずれか (または両方) を検出したときだけ非 null になる。watchdog は **kill / cleanup / retry dispatch を行わない** (Issue #105「今回やらない」)。
 
-| フィールド                | 型                          | 説明                                                                                                          |
-| ------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `watchdog`                | object \| null              | marker 無しなら null                                                                                          |
-| `watchdog.reasons`        | `('orphaned' \| 'stale')[]` | 検出された marker (両方同時にありうる)。空配列にはならない (空なら field 全体が null)                         |
-| `watchdog.orphaned_since` | ISO 8601 \| null            | `process.kill(runner_pid, 0)` が初めて ESRCH を返した瞬間。orphaned が解消すると null に戻る                  |
-| `watchdog.stale_since`    | ISO 8601 \| null            | `now - last_activity_at > agent.stall_timeout_ms * 2` を初めて満たした瞬間。activity が再開すると null に戻る |
+| フィールド                          | 型                          | 説明                                                                                                          |
+| ----------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `watchdog`                          | object \| null              | marker 無しなら null                                                                                          |
+| `watchdog.reasons`                  | `('orphaned' \| 'stale')[]` | 検出された marker (両方同時にありうる)。空配列にはならない (空なら field 全体が null)                         |
+| `watchdog.orphaned_since`           | ISO 8601 \| null            | `process.kill(runner_pid, 0)` が初めて ESRCH を返した瞬間。orphaned が解消すると null に戻る                  |
+| `watchdog.stale_since`              | ISO 8601 \| null            | `now - last_activity_at > agent.stall_timeout_ms * 2` を初めて満たした瞬間。activity が再開すると null に戻る |
+| `watchdog.operator_action_required` | boolean                     | orphan recovery (#109) で auto-recover の安全条件を満たさず operator の手動 intervention 待ち                 |
+| `watchdog.operator_action_reasons`  | `string[]`                  | `operator_action_required` の理由。詳細は次節                                                                 |
 
 判定ロジック:
 
 - **orphaned**: `runner_pid !== null` かつ `process.kill(pid, 0)` が ESRCH。EPERM 等は alive 扱い (= 他人 process との pid 再利用衝突を誤検知しない)。`runner_pid === null` のときは判定しない (= orphaned が出ない)
 - **stale**: `agent.stall_timeout_ms > 0` のときのみ評価する。runner 自身が `stall_timeout_ms` 経過で SIGTERM を送る設計なので、その 2 倍を超えても tracker から消えていない異常を捕まえる意図 (`stall_timeout_ms === 0` で判定 off)
 - **terminal repair** (marker ではなく自動修復): `<run_log_path>/metadata.json` の `status` が `success` / `failed` なら、その entry はその tick で `tracker.runFinished` 経由で removed される (snapshot に残らない)
+
+`watchdog.operator_action_reasons` の値域 (#109):
+
+| 値                      | 発火条件                                                                                            |
+| ----------------------- | --------------------------------------------------------------------------------------------------- |
+| `orphaned_only`         | `reasons` が `['orphaned']` のみ。pid 死亡だけで activity 停止が確認できていない                    |
+| `stale_only`            | `reasons` が `['stale']` のみ。activity 停止だが pid 生存 (long tool / advisor wait の可能性)       |
+| `open_pr`               | `feature/<num>-` の open PR が 1 件以上ある (agent が PR 作成後に Status flip 前死亡の稀ケース保護) |
+| `retry_disabled`        | retry queue 未注入 / `agent.max_retry_attempts <= 0`                                                |
+| `unsafe_workspace_path` | `running[].workspace_path` が `config.workspace_root` 配下でない                                    |
+| `recover_error`         | `listOpenPullRequests` / `fetchProjectCandidates` 失敗 / Project Items に Issue が見つからない      |
+
+orphan recovery (#109) が安全条件を満たしたと判定した entry は **本 tick の終了時点で tracker から外れる** (= snapshot に残らない)。`operator_action_required` が `true` で表示される entry は運用者の介入待ち状態を意味する。詳細は [serve-daemon.md#orphan-recovery-109](./serve-daemon.md#orphan-recovery-109)。
 
 PR 番号 (`pr_number`) は orchestrator が知れなくなったため `running` entry にも含めない。
 

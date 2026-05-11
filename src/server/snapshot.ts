@@ -48,6 +48,17 @@ export type StateSnapshot = {
       reasons: Array<'orphaned' | 'stale'>;
       orphaned_since: string | null;
       stale_since: string | null;
+      /** auto-recover の安全条件を満たさず operator の手動 intervention 待ち (#109) */
+      operator_action_required: boolean;
+      /** `operator_action_required` の理由 (#109)。dashboard 表示順は配列順を尊重 */
+      operator_action_reasons: Array<
+        | 'orphaned_only'
+        | 'stale_only'
+        | 'open_pr'
+        | 'retry_disabled'
+        | 'unsafe_workspace_path'
+        | 'recover_error'
+      >;
     } | null;
   }>;
   totals: {
@@ -258,6 +269,8 @@ function toRunningJson(entry: RunningEntry): StateSnapshot['running'][number] {
             reasons: [...entry.watchdog.reasons],
             orphaned_since: entry.watchdog.orphanedSince,
             stale_since: entry.watchdog.staleSince,
+            operator_action_required: entry.watchdog.operatorActionRequired,
+            operator_action_reasons: [...entry.watchdog.operatorActionReasons],
           },
   };
 }

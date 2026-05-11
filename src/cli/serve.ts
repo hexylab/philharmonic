@@ -28,7 +28,9 @@ import {
   createRetryQueue,
   createRetryQueueFileStore,
   loadRetryQueueEntries,
+  notifyFailureExhausted as defaultNotifyFailureExhausted,
   recoverInProgress,
+  recoverOrphaned,
   releaseRestoredRetries,
   RETRY_QUEUE_STATE_FILE_RELATIVE,
   RETRY_QUEUE_STATE_VERSION,
@@ -126,6 +128,7 @@ export type ServeCommandDeps = {
   runConcurrent?: typeof runConcurrent;
   serveLoop?: typeof serveLoop;
   runWatchdog?: typeof runWatchdog;
+  recoverOrphaned?: typeof recoverOrphaned;
   recoverInProgress?: typeof recoverInProgress;
   cleanupStaleWorktreesAtStartup?: typeof cleanupStaleWorktreesAtStartup;
   gitRunner?: GitRunner;
@@ -167,6 +170,7 @@ const DEFAULT_DEPS: Required<ServeCommandDeps> = {
   runConcurrent,
   serveLoop,
   runWatchdog,
+  recoverOrphaned,
   recoverInProgress,
   cleanupStaleWorktreesAtStartup,
   gitRunner: defaultGitRunner,
@@ -458,6 +462,35 @@ async function runServeCommand(
       });
     } catch (error) {
       logger.warn('watchdog tick failed', { error: describeError(error) });
+    }
+
+    // 安全条件付きの orphan recovery (#109): orphaned + stale が同時に立った entry のうち、
+    // open PR / unsafe workspacePath / retry queue 未注入のいずれにも当たらないものだけを
+    // retry queue / Failed safety-net に接続する。失敗は marker に残して operator に委ねる。
+    try {
+      await deps.recoverOrphaned({
+        config,
+        repoRoot,
+        tracker: runTracker,
+        githubClient,
+        projectsClient,
+        retryQueue,
+        maxRetryAttempts: config.agent.maxRetryAttempts,
+        maxRetryBackoffMs: config.agent.maxRetryBackoffMs,
+        notifyFailureExhausted:
+          deps.runGh === undefined
+            ? undefined
+            : (input) =>
+                defaultNotifyFailureExhausted(input, {
+                  runGh: deps.runGh,
+                  projectsClient,
+                  logger,
+                }),
+        runnerLogsRoot,
+        logger,
+      });
+    } catch (error) {
+      logger.warn('orphan recovery tick failed', { error: describeError(error) });
     }
 
     if (maxConcurrent === 1) {

@@ -3,7 +3,12 @@ import path from 'node:path';
 
 import type { Logger } from '../logger/index.js';
 import type { RunLogStatus } from '../runlog/index.js';
-import type { RunningEntry, RunningWatchdog, RunTracker } from '../server/tracker.js';
+import type {
+  OperatorActionReason,
+  RunningEntry,
+  RunningWatchdog,
+  RunTracker,
+} from '../server/tracker.js';
 
 import type { FailureReason } from './errors.js';
 
@@ -37,6 +42,11 @@ export type WatchdogMarker = {
   reasons: ReadonlyArray<WatchdogReason>;
   orphanedSince: string | null;
   staleSince: string | null;
+  /** entry の最新 watchdog state (operator action 判定込み)。`recoverOrphaned` (#109) の入力に使う */
+  workspacePath: string;
+  runLogPath: string;
+  runnerPid: number | null;
+  branch: string;
 };
 
 export type WatchdogResult = {
@@ -181,10 +191,28 @@ export async function runWatchdog(deps: RunWatchdogDeps): Promise<WatchdogResult
       continue;
     }
 
+    // operator action 判定: orphaned + stale 同時でない場合は #109 の auto-recover 対象外。
+    // 既に同 entry に operator action が立っていれば、その reason は引き継ぐ (後段の
+    // recoverOrphaned で `open_pr` / `retry_disabled` / `unsafe_workspace_path` 等を載せる)。
+    const inheritedReasons = entry.watchdog?.operatorActionReasons ?? [];
+    const operatorReasons = new Set<OperatorActionReason>(inheritedReasons);
+    if (orphaned && !stale) operatorReasons.add('orphaned_only');
+    else operatorReasons.delete('orphaned_only');
+    if (stale && !orphaned) operatorReasons.add('stale_only');
+    else operatorReasons.delete('stale_only');
+
+    const operatorActionRequired = operatorReasons.size > 0;
+    const orderedReasons: OperatorActionReason[] = [];
+    for (const r of OPERATOR_ACTION_REASON_ORDER) {
+      if (operatorReasons.has(r)) orderedReasons.push(r);
+    }
+
     const watchdog: RunningWatchdog = {
       reasons,
       orphanedSince,
       staleSince,
+      operatorActionRequired,
+      operatorActionReasons: orderedReasons,
     };
     tracker.setWatchdog(entry.runId, watchdog);
     markers.push({
@@ -193,6 +221,10 @@ export async function runWatchdog(deps: RunWatchdogDeps): Promise<WatchdogResult
       reasons,
       orphanedSince,
       staleSince,
+      workspacePath: entry.workspacePath,
+      runLogPath: entry.runLogPath,
+      runnerPid: entry.runnerPid,
+      branch: entry.branch,
     });
 
     if (entry.watchdog === null || !sameReasons(entry.watchdog.reasons, reasons)) {
@@ -240,6 +272,16 @@ function toRunFinished(
     totalCostUsd: metadata.totalCostUsd,
   };
 }
+
+/** `operatorActionReasons` の表示順 (snapshot / dashboard で同じ順序で見せるための SoT)。 */
+const OPERATOR_ACTION_REASON_ORDER: ReadonlyArray<OperatorActionReason> = [
+  'orphaned_only',
+  'stale_only',
+  'open_pr',
+  'retry_disabled',
+  'unsafe_workspace_path',
+  'recover_error',
+];
 
 function computeSince(prev: string | null, active: boolean, now: Date): string | null {
   if (!active) return null;
